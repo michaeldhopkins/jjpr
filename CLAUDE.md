@@ -25,10 +25,10 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 ```
 cargo test               # Unit + jj integration (fast, ~2s)
 cargo clippy --tests      # Must be clean
-STACKER_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
+JJPR_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
 ```
 
-E2E tests use `michaeldhopkins/stacker-testing-environment` (private repo). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
+E2E tests use `michaeldhopkins/jjpr-testing-environment` (private repo). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
 
 ## README
 

@@ -11,7 +11,7 @@ use jjpr::submit::{analyze, execute, plan, resolve};
 use tempfile::TempDir;
 
 const OWNER: &str = "michaeldhopkins";
-const REPO: &str = "stacker-testing-environment";
+const REPO: &str = "jjpr-testing-environment";
 
 /// E2E test context: clones the testing repo, provides helpers, cleans up on Drop.
 struct E2eContext {
@@ -184,12 +184,12 @@ fn list_comments(pr_number: u64) -> Vec<serde_json::Value> {
     serde_json::from_slice(&output.stdout).unwrap_or_default()
 }
 
-// --- E2E Tests (guarded by STACKER_E2E env var) ---
+// --- E2E Tests (guarded by JJPR_E2E env var) ---
 
 #[test]
 fn test_submit_creates_stacked_prs() {
-    if std::env::var("STACKER_E2E").is_err() {
-        println!("Skipping E2E test (set STACKER_E2E=1 to run)");
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
         return;
     }
     if !common::jj_available() {
