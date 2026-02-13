@@ -1,0 +1,6 @@
+max-struct-bools = 2
+max-fn-params-bools = 2
+cognitive-complexity-threshold = 30
+too-many-lines-threshold = 275
+too-many-arguments-threshold = 10
+allow-unwrap-in-tests = true
