@@ -137,6 +137,18 @@ impl Jj for JjRunner {
         ])?;
         Ok(())
     }
+
+    fn get_working_copy_commit_id(&self) -> Result<String> {
+        let output = self.run_jj(&[
+            "log", "-r", "@", "--no-graph", "--limit", "1",
+            "--template", "commit_id",
+        ])?;
+        let id = output.trim().to_string();
+        if id.is_empty() {
+            anyhow::bail!("could not determine working copy commit");
+        }
+        Ok(id)
+    }
 }
 
 #[cfg(test)]

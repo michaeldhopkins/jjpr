@@ -14,10 +14,13 @@ cargo install --path .
 
 ```
 stk                              # Show stack overview
+stk submit                       # Submit stack (inferred from working copy)
 stk submit <bookmark>            # Submit stack up to bookmark
-stk submit <bookmark> --dry-run  # Preview without executing
-stk submit <bookmark> --reviewer alice,bob
-stk submit <bookmark> --remote upstream
+stk submit --dry-run             # Preview without executing
+stk submit --reviewer alice,bob  # Request reviewers on new PRs
+stk submit --remote upstream     # Use a specific git remote
+stk submit --draft               # Create new PRs as drafts
+stk submit --ready               # Mark existing draft PRs as ready
 stk auth test                    # Test GitHub authentication
 stk auth setup                   # Show auth setup instructions
 ```
@@ -33,14 +36,23 @@ Run `stk` with no arguments to see your current stacks:
 
 ### Submitting a stack
 
-`stk submit profile` will:
+`stk submit` (or `stk submit profile`) will:
 
 1. Push all bookmarks in the stack to the remote
 2. Create PRs for bookmarks that don't have one yet
 3. Update PR base branches to maintain the stack structure
-4. Add/update a stack-awareness comment on each PR
+4. Update PR titles and bodies when commit descriptions have changed
+5. Add/update a stack-awareness comment on each PR
 
 PRs are created with the commit description as the title and body.
+
+When no bookmark is specified, stacker infers the target from your working copy's position — it finds which stack overlaps with `trunk()..@` and submits up to the topmost bookmark.
+
+### Draft PRs
+
+Use `--draft` to create new PRs as drafts. Existing PRs are not affected.
+
+Use `--ready` to convert all draft PRs in the stack to ready-for-review. These flags are mutually exclusive.
 
 ## Requirements
 
@@ -64,8 +76,8 @@ STACKER_E2E=1 cargo test  # Include E2E tests (requires gh auth + network)
 
 ### Test tiers
 
-- **Unit tests** (67): Fast, no I/O, use stub implementations of `Jj` and `GitHub` traits
-- **jj integration tests** (4): Real `jj` binary against temp repos, no network
+- **Unit tests** (78): Fast, no I/O, use stub implementations of `Jj` and `GitHub` traits
+- **jj integration tests** (6): Real `jj` binary against temp repos, no network
 - **E2E tests** (1): Real `jj` + real GitHub against [stacker-testing-environment](https://github.com/michaeldhopkins/stacker-testing-environment), guarded by `STACKER_E2E` env var
 
 ## License

@@ -41,7 +41,8 @@ pub fn execute_submission_plan(
             );
             continue;
         }
-        println!("  Creating PR for '{}'...", item.bookmark.name);
+        let label = if plan.draft { " (draft)" } else { "" };
+        println!("  Creating PR{label} for '{}'...", item.bookmark.name);
         let pr = github.create_pr(
             owner,
             repo,
@@ -49,6 +50,7 @@ pub fn execute_submission_plan(
             &item.body,
             &item.bookmark.name,
             &item.base_branch,
+            plan.draft,
         )?;
         println!("    {}", pr.html_url);
 
@@ -76,7 +78,39 @@ pub fn execute_submission_plan(
         github.update_pr_base(owner, repo, item.pr.number, &item.expected_base)?;
     }
 
-    // Phase 4: Update/create stack comments on all PRs
+    // Phase 4: Update stale PR bodies
+    for item in &plan.bookmarks_needing_body_update {
+        if dry_run {
+            println!(
+                "  Would update PR #{} body for '{}'",
+                item.pr_number, item.bookmark.name
+            );
+            continue;
+        }
+        println!(
+            "  Updating PR #{} body for '{}'...",
+            item.pr_number, item.bookmark.name
+        );
+        github.update_pr_body(owner, repo, item.pr_number, &item.new_body)?;
+    }
+
+    // Phase 5: Convert draft PRs to ready
+    for item in &plan.bookmarks_needing_ready {
+        if dry_run {
+            println!(
+                "  Would mark PR #{} as ready for review ('{}')",
+                item.pr_number, item.bookmark.name
+            );
+            continue;
+        }
+        println!(
+            "  Marking PR #{} as ready for review ('{}')...",
+            item.pr_number, item.bookmark.name
+        );
+        github.convert_pr_to_ready(owner, repo, &item.pr_node_id)?;
+    }
+
+    // Phase 6: Update/create stack comments on all PRs
     if !dry_run {
         update_stack_comments(github, plan, &bookmark_to_pr)?;
     }
@@ -175,10 +209,12 @@ mod tests {
             _b: &str,
             head: &str,
             base: &str,
+            draft: bool,
         ) -> Result<PullRequest> {
+            let label = if draft { "create_draft_pr" } else { "create_pr" };
             self.calls
                 .lock().expect("poisoned")
-                .push(format!("create_pr:{head}:{base}"));
+                .push(format!("{label}:{head}:{base}"));
             Ok(PullRequest {
                 number: 42,
                 html_url: "https://github.com/o/r/pull/42".to_string(),
@@ -190,6 +226,8 @@ mod tests {
                 head: PullRequestRef {
                     ref_name: head.to_string(),
                 },
+                draft,
+                node_id: "PR_node123".to_string(),
             })
         }
         fn update_pr_base(&self, _o: &str, _r: &str, n: u64, base: &str) -> Result<()> {
@@ -234,6 +272,18 @@ mod tests {
                 .push(format!("update_comment:{id}"));
             Ok(())
         }
+        fn update_pr_body(&self, _o: &str, _r: &str, n: u64, _body: &str) -> Result<()> {
+            self.calls
+                .lock().expect("poisoned")
+                .push(format!("update_pr_body:#{n}"));
+            Ok(())
+        }
+        fn convert_pr_to_ready(&self, _o: &str, _r: &str, node_id: &str) -> Result<()> {
+            self.calls
+                .lock().expect("poisoned")
+                .push(format!("convert_ready:{node_id}"));
+            Ok(())
+        }
         fn get_authenticated_user(&self) -> Result<String> {
             Ok("testuser".to_string())
         }
@@ -275,6 +325,9 @@ mod tests {
             self.pushes.lock().expect("poisoned").push(format!("{name}:{remote}"));
             Ok(())
         }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc_commit".to_string())
+        }
     }
 
     fn make_bookmark(name: &str) -> Bookmark {
@@ -297,6 +350,8 @@ mod tests {
                 body: "Auth body".to_string(),
             }],
             bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo {
@@ -305,6 +360,7 @@ mod tests {
             },
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
+            draft: false,
         }
     }
 
@@ -402,13 +458,8 @@ mod tests {
                 Ok(None)
             }
             fn create_pr(
-                &self,
-                _o: &str,
-                _r: &str,
-                _t: &str,
-                _b: &str,
-                _h: &str,
-                _ba: &str,
+                &self, _o: &str, _r: &str, _t: &str, _b: &str,
+                _h: &str, _ba: &str, _draft: bool,
             ) -> Result<PullRequest> {
                 unimplemented!()
             }
@@ -416,11 +467,7 @@ mod tests {
                 unimplemented!()
             }
             fn request_reviewers(
-                &self,
-                _o: &str,
-                _r: &str,
-                _n: u64,
-                _revs: &[String],
+                &self, _o: &str, _r: &str, _n: u64, _revs: &[String],
             ) -> Result<()> {
                 unimplemented!()
             }
@@ -450,6 +497,12 @@ mod tests {
                     .push(format!("update_comment:{id}"));
                 Ok(())
             }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                Ok(())
+            }
+            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+                Ok(())
+            }
             fn get_authenticated_user(&self) -> Result<String> {
                 Ok("testuser".to_string())
             }
@@ -464,18 +517,18 @@ mod tests {
             html_url: "https://github.com/o/r/pull/10".to_string(),
             title: "Add auth".to_string(),
             body: None,
-            base: PullRequestRef {
-                ref_name: "main".to_string(),
-            },
-            head: PullRequestRef {
-                ref_name: "auth".to_string(),
-            },
+            base: PullRequestRef { ref_name: "main".to_string() },
+            head: PullRequestRef { ref_name: "auth".to_string() },
+            draft: false,
+            node_id: String::new(),
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo {
@@ -484,6 +537,7 @@ mod tests {
             },
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
+            draft: false,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -503,12 +557,10 @@ mod tests {
             html_url: "https://github.com/o/r/pull/5".to_string(),
             title: "profile".to_string(),
             body: None,
-            base: PullRequestRef {
-                ref_name: "main".to_string(),
-            },
-            head: PullRequestRef {
-                ref_name: "profile".to_string(),
-            },
+            base: PullRequestRef { ref_name: "main".to_string() },
+            head: PullRequestRef { ref_name: "profile".to_string() },
+            draft: false,
+            node_id: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -519,6 +571,8 @@ mod tests {
                 pr: existing_pr.clone(),
                 expected_base: "auth".to_string(),
             }],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
             existing_prs: HashMap::from([("profile".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo {
@@ -527,10 +581,134 @@ mod tests {
             },
             all_bookmarks: vec![make_bookmark("profile")],
             default_branch: "main".to_string(),
+            draft: false,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
 
         assert!(github.calls().iter().any(|c| c == "update_base:#5:auth"));
+    }
+
+    #[test]
+    fn test_execute_updates_pr_body() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
+                bookmark: make_bookmark("auth"),
+                pr_number: 10,
+                new_body: "Updated body".to_string(),
+            }],
+            bookmarks_needing_ready: vec![],
+            existing_prs: HashMap::from([(
+                "auth".to_string(),
+                PullRequest {
+                    number: 10,
+                    html_url: "https://github.com/o/r/pull/10".to_string(),
+                    title: "Old title".to_string(),
+                    body: None,
+                    base: PullRequestRef { ref_name: "main".to_string() },
+                    head: PullRequestRef { ref_name: "auth".to_string() },
+                    draft: false,
+                    node_id: String::new(),
+                },
+            )]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+
+        assert!(
+            github.calls().iter().any(|c| c == "update_pr_body:#10"),
+            "should call update_pr_body"
+        );
+    }
+
+    #[test]
+    fn test_dry_run_skips_body_update() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
+                bookmark: make_bookmark("auth"),
+                pr_number: 10,
+                new_body: "Updated body".to_string(),
+            }],
+            bookmarks_needing_ready: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        execute_submission_plan(&jj, &github, &plan, &[], true).unwrap();
+
+        assert!(
+            !github.calls().iter().any(|c| c.starts_with("update_pr_body")),
+            "dry run should not call update_pr_body"
+        );
+    }
+
+    #[test]
+    fn test_create_pr_as_draft() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let mut plan = make_plan();
+        plan.draft = true;
+
+        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+
+        assert!(
+            github.calls().iter().any(|c| c.starts_with("create_draft_pr:")),
+            "should pass draft=true to create_pr: {:?}",
+            github.calls()
+        );
+    }
+
+    #[test]
+    fn test_ready_converts_draft_prs() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![super::super::plan::BookmarkNeedingReady {
+                bookmark: make_bookmark("auth"),
+                pr_number: 10,
+                pr_node_id: "PR_kwDOxyz".to_string(),
+            }],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+
+        assert!(
+            github.calls().iter().any(|c| c == "convert_ready:PR_kwDOxyz"),
+            "should call convert_pr_to_ready: {:?}",
+            github.calls()
+        );
     }
 }

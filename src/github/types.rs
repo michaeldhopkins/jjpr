@@ -16,6 +16,10 @@ pub struct PullRequest {
     pub body: Option<String>,
     pub base: PullRequestRef,
     pub head: PullRequestRef,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub node_id: String,
 }
 
 /// A ref (base or head) on a pull request.

@@ -25,6 +25,7 @@ pub trait GitHub: Send + Sync {
         body: &str,
         head: &str,
         base: &str,
+        draft: bool,
     ) -> Result<PullRequest>;
 
     fn update_pr_base(
@@ -64,6 +65,21 @@ pub trait GitHub: Send + Sync {
         repo: &str,
         comment_id: u64,
         body: &str,
+    ) -> Result<()>;
+
+    fn update_pr_body(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<()>;
+
+    fn convert_pr_to_ready(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_node_id: &str,
     ) -> Result<()>;
 
     fn get_authenticated_user(&self) -> Result<String>;

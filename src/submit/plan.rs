@@ -23,17 +23,83 @@ pub struct BookmarkNeedingBaseUpdate {
     pub expected_base: String,
 }
 
+/// What needs to happen for a bookmark whose PR body's managed section is stale.
+#[derive(Debug)]
+pub struct BookmarkNeedingBodyUpdate {
+    pub bookmark: Bookmark,
+    pub pr_number: u64,
+    pub new_body: String,
+}
+
+/// What needs to happen for a draft PR that should be marked ready.
+#[derive(Debug)]
+pub struct BookmarkNeedingReady {
+    pub bookmark: Bookmark,
+    pub pr_number: u64,
+    pub pr_node_id: String,
+}
+
 /// The full submission plan.
 #[derive(Debug)]
 pub struct SubmissionPlan {
     pub bookmarks_needing_push: Vec<Bookmark>,
     pub bookmarks_needing_pr: Vec<BookmarkNeedingPr>,
     pub bookmarks_needing_base_update: Vec<BookmarkNeedingBaseUpdate>,
+    pub bookmarks_needing_body_update: Vec<BookmarkNeedingBodyUpdate>,
+    pub bookmarks_needing_ready: Vec<BookmarkNeedingReady>,
     pub existing_prs: HashMap<String, PullRequest>,
     pub remote_name: String,
     pub repo_info: RepoInfo,
     pub all_bookmarks: Vec<Bookmark>,
     pub default_branch: String,
+    pub draft: bool,
+}
+
+const DESCRIPTION_START: &str = "<!-- stacker:description -->";
+const DESCRIPTION_END: &str = "<!-- /stacker:description -->";
+
+/// Derive the PR title and raw body text from the first change in a segment.
+fn derive_pr_title_body(segment: &NarrowedSegment) -> (String, String) {
+    if let Some(change) = segment.changes.first() {
+        let title = change.description_first_line.clone();
+        let body = change
+            .description
+            .strip_prefix(&title)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        (title, body)
+    } else {
+        (segment.bookmark.name.clone(), String::new())
+    }
+}
+
+/// Wrap commit body text in sentinel markers for the initial PR body.
+pub fn wrap_managed_body(commit_body: &str) -> String {
+    format!("{DESCRIPTION_START}\n{commit_body}\n{DESCRIPTION_END}")
+}
+
+/// Extract the managed section from a PR body, if sentinel markers are present.
+pub fn extract_managed_body(pr_body: &str) -> Option<&str> {
+    let start_idx = pr_body.find(DESCRIPTION_START)?;
+    let content_start = start_idx + DESCRIPTION_START.len();
+    let end_idx = pr_body[content_start..].find(DESCRIPTION_END)? + content_start;
+    Some(pr_body[content_start..end_idx].trim())
+}
+
+/// Replace the managed section in a PR body, preserving everything outside the sentinels.
+fn replace_managed_body(pr_body: &str, new_commit_body: &str) -> String {
+    let Some(start_idx) = pr_body.find(DESCRIPTION_START) else {
+        return pr_body.to_string();
+    };
+    let Some(end_tag_start) = pr_body[start_idx..].find(DESCRIPTION_END) else {
+        return pr_body.to_string();
+    };
+    let end_idx = start_idx + end_tag_start + DESCRIPTION_END.len();
+
+    let before = &pr_body[..start_idx];
+    let after = &pr_body[end_idx..];
+    format!("{before}{DESCRIPTION_START}\n{new_commit_body}\n{DESCRIPTION_END}{after}")
 }
 
 /// Build a submission plan by comparing local state with GitHub state.
@@ -43,10 +109,14 @@ pub fn create_submission_plan(
     remote_name: &str,
     repo_info: &RepoInfo,
     default_branch: &str,
+    draft: bool,
+    ready: bool,
 ) -> Result<SubmissionPlan> {
     let mut bookmarks_needing_push = Vec::new();
     let mut bookmarks_needing_pr = Vec::new();
     let mut bookmarks_needing_base_update = Vec::new();
+    let mut bookmarks_needing_body_update = Vec::new();
+    let mut bookmarks_needing_ready = Vec::new();
     let mut existing_prs: HashMap<String, PullRequest> = HashMap::new();
     let mut all_bookmarks = Vec::new();
 
@@ -79,27 +149,40 @@ pub fn create_submission_plan(
                     expected_base: base_branch,
                 });
             }
+
+            // Check if the managed body section is stale.
+            // We never update the title — manual edits in the UI are preserved.
+            let (_, expected_body) = derive_pr_title_body(segment);
+            let current_body = pr.body.as_deref().unwrap_or("");
+            if let Some(current_managed) = extract_managed_body(current_body)
+                && current_managed != expected_body
+            {
+                let new_full_body = replace_managed_body(current_body, &expected_body);
+                bookmarks_needing_body_update.push(BookmarkNeedingBodyUpdate {
+                    bookmark: bookmark.clone(),
+                    pr_number: pr.number,
+                    new_body: new_full_body,
+                });
+            }
+
+            // Check if draft PR needs to be marked ready
+            if ready && pr.draft {
+                bookmarks_needing_ready.push(BookmarkNeedingReady {
+                    bookmark: bookmark.clone(),
+                    pr_number: pr.number,
+                    pr_node_id: pr.node_id.clone(),
+                });
+            }
+
             existing_prs.insert(bookmark.name.clone(), pr);
         } else {
-            // Extract title and body from first change's description
-            let (title, body) = if let Some(change) = segment.changes.first() {
-                let title = change.description_first_line.clone();
-                let body = change
-                    .description
-                    .strip_prefix(&title)
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                (title, body)
-            } else {
-                (bookmark.name.clone(), String::new())
-            };
+            let (title, body) = derive_pr_title_body(segment);
 
             bookmarks_needing_pr.push(BookmarkNeedingPr {
                 bookmark: bookmark.clone(),
                 base_branch,
                 title,
-                body,
+                body: wrap_managed_body(&body),
             });
         }
     }
@@ -108,11 +191,14 @@ pub fn create_submission_plan(
         bookmarks_needing_push,
         bookmarks_needing_pr,
         bookmarks_needing_base_update,
+        bookmarks_needing_body_update,
+        bookmarks_needing_ready,
         existing_prs,
         remote_name: remote_name.to_string(),
         repo_info: repo_info.clone(),
         all_bookmarks,
         default_branch: default_branch.to_string(),
+        draft,
     })
 }
 
@@ -136,13 +222,8 @@ mod tests {
             Ok(self.prs.get(head).cloned())
         }
         fn create_pr(
-            &self,
-            _o: &str,
-            _r: &str,
-            _t: &str,
-            _b: &str,
-            _h: &str,
-            _ba: &str,
+            &self, _o: &str, _r: &str, _t: &str, _b: &str,
+            _h: &str, _ba: &str, _draft: bool,
         ) -> Result<PullRequest> {
             unimplemented!()
         }
@@ -150,11 +231,7 @@ mod tests {
             unimplemented!()
         }
         fn request_reviewers(
-            &self,
-            _o: &str,
-            _r: &str,
-            _n: u64,
-            _revs: &[String],
+            &self, _o: &str, _r: &str, _n: u64, _revs: &[String],
         ) -> Result<()> {
             unimplemented!()
         }
@@ -162,15 +239,17 @@ mod tests {
             unimplemented!()
         }
         fn create_comment(
-            &self,
-            _o: &str,
-            _r: &str,
-            _i: u64,
-            _b: &str,
+            &self, _o: &str, _r: &str, _i: u64, _b: &str,
         ) -> Result<IssueComment> {
             unimplemented!()
         }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn convert_pr_to_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
             unimplemented!()
         }
         fn get_authenticated_user(&self) -> Result<String> {
@@ -207,13 +286,11 @@ mod tests {
             number: 1,
             html_url: "https://github.com/o/r/pull/1".to_string(),
             title: format!("Add {name}"),
-            body: None,
-            base: PullRequestRef {
-                ref_name: base.to_string(),
-            },
-            head: PullRequestRef {
-                ref_name: name.to_string(),
-            },
+            body: Some("Detailed description".to_string()),
+            base: PullRequestRef { ref_name: base.to_string() },
+            head: PullRequestRef { ref_name: name.to_string() },
+            draft: false,
+            node_id: String::new(),
         }
     }
 
@@ -228,14 +305,14 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main").unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
         assert_eq!(plan.bookmarks_needing_push.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
         assert_eq!(plan.bookmarks_needing_pr[0].title, "Add feature");
         assert_eq!(
             plan.bookmarks_needing_pr[0].body,
-            "Detailed description"
+            wrap_managed_body("Detailed description")
         );
     }
 
@@ -250,7 +327,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main").unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
         assert!(plan.bookmarks_needing_push.is_empty());
         assert!(plan.bookmarks_needing_pr.is_empty());
         assert!(plan.bookmarks_needing_base_update.is_empty());
@@ -272,7 +349,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main").unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
         assert_eq!(plan.bookmarks_needing_base_update.len(), 1);
         assert_eq!(
             plan.bookmarks_needing_base_update[0].expected_base,
@@ -295,9 +372,169 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main").unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
         assert_eq!(plan.bookmarks_needing_pr[2].base_branch, "profile");
+    }
+
+    #[test]
+    fn test_plan_stale_title_does_not_trigger_update() {
+        let mut pr = make_pr("feature", "main");
+        pr.title = "Old title".to_string();
+        // Body has sentinels with matching content — no update needed
+        pr.body = Some(wrap_managed_body("Detailed description"));
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        assert!(plan.bookmarks_needing_body_update.is_empty());
+    }
+
+    #[test]
+    fn test_plan_detects_stale_managed_body() {
+        let mut pr = make_pr("feature", "main");
+        pr.body = Some(wrap_managed_body("Old body text"));
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
+        // The new body should contain the updated managed section
+        assert!(extract_managed_body(&plan.bookmarks_needing_body_update[0].new_body)
+            .is_some_and(|m| m == "Detailed description"));
+    }
+
+    #[test]
+    fn test_plan_no_update_when_managed_body_matches() {
+        let mut pr = make_pr("feature", "main");
+        pr.body = Some(wrap_managed_body("Detailed description"));
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        assert!(plan.bookmarks_needing_body_update.is_empty());
+    }
+
+    #[test]
+    fn test_plan_preserves_user_content_around_sentinels() {
+        let mut pr = make_pr("feature", "main");
+        let body_with_extras = format!(
+            "User notes above\n\n{}\n\n## Screenshots\nSome screenshot",
+            wrap_managed_body("Old body")
+        );
+        pr.body = Some(body_with_extras);
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
+        let new_body = &plan.bookmarks_needing_body_update[0].new_body;
+        assert!(new_body.starts_with("User notes above"));
+        assert!(new_body.contains("## Screenshots\nSome screenshot"));
+        assert!(extract_managed_body(new_body).is_some_and(|m| m == "Detailed description"));
+    }
+
+    #[test]
+    fn test_plan_no_update_when_sentinels_removed() {
+        let mut pr = make_pr("feature", "main");
+        // User completely removed the sentinels from the body
+        pr.body = Some("Completely rewritten body with no sentinels".to_string());
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        assert!(plan.bookmarks_needing_body_update.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_managed_body() {
+        let wrapped = wrap_managed_body("hello world");
+        assert_eq!(
+            wrapped,
+            "<!-- stacker:description -->\nhello world\n<!-- /stacker:description -->"
+        );
+    }
+
+    #[test]
+    fn test_extract_managed_body() {
+        let body = "<!-- stacker:description -->\nhello world\n<!-- /stacker:description -->";
+        assert_eq!(extract_managed_body(body), Some("hello world"));
+    }
+
+    #[test]
+    fn test_extract_managed_body_with_surrounding_content() {
+        let body = "User text\n\n<!-- stacker:description -->\nmanaged\n<!-- /stacker:description -->\n\nMore user text";
+        assert_eq!(extract_managed_body(body), Some("managed"));
+    }
+
+    #[test]
+    fn test_extract_managed_body_no_markers() {
+        assert_eq!(extract_managed_body("plain text"), None);
+    }
+
+    #[test]
+    fn test_extract_managed_body_only_start_marker() {
+        let body = "text\n<!-- stacker:description -->\nsome content but no end marker";
+        assert_eq!(extract_managed_body(body), None);
+    }
+
+    #[test]
+    fn test_replace_managed_body_preserves_surroundings() {
+        let body = "Before\n<!-- stacker:description -->\nold\n<!-- /stacker:description -->\nAfter";
+        let result = replace_managed_body(body, "new content");
+        assert_eq!(
+            result,
+            "Before\n<!-- stacker:description -->\nnew content\n<!-- /stacker:description -->\nAfter"
+        );
+        assert_eq!(extract_managed_body(&result), Some("new content"));
+    }
+
+    #[test]
+    fn test_replace_managed_body_no_markers() {
+        let body = "no markers here";
+        assert_eq!(replace_managed_body(body, "new"), body);
+    }
+
+    #[test]
+    fn test_plan_identifies_draft_prs_for_ready() {
+        let mut pr = make_pr("feature", "main");
+        pr.draft = true;
+        pr.node_id = "PR_kwDOxyz".to_string();
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        // With ready=false, no bookmarks_needing_ready
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        assert!(plan.bookmarks_needing_ready.is_empty());
+
+        // With ready=true, draft PR is identified
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true).unwrap();
+        assert_eq!(plan.bookmarks_needing_ready.len(), 1);
+        assert_eq!(plan.bookmarks_needing_ready[0].pr_node_id, "PR_kwDOxyz");
     }
 }

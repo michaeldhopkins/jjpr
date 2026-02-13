@@ -143,6 +143,9 @@ mod tests {
         fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> {
             Ok(())
         }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc_commit".to_string())
+        }
     }
 
     fn entry(

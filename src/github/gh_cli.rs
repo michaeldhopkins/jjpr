@@ -53,15 +53,25 @@ impl GitHub for GhCli {
         body: &str,
         head: &str,
         base: &str,
+        draft: bool,
     ) -> Result<PullRequest> {
         let endpoint = format!("repos/{owner}/{repo}/pulls");
-        let output = self.run_gh(&[
+        let title_arg = format!("title={title}");
+        let head_arg = format!("head={head}");
+        let base_arg = format!("base={base}");
+        let body_arg = format!("body={body}");
+        let mut args = vec![
             "api", &endpoint,
-            "-f", &format!("title={title}"),
-            "-f", &format!("head={head}"),
-            "-f", &format!("base={base}"),
-            "-f", &format!("body={body}"),
-        ])?;
+            "-f", &title_arg,
+            "-f", &head_arg,
+            "-f", &base_arg,
+            "-f", &body_arg,
+        ];
+        if draft {
+            args.push("-F");
+            args.push("draft=true");
+        }
+        let output = self.run_gh(&args)?;
         serde_json::from_str(&output).context("failed to parse created PR response")
     }
 
@@ -144,6 +154,34 @@ impl GitHub for GhCli {
             "-X", "PATCH",
             "-f", &format!("body={body}"),
         ])?;
+        Ok(())
+    }
+
+    fn update_pr_body(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<()> {
+        let endpoint = format!("repos/{owner}/{repo}/pulls/{number}");
+        self.run_gh(&[
+            "api", &endpoint,
+            "-X", "PATCH",
+            "-f", &format!("body={body}"),
+        ])?;
+        Ok(())
+    }
+
+    fn convert_pr_to_ready(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        pr_node_id: &str,
+    ) -> Result<()> {
+        let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }";
+        let id_arg = format!("id={pr_node_id}");
+        self.run_gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &id_arg])?;
         Ok(())
     }
 

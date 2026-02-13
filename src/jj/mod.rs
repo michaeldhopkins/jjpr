@@ -16,4 +16,5 @@ pub trait Jj: Send + Sync {
     fn get_git_remotes(&self) -> Result<Vec<GitRemote>>;
     fn get_default_branch(&self) -> Result<String>;
     fn push_bookmark(&self, name: &str, remote: &str) -> Result<()>;
+    fn get_working_copy_commit_id(&self) -> Result<String>;
 }

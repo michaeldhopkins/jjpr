@@ -2,6 +2,7 @@ mod common;
 
 use stacker::graph::change_graph;
 use stacker::jj::Jj;
+use stacker::submit::analyze;
 
 #[test]
 fn test_real_jj_bookmark_parsing() {
@@ -87,4 +88,45 @@ fn test_real_jj_default_branch() {
     let jj = repo.runner();
     let default = jj.get_default_branch().unwrap();
     assert_eq!(default, "main");
+}
+
+#[test]
+fn test_infer_bookmark_from_working_copy() {
+    if !common::jj_available() {
+        return;
+    }
+
+    let repo = common::JjTestRepo::new();
+    repo.commit_and_bookmark("auth.rs", "// auth\n", "Add authentication", "auth");
+    repo.commit_and_bookmark("profile.rs", "// profile\n", "Add profile", "profile");
+
+    let jj = repo.runner();
+    let graph = change_graph::build_change_graph(&jj).unwrap();
+
+    // Working copy is at @, which is the child of the "profile" commit.
+    // The stack contains auth -> profile, so inference should return "profile".
+    let inferred = analyze::infer_target_bookmark(&graph, &jj).unwrap();
+    assert_eq!(inferred, "profile");
+}
+
+#[test]
+fn test_push_after_squash() {
+    if !common::jj_available() {
+        return;
+    }
+
+    let repo = common::JjTestRepo::new();
+    repo.commit_and_bookmark("feature.rs", "// v1\n", "Add feature", "feature");
+
+    let jj = repo.runner();
+
+    // First push
+    jj.push_bookmark("feature", "origin").unwrap();
+
+    // Amend via squash: write new content in working copy, then squash into feature
+    repo.write_file("feature.rs", "// v2 amended\n");
+    repo.run_jj(&["squash", "--into", "feature"]);
+
+    // Second push should succeed (jj force-pushes diverged bookmarks by design)
+    jj.push_bookmark("feature", "origin").unwrap();
 }

@@ -34,8 +34,8 @@ struct Cli {
 enum Commands {
     /// Submit a bookmark stack as pull requests
     Submit {
-        /// Bookmark to submit (along with all downstack bookmarks)
-        bookmark: String,
+        /// Bookmark to submit (inferred from working copy if omitted)
+        bookmark: Option<String>,
 
         /// Request reviewers (comma-separated usernames)
         #[arg(long, value_delimiter = ',')]
@@ -44,6 +44,14 @@ enum Commands {
         /// Git remote name (must be a GitHub remote)
         #[arg(long)]
         remote: Option<String>,
+
+        /// Create new PRs as drafts
+        #[arg(long)]
+        draft: bool,
+
+        /// Mark existing draft PRs as ready for review
+        #[arg(long, conflicts_with = "draft")]
+        ready: bool,
     },
     /// Manage GitHub authentication
     Auth {
@@ -68,7 +76,22 @@ fn main() -> Result<()> {
             bookmark,
             reviewer,
             remote,
-        }) => cmd_submit(&bookmark, &reviewer, remote.as_deref(), cli.dry_run),
+            draft,
+            ready,
+        }) => {
+            let draft_mode = match (draft, ready) {
+                (true, _) => DraftMode::Draft,
+                (_, true) => DraftMode::Ready,
+                _ => DraftMode::Normal,
+            };
+            cmd_submit(SubmitOptions {
+                bookmark: bookmark.as_deref(),
+                reviewers: &reviewer,
+                preferred_remote: remote.as_deref(),
+                dry_run: cli.dry_run,
+                draft_mode,
+            })
+        }
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Test => {
                 let github = GhCli::new();
@@ -83,23 +106,42 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_submit(
-    bookmark: &str,
-    reviewers: &[String],
-    preferred_remote: Option<&str>,
+enum DraftMode {
+    Normal,
+    Draft,
+    Ready,
+}
+
+struct SubmitOptions<'a> {
+    bookmark: Option<&'a str>,
+    reviewers: &'a [String],
+    preferred_remote: Option<&'a str>,
     dry_run: bool,
-) -> Result<()> {
+    draft_mode: DraftMode,
+}
+
+fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path)?;
     let github = GhCli::new();
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, repo_info) = remote::resolve_remote(&remotes, preferred_remote)?;
+    let (remote_name, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
 
     let default_branch = jj.get_default_branch()?;
 
     let graph = change_graph::build_change_graph(&jj)?;
-    let analysis = analyze::analyze_submission_graph(&graph, bookmark)?;
+
+    let target_bookmark = match opts.bookmark {
+        Some(name) => name.to_string(),
+        None => {
+            let inferred = analyze::infer_target_bookmark(&graph, &jj)?;
+            println!("Submitting stack for '{inferred}' (inferred from working copy)\n");
+            inferred
+        }
+    };
+
+    let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
 
     let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, false)?;
 
@@ -109,10 +151,14 @@ fn cmd_submit(
         &remote_name,
         &repo_info,
         &default_branch,
+        matches!(opts.draft_mode, DraftMode::Draft),
+        matches!(opts.draft_mode, DraftMode::Ready),
     )?;
 
-    println!("Submitting stack for '{bookmark}'...\n");
-    execute::execute_submission_plan(&jj, &github, &submission_plan, reviewers, dry_run)?;
+    if opts.bookmark.is_some() {
+        println!("Submitting stack for '{target_bookmark}'...\n");
+    }
+    execute::execute_submission_plan(&jj, &github, &submission_plan, opts.reviewers, opts.dry_run)?;
     println!("\nDone.");
 
     Ok(())
