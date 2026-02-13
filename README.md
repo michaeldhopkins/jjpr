@@ -71,14 +71,14 @@ Merge commits in a bookmark's ancestry cause that bookmark to be excluded (jjpr 
 ```
 cargo test               # Unit tests + jj integration tests
 cargo clippy --tests      # Lint everything
-STACKER_E2E=1 cargo test  # Include E2E tests (requires gh auth + network)
+JJPR_E2E=1 cargo test  # Include E2E tests (requires gh auth + network)
 ```
 
 ### Test tiers
 
 - **Unit tests** (88): Fast, no I/O, use stub implementations of `Jj` and `GitHub` traits
 - **jj integration tests** (6): Real `jj` binary against temp repos, no network
-- **E2E tests** (1): Real `jj` + real GitHub against [stacker-testing-environment](https://github.com/michaeldhopkins/stacker-testing-environment), guarded by `STACKER_E2E` env var
+- **E2E tests** (1): Real `jj` + real GitHub against [jjpr-testing-environment](https://github.com/michaeldhopkins/jjpr-testing-environment), guarded by `JJPR_E2E` env var
 
 ## License
 
