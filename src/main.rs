@@ -11,14 +11,14 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use stacker::github::remote;
-use stacker::github::GhCli;
-use stacker::graph::change_graph;
-use stacker::jj::{Jj, JjRunner};
-use stacker::submit::{analyze, execute, plan, resolve};
+use jjpr::github::remote;
+use jjpr::github::GhCli;
+use jjpr::graph::change_graph;
+use jjpr::jj::{Jj, JjRunner};
+use jjpr::submit::{analyze, execute, plan, resolve};
 
 #[derive(Parser)]
-#[command(name = "stacker")]
+#[command(name = "jjpr")]
 #[command(about = "Manage stacked pull requests in Jujutsu repositories")]
 #[command(version)]
 struct Cli {
@@ -95,10 +95,10 @@ fn main() -> Result<()> {
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Test => {
                 let github = GhCli::new();
-                stacker::auth::test_auth(&github)
+                jjpr::auth::test_auth(&github)
             }
             AuthCommands::Setup => {
-                stacker::auth::print_auth_help();
+                jjpr::auth::print_auth_help();
                 Ok(())
             }
         },

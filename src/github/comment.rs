@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::types::IssueComment;
 
 const SENTINEL: &str = "<!-- stacker:stack-info -->";
-const FOOTER: &str = "*Created with [stacker](https://github.com/michaeldhopkins/stacker)*";
+const FOOTER: &str = "*Created with [jjpr](https://github.com/michaeldhopkins/jjpr)*";
 // Also detect jj-stack comments for migration
 const LEGACY_FOOTER: &str = "*Created with [jj-stack]";
 

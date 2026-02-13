@@ -1,8 +1,8 @@
 mod common;
 
-use stacker::graph::change_graph;
-use stacker::jj::Jj;
-use stacker::submit::analyze;
+use jjpr::graph::change_graph;
+use jjpr::jj::Jj;
+use jjpr::submit::analyze;
 
 #[test]
 fn test_real_jj_bookmark_parsing() {

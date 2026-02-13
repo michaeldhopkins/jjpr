@@ -46,7 +46,7 @@ pub fn analyze_submission_graph(
     }
 
     anyhow::bail!(
-        "bookmark '{}' not found in any stack. Run `stk` to see your stacks.",
+        "bookmark '{}' not found in any stack. Run `jjpr` to see your stacks.",
         target_bookmark
     )
 }

@@ -1,8 +1,8 @@
-# Stacker
+# jjpr
 
 ## Project overview
 
-Rust CLI tool (`stk`) for managing stacked pull requests in Jujutsu (jj) repositories. Shells out to `jj` and `gh` for all external operations — no async runtime, no HTTP client libraries.
+Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) repositories. Shells out to `jj` and `gh` for all external operations — no async runtime, no HTTP client libraries.
 
 ## Architecture
 

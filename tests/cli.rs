@@ -1,13 +1,13 @@
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 
-fn stk() -> assert_cmd::Command {
-    cargo_bin_cmd!("stk")
+fn jjpr() -> assert_cmd::Command {
+    cargo_bin_cmd!("jjpr")
 }
 
 #[test]
 fn test_help_shows_usage() {
-    stk()
+    jjpr()
         .arg("--help")
         .assert()
         .success()
@@ -18,7 +18,7 @@ fn test_help_shows_usage() {
 
 #[test]
 fn test_submit_help() {
-    stk()
+    jjpr()
         .args(["submit", "--help"])
         .assert()
         .success()
@@ -32,7 +32,7 @@ fn test_submit_help() {
 
 #[test]
 fn test_auth_help() {
-    stk()
+    jjpr()
         .args(["auth", "--help"])
         .assert()
         .success()
@@ -43,7 +43,7 @@ fn test_auth_help() {
 
 #[test]
 fn test_auth_test_help() {
-    stk()
+    jjpr()
         .args(["auth", "test", "--help"])
         .assert()
         .success()
@@ -52,7 +52,7 @@ fn test_auth_test_help() {
 
 #[test]
 fn test_auth_setup_help() {
-    stk()
+    jjpr()
         .args(["auth", "setup", "--help"])
         .assert()
         .success()
@@ -61,7 +61,7 @@ fn test_auth_setup_help() {
 
 #[test]
 fn test_draft_and_ready_conflict() {
-    stk()
+    jjpr()
         .args(["submit", "--draft", "--ready"])
         .assert()
         .failure()
@@ -70,9 +70,9 @@ fn test_draft_and_ready_conflict() {
 
 #[test]
 fn test_version() {
-    stk()
+    jjpr()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("stacker"));
+        .stdout(predicate::str::contains("jjpr"));
 }

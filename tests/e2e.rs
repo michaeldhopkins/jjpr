@@ -3,10 +3,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use stacker::github::GhCli;
-use stacker::github::types::RepoInfo;
-use stacker::graph::change_graph;
-use stacker::submit::{analyze, execute, plan, resolve};
+use jjpr::github::GhCli;
+use jjpr::github::types::RepoInfo;
+use jjpr::graph::change_graph;
+use jjpr::submit::{analyze, execute, plan, resolve};
 
 use tempfile::TempDir;
 
@@ -69,8 +69,8 @@ impl E2eContext {
         run_jj(&self.repo_path, &["bookmark", "set", name, "-r", "@-"]);
     }
 
-    fn runner(&self) -> stacker::jj::JjRunner {
-        stacker::jj::JjRunner::new(self.repo_path.clone()).expect("create JjRunner")
+    fn runner(&self) -> jjpr::jj::JjRunner {
+        jjpr::jj::JjRunner::new(self.repo_path.clone()).expect("create JjRunner")
     }
 }
 

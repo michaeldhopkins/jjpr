@@ -114,8 +114,8 @@ impl JjTestRepo {
         self.set_bookmark(bookmark);
     }
 
-    pub fn runner(&self) -> stacker::jj::JjRunner {
-        stacker::jj::JjRunner::new(self.path().to_path_buf()).expect("create JjRunner")
+    pub fn runner(&self) -> jjpr::jj::JjRunner {
+        jjpr::jj::JjRunner::new(self.path().to_path_buf()).expect("create JjRunner")
     }
 
     pub fn path(&self) -> &Path {

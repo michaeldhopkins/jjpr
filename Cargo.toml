@@ -1,5 +1,5 @@
 [package]
-name = "stacker"
+name = "jjpr"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
@@ -7,7 +7,7 @@ description = "Manage stacked pull requests in Jujutsu repositories"
 license = "MIT"
 
 [[bin]]
-name = "stk"
+name = "jjpr"
 path = "src/main.rs"
 
 [dependencies]
