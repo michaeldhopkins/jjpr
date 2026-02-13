@@ -205,7 +205,7 @@ mod tests {
     fn make_pr(name: &str, base: &str) -> PullRequest {
         PullRequest {
             number: 1,
-            html_url: format!("https://github.com/o/r/pull/1"),
+            html_url: "https://github.com/o/r/pull/1".to_string(),
             title: format!("Add {name}"),
             body: None,
             base: PullRequestRef {

@@ -181,7 +181,7 @@ mod tests {
                 .push(format!("create_pr:{head}:{base}"));
             Ok(PullRequest {
                 number: 42,
-                html_url: format!("https://github.com/o/r/pull/42"),
+                html_url: "https://github.com/o/r/pull/42".to_string(),
                 title: "test".to_string(),
                 body: None,
                 base: PullRequestRef {

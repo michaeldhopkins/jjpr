@@ -23,7 +23,7 @@ pub const LOG_TEMPLATE: &str = concat!(
     r#"'{"commitId":' ++ commit_id.short().escape_json()"#,
     r#" ++ ',"changeId":' ++ change_id.short().escape_json()"#,
     r#" ++ ',"authorName":' ++ author.name().escape_json()"#,
-    r#" ++ ',"authorEmail":' ++ author.email().escape_json()"#,
+    r#" ++ ',"authorEmail":' ++ stringify(author.email()).escape_json()"#,
     r#" ++ ',"description":' ++ description.escape_json()"#,
     r#" ++ ',"descriptionFirstLine":' ++ description.first_line().escape_json()"#,
     r#" ++ ',"parents":[' ++ parents.map(|p| p.commit_id().short().escape_json()).join(',') ++ ']'"#,
