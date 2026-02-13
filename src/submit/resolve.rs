@@ -18,7 +18,12 @@ pub fn resolve_bookmark_selections(
             } else if interactive {
                 select_bookmark_interactive(&segment.bookmarks)?
             } else {
-                segment.bookmarks[0].clone()
+                let chosen = &segment.bookmarks[0];
+                eprintln!(
+                    "  Using bookmark '{}' (multiple bookmarks on this change)",
+                    chosen.name
+                );
+                chosen.clone()
             };
 
             Ok(NarrowedSegment {

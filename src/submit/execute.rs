@@ -19,6 +19,15 @@ pub fn execute_submission_plan(
 ) -> Result<()> {
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
+    let mut completed_actions: Vec<String> = Vec::new();
+
+    // Report merged bookmarks
+    for item in &plan.bookmarks_already_merged {
+        println!(
+            "  Skipping '{}' — PR #{} already merged",
+            item.bookmark.name, item.pr_number
+        );
+    }
 
     // Phase 1: Push bookmarks
     for bookmark in &plan.bookmarks_needing_push {
@@ -27,7 +36,16 @@ pub fn execute_submission_plan(
             continue;
         }
         println!("  Pushing '{}'...", bookmark.name);
-        jj.push_bookmark(&bookmark.name, &plan.remote_name)?;
+        if let Err(e) = jj.push_bookmark(&bookmark.name, &plan.remote_name) {
+            report_partial_failure(&completed_actions);
+            return Err(e);
+        }
+        completed_actions.push(format!("Pushed '{}'", bookmark.name));
+
+        // Show PR URL if this bookmark has an existing PR
+        if let Some(pr) = plan.existing_prs.get(&bookmark.name) {
+            println!("    {}", pr.html_url);
+        }
     }
 
     // Phase 2: Create new PRs
@@ -43,7 +61,7 @@ pub fn execute_submission_plan(
         }
         let label = if plan.draft { " (draft)" } else { "" };
         println!("  Creating PR{label} for '{}'...", item.bookmark.name);
-        let pr = github.create_pr(
+        let pr = match github.create_pr(
             owner,
             repo,
             &item.title,
@@ -51,12 +69,22 @@ pub fn execute_submission_plan(
             &item.bookmark.name,
             &item.base_branch,
             plan.draft,
-        )?;
+        ) {
+            Ok(pr) => pr,
+            Err(e) => {
+                report_partial_failure(&completed_actions);
+                return Err(e);
+            }
+        };
         println!("    {}", pr.html_url);
+        completed_actions.push(format!("Created PR #{} for '{}'", pr.number, item.bookmark.name));
 
         // Request reviewers on new PRs
-        if !reviewers.is_empty() {
-            github.request_reviewers(owner, repo, pr.number, reviewers)?;
+        if !reviewers.is_empty()
+            && let Err(e) = github.request_reviewers(owner, repo, pr.number, reviewers)
+        {
+            report_partial_failure(&completed_actions);
+            return Err(e);
         }
 
         bookmark_to_pr.insert(item.bookmark.name.clone(), pr);
@@ -75,7 +103,11 @@ pub fn execute_submission_plan(
             "  Updating PR #{} base to '{}'...",
             item.pr.number, item.expected_base
         );
-        github.update_pr_base(owner, repo, item.pr.number, &item.expected_base)?;
+        if let Err(e) = github.update_pr_base(owner, repo, item.pr.number, &item.expected_base) {
+            report_partial_failure(&completed_actions);
+            return Err(e);
+        }
+        completed_actions.push(format!("Updated PR #{} base to '{}'", item.pr.number, item.expected_base));
     }
 
     // Phase 4: Update stale PR bodies
@@ -91,7 +123,11 @@ pub fn execute_submission_plan(
             "  Updating PR #{} body for '{}'...",
             item.pr_number, item.bookmark.name
         );
-        github.update_pr_body(owner, repo, item.pr_number, &item.new_body)?;
+        if let Err(e) = github.update_pr_body(owner, repo, item.pr_number, &item.new_body) {
+            report_partial_failure(&completed_actions);
+            return Err(e);
+        }
+        completed_actions.push(format!("Updated PR #{} body", item.pr_number));
     }
 
     // Phase 5: Convert draft PRs to ready
@@ -107,15 +143,60 @@ pub fn execute_submission_plan(
             "  Marking PR #{} as ready for review ('{}')...",
             item.pr_number, item.bookmark.name
         );
-        github.convert_pr_to_ready(owner, repo, &item.pr_node_id)?;
+        if let Err(e) = github.convert_pr_to_ready(owner, repo, &item.pr_node_id) {
+            report_partial_failure(&completed_actions);
+            return Err(e);
+        }
+        completed_actions.push(format!("Marked PR #{} as ready", item.pr_number));
     }
 
-    // Phase 6: Update/create stack comments on all PRs
-    if !dry_run {
-        update_stack_comments(github, plan, &bookmark_to_pr)?;
+    // Phase 6: Request reviewers on existing PRs
+    for (bookmark, pr_number) in &plan.bookmarks_needing_reviewers {
+        if dry_run {
+            println!(
+                "  Would request reviewers on PR #{} ('{}')",
+                pr_number, bookmark.name
+            );
+            continue;
+        }
+        println!(
+            "  Requesting reviewers on PR #{}...",
+            pr_number
+        );
+        if let Err(e) = github.request_reviewers(owner, repo, *pr_number, reviewers) {
+            report_partial_failure(&completed_actions);
+            return Err(e);
+        }
+        completed_actions.push(format!("Requested reviewers on PR #{}", pr_number));
+    }
+
+    // Phase 7: Update/create stack comments on all PRs
+    if !dry_run
+        && let Err(e) = update_stack_comments(github, plan, &bookmark_to_pr)
+    {
+        report_partial_failure(&completed_actions);
+        return Err(e);
+    }
+
+    // Phase 8: Report title drift
+    for drift in &plan.bookmarks_with_title_drift {
+        println!(
+            "  Note: PR #{} title differs from commit ('{}' vs '{}')",
+            drift.pr_number, drift.current_title, drift.expected_title
+        );
     }
 
     Ok(())
+}
+
+fn report_partial_failure(completed: &[String]) {
+    if !completed.is_empty() {
+        eprintln!("\nThe following actions completed before the error:");
+        for action in completed {
+            eprintln!("  - {action}");
+        }
+        eprintln!();
+    }
 }
 
 /// Visible for testing only — not part of the public API.
@@ -228,6 +309,7 @@ mod tests {
                 },
                 draft,
                 node_id: "PR_node123".to_string(),
+                merged_at: None,
             })
         }
         fn update_pr_base(&self, _o: &str, _r: &str, n: u64, base: &str) -> Result<()> {
@@ -286,6 +368,11 @@ mod tests {
         }
         fn get_authenticated_user(&self) -> Result<String> {
             Ok("testuser".to_string())
+        }
+        fn find_merged_pr(
+            &self, _o: &str, _r: &str, _h: &str,
+        ) -> Result<Option<PullRequest>> {
+            Ok(None)
         }
     }
 
@@ -352,6 +439,9 @@ mod tests {
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
             bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo {
@@ -506,6 +596,11 @@ mod tests {
             fn get_authenticated_user(&self) -> Result<String> {
                 Ok("testuser".to_string())
             }
+            fn find_merged_pr(
+                &self, _o: &str, _r: &str, _h: &str,
+            ) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
         }
 
         let github = GitHubWithExistingComment {
@@ -521,6 +616,7 @@ mod tests {
             head: PullRequestRef { ref_name: "auth".to_string() },
             draft: false,
             node_id: String::new(),
+            merged_at: None,
         };
 
         let plan = SubmissionPlan {
@@ -529,6 +625,9 @@ mod tests {
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
             bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo {
@@ -561,6 +660,7 @@ mod tests {
             head: PullRequestRef { ref_name: "profile".to_string() },
             draft: false,
             node_id: String::new(),
+            merged_at: None,
         };
 
         let plan = SubmissionPlan {
@@ -573,6 +673,9 @@ mod tests {
             }],
             bookmarks_needing_body_update: vec![],
             bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("profile".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo {
@@ -604,6 +707,9 @@ mod tests {
                 new_body: "Updated body".to_string(),
             }],
             bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([(
                 "auth".to_string(),
                 PullRequest {
@@ -615,6 +721,7 @@ mod tests {
                     head: PullRequestRef { ref_name: "auth".to_string() },
                     draft: false,
                     node_id: String::new(),
+                    merged_at: None,
                 },
             )]),
             remote_name: "origin".to_string(),
@@ -647,6 +754,9 @@ mod tests {
                 new_body: "Updated body".to_string(),
             }],
             bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
@@ -695,6 +805,9 @@ mod tests {
                 pr_number: 10,
                 pr_node_id: "PR_kwDOxyz".to_string(),
             }],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
@@ -708,6 +821,111 @@ mod tests {
         assert!(
             github.calls().iter().any(|c| c == "convert_ready:PR_kwDOxyz"),
             "should call convert_pr_to_ready: {:?}",
+            github.calls()
+        );
+    }
+
+    #[test]
+    fn test_requests_reviewers_on_existing_prs() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        let reviewers = vec!["alice".to_string()];
+        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+
+        assert!(
+            github.calls().iter().any(|c| c == "request_reviewers:#10:alice"),
+            "should request reviewers on existing PRs: {:?}",
+            github.calls()
+        );
+    }
+
+    #[test]
+    fn test_partial_failure_reports_completed_actions() {
+        struct FailingJj;
+        impl Jj for FailingJj {
+            fn git_fetch(&self) -> Result<()> { Ok(()) }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+            fn get_branch_changes(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn push_bookmark(&self, name: &str, _remote: &str) -> Result<()> {
+                if name == "profile" {
+                    anyhow::bail!("push failed for profile")
+                }
+                Ok(())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+        }
+
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![make_bookmark("auth"), make_bookmark("profile")],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth"), make_bookmark("profile")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        let err = execute_submission_plan(&FailingJj, &github, &plan, &[], false).unwrap_err();
+        assert!(err.to_string().contains("push failed for profile"));
+    }
+
+    #[test]
+    fn test_dry_run_skips_reviewer_requests_on_existing() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        let reviewers = vec!["alice".to_string()];
+        execute_submission_plan(&jj, &github, &plan, &reviewers, true).unwrap();
+
+        assert!(
+            github.calls().is_empty(),
+            "dry run should not call any GitHub API: {:?}",
             github.calls()
         );
     }

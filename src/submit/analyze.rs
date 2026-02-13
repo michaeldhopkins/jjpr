@@ -19,6 +19,14 @@ pub fn analyze_submission_graph(
     graph: &ChangeGraph,
     target_bookmark: &str,
 ) -> Result<SubmissionAnalysis> {
+    if graph.excluded_bookmarks.contains(target_bookmark) {
+        anyhow::bail!(
+            "bookmark '{}' was excluded because it has merge commits in its ancestry. \
+             Rebase to a linear history to submit.",
+            target_bookmark
+        );
+    }
+
     let target_change_id = graph
         .bookmark_to_change_id
         .get(target_bookmark)
@@ -77,7 +85,7 @@ pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<String>
     anyhow::bail!(
         "no bookmark found in the working copy's ancestry. \
          Set a bookmark with `jj bookmark set <name>` or specify one: \
-         `stk submit <bookmark>`"
+         `jjpr submit <bookmark>`"
     )
 }
 
@@ -131,6 +139,7 @@ mod tests {
             stacks: vec![BranchStack {
                 segments: segments.clone(),
             }],
+            excluded_bookmarks: HashSet::new(),
             excluded_bookmark_count: 0,
         }
     }
@@ -178,6 +187,16 @@ mod tests {
         let graph = make_graph(vec![make_segment("feature", "ch1")]);
         let err = analyze_submission_graph(&graph, "nonexistent").unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_analyze_excluded_bookmark_gives_specific_error() {
+        let mut graph = make_graph(vec![make_segment("feature", "ch1")]);
+        graph.excluded_bookmarks.insert("broken".to_string());
+        let err = analyze_submission_graph(&graph, "broken").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("merge commits"), "should mention merge commits: {msg}");
+        assert!(msg.contains("broken"), "should mention bookmark name: {msg}");
     }
 
     struct StubJj {
@@ -271,6 +290,7 @@ mod tests {
             stack_leafs: HashSet::new(),
             stack_roots: HashSet::new(),
             stacks: vec![],
+            excluded_bookmarks: HashSet::new(),
             excluded_bookmark_count: 0,
         };
         let jj = StubJj {

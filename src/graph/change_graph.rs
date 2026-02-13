@@ -19,6 +19,7 @@ pub struct ChangeGraph {
     pub stack_leafs: HashSet<String>,
     pub stack_roots: HashSet<String>,
     pub stacks: Vec<BranchStack>,
+    pub excluded_bookmarks: HashSet<String>,
     pub excluded_bookmark_count: usize,
 }
 
@@ -32,6 +33,7 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
     let mut change_id_to_segment: HashMap<String, Vec<LogEntry>> = HashMap::new();
     let mut tainted: HashSet<String> = HashSet::new();
     let mut fully_collected: HashSet<String> = HashSet::new();
+    let mut excluded_names: HashSet<String> = HashSet::new();
     let mut excluded_count = 0;
 
     for bookmark in &bookmarks {
@@ -42,6 +44,7 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
     // Traverse each bookmark toward trunk, discovering segments
     for bookmark in &bookmarks {
         if tainted.contains(&bookmark.change_id) {
+            excluded_names.insert(bookmark.name.clone());
             excluded_count += 1;
             continue;
         }
@@ -56,6 +59,7 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
 
         if result.has_merge {
             tainted.extend(result.seen_change_ids);
+            excluded_names.insert(bookmark.name.clone());
             excluded_count += 1;
             continue;
         }
@@ -136,6 +140,7 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
         stack_leafs,
         stack_roots,
         stacks,
+        excluded_bookmarks: excluded_names,
         excluded_bookmark_count: excluded_count,
     })
 }

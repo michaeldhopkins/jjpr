@@ -39,6 +39,22 @@ pub struct BookmarkNeedingReady {
     pub pr_node_id: String,
 }
 
+/// A bookmark whose PR title doesn't match the current commit description.
+#[derive(Debug)]
+pub struct TitleDrift {
+    pub bookmark: Bookmark,
+    pub pr_number: u64,
+    pub current_title: String,
+    pub expected_title: String,
+}
+
+/// A bookmark whose PR was already merged/closed on GitHub.
+#[derive(Debug)]
+pub struct MergedBookmark {
+    pub bookmark: Bookmark,
+    pub pr_number: u64,
+}
+
 /// The full submission plan.
 #[derive(Debug)]
 pub struct SubmissionPlan {
@@ -47,6 +63,9 @@ pub struct SubmissionPlan {
     pub bookmarks_needing_base_update: Vec<BookmarkNeedingBaseUpdate>,
     pub bookmarks_needing_body_update: Vec<BookmarkNeedingBodyUpdate>,
     pub bookmarks_needing_ready: Vec<BookmarkNeedingReady>,
+    pub bookmarks_needing_reviewers: Vec<(Bookmark, u64)>,
+    pub bookmarks_with_title_drift: Vec<TitleDrift>,
+    pub bookmarks_already_merged: Vec<MergedBookmark>,
     pub existing_prs: HashMap<String, PullRequest>,
     pub remote_name: String,
     pub repo_info: RepoInfo,
@@ -111,12 +130,16 @@ pub fn create_submission_plan(
     default_branch: &str,
     draft: bool,
     ready: bool,
+    reviewers: &[String],
 ) -> Result<SubmissionPlan> {
     let mut bookmarks_needing_push = Vec::new();
     let mut bookmarks_needing_pr = Vec::new();
     let mut bookmarks_needing_base_update = Vec::new();
     let mut bookmarks_needing_body_update = Vec::new();
     let mut bookmarks_needing_ready = Vec::new();
+    let mut bookmarks_needing_reviewers = Vec::new();
+    let mut bookmarks_with_title_drift = Vec::new();
+    let mut bookmarks_already_merged = Vec::new();
     let mut existing_prs: HashMap<String, PullRequest> = HashMap::new();
     let mut all_bookmarks = Vec::new();
 
@@ -131,14 +154,27 @@ pub fn create_submission_plan(
             segments[i - 1].bookmark.name.clone()
         };
 
-        // Check if bookmark needs push
-        if !bookmark.is_synced {
-            bookmarks_needing_push.push(bookmark.clone());
-        }
-
         // Check if PR exists
         let existing_pr =
             github.find_open_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)?;
+
+        if existing_pr.is_none() {
+            // No open PR — check if it was already merged before doing anything else
+            if let Ok(Some(merged_pr)) =
+                github.find_merged_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)
+            {
+                bookmarks_already_merged.push(MergedBookmark {
+                    bookmark: bookmark.clone(),
+                    pr_number: merged_pr.number,
+                });
+                continue;
+            }
+        }
+
+        // Check if bookmark needs push (after merged check to avoid recreating deleted branches)
+        if !bookmark.is_synced {
+            bookmarks_needing_push.push(bookmark.clone());
+        }
 
         if let Some(pr) = existing_pr {
             // Check if base needs updating
@@ -150,9 +186,8 @@ pub fn create_submission_plan(
                 });
             }
 
-            // Check if the managed body section is stale.
-            // We never update the title — manual edits in the UI are preserved.
-            let (_, expected_body) = derive_pr_title_body(segment);
+            // Check if the managed body section is stale
+            let (expected_title, expected_body) = derive_pr_title_body(segment);
             let current_body = pr.body.as_deref().unwrap_or("");
             if let Some(current_managed) = extract_managed_body(current_body)
                 && current_managed != expected_body
@@ -165,6 +200,16 @@ pub fn create_submission_plan(
                 });
             }
 
+            // Check for title drift
+            if pr.title != expected_title {
+                bookmarks_with_title_drift.push(TitleDrift {
+                    bookmark: bookmark.clone(),
+                    pr_number: pr.number,
+                    current_title: pr.title.clone(),
+                    expected_title,
+                });
+            }
+
             // Check if draft PR needs to be marked ready
             if ready && pr.draft {
                 bookmarks_needing_ready.push(BookmarkNeedingReady {
@@ -172,6 +217,11 @@ pub fn create_submission_plan(
                     pr_number: pr.number,
                     pr_node_id: pr.node_id.clone(),
                 });
+            }
+
+            // Track reviewers needed on existing PRs
+            if !reviewers.is_empty() {
+                bookmarks_needing_reviewers.push((bookmark.clone(), pr.number));
             }
 
             existing_prs.insert(bookmark.name.clone(), pr);
@@ -193,6 +243,9 @@ pub fn create_submission_plan(
         bookmarks_needing_base_update,
         bookmarks_needing_body_update,
         bookmarks_needing_ready,
+        bookmarks_needing_reviewers,
+        bookmarks_with_title_drift,
+        bookmarks_already_merged,
         existing_prs,
         remote_name: remote_name.to_string(),
         repo_info: repo_info.clone(),
@@ -255,6 +308,11 @@ mod tests {
         fn get_authenticated_user(&self) -> Result<String> {
             Ok("testuser".to_string())
         }
+        fn find_merged_pr(
+            &self, _o: &str, _r: &str, _h: &str,
+        ) -> Result<Option<PullRequest>> {
+            Ok(None)
+        }
     }
 
     fn make_segment(name: &str, synced: bool) -> NarrowedSegment {
@@ -291,6 +349,7 @@ mod tests {
             head: PullRequestRef { ref_name: name.to_string() },
             draft: false,
             node_id: String::new(),
+            merged_at: None,
         }
     }
 
@@ -305,7 +364,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_push.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
@@ -327,7 +386,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert!(plan.bookmarks_needing_push.is_empty());
         assert!(plan.bookmarks_needing_pr.is_empty());
         assert!(plan.bookmarks_needing_base_update.is_empty());
@@ -349,7 +408,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_base_update.len(), 1);
         assert_eq!(
             plan.bookmarks_needing_base_update[0].expected_base,
@@ -372,14 +431,14 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
         assert_eq!(plan.bookmarks_needing_pr[2].base_branch, "profile");
     }
 
     #[test]
-    fn test_plan_stale_title_does_not_trigger_update() {
+    fn test_plan_stale_title_does_not_trigger_body_update() {
         let mut pr = make_pr("feature", "main");
         pr.title = "Old title".to_string();
         // Body has sentinels with matching content — no update needed
@@ -391,8 +450,39 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
+    }
+
+    #[test]
+    fn test_plan_detects_title_drift() {
+        let mut pr = make_pr("feature", "main");
+        pr.title = "Old title".to_string();
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        assert_eq!(plan.bookmarks_with_title_drift.len(), 1);
+        assert_eq!(plan.bookmarks_with_title_drift[0].current_title, "Old title");
+        assert_eq!(plan.bookmarks_with_title_drift[0].expected_title, "Add feature");
+    }
+
+    #[test]
+    fn test_plan_tracks_reviewers_for_existing_prs() {
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), make_pr("feature", "main"))]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let reviewers = ["alice".to_string()];
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &reviewers).unwrap();
+        assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
+        assert_eq!(plan.bookmarks_needing_reviewers[0].1, 1); // pr number
     }
 
     #[test]
@@ -406,7 +496,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         // The new body should contain the updated managed section
         assert!(extract_managed_body(&plan.bookmarks_needing_body_update[0].new_body)
@@ -424,7 +514,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -443,7 +533,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         let new_body = &plan.bookmarks_needing_body_update[0].new_body;
         assert!(new_body.starts_with("User notes above"));
@@ -463,7 +553,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -517,6 +607,171 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_skips_merged_prs() {
+        struct GitHubWithMergedPr;
+
+        impl GitHub for GitHubWithMergedPr {
+            fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+                if head == "auth" {
+                    Ok(Some(PullRequest {
+                        number: 99,
+                        html_url: "https://github.com/o/r/pull/99".to_string(),
+                        title: "Add auth".to_string(),
+                        body: None,
+                        base: PullRequestRef { ref_name: "main".to_string() },
+                        head: PullRequestRef { ref_name: "auth".to_string() },
+                        draft: false,
+                        node_id: String::new(),
+                        merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+        }
+
+        let segments = vec![
+            make_segment("auth", true),
+            make_segment("profile", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &GitHubWithMergedPr, &segments, "origin", &repo, "main", false, false, &[],
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_already_merged.len(), 1);
+        assert_eq!(plan.bookmarks_already_merged[0].bookmark.name, "auth");
+        assert_eq!(plan.bookmarks_already_merged[0].pr_number, 99);
+        // profile should still get a new PR
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1);
+        assert_eq!(plan.bookmarks_needing_pr[0].bookmark.name, "profile");
+    }
+
+    #[test]
+    fn test_plan_does_not_skip_closed_but_unmerged_prs() {
+        struct GitHubWithClosedPr;
+
+        impl GitHub for GitHubWithClosedPr {
+            fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _head: &str) -> Result<Option<PullRequest>> {
+                // Closed but not merged — merged_at is None, so find_merged_pr returns None
+                Ok(None)
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+        }
+
+        let segments = vec![make_segment("feature", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &GitHubWithClosedPr, &segments, "origin", &repo, "main", false, false, &[],
+        ).unwrap();
+
+        // A closed-but-not-merged PR should NOT be treated as merged
+        assert!(plan.bookmarks_already_merged.is_empty());
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1, "should create a new PR");
+    }
+
+    #[test]
+    fn test_plan_merged_bookmark_not_pushed() {
+        struct GitHubWithMergedPr;
+
+        impl GitHub for GitHubWithMergedPr {
+            fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+                if head == "auth" {
+                    Ok(Some(PullRequest {
+                        number: 99,
+                        html_url: "https://github.com/o/r/pull/99".to_string(),
+                        title: "Add auth".to_string(),
+                        body: None,
+                        base: PullRequestRef { ref_name: "main".to_string() },
+                        head: PullRequestRef { ref_name: "auth".to_string() },
+                        draft: false,
+                        node_id: String::new(),
+                        merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+        }
+
+        // auth is not synced but already merged — should NOT be pushed
+        let segments = vec![make_segment("auth", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &GitHubWithMergedPr, &segments, "origin", &repo, "main", false, false, &[],
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_already_merged.len(), 1);
+        assert!(
+            plan.bookmarks_needing_push.is_empty(),
+            "merged bookmarks should not be pushed: {:?}",
+            plan.bookmarks_needing_push.iter().map(|b| &b.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_plan_no_title_drift_when_title_matches() {
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), make_pr("feature", "main"))]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        assert!(plan.bookmarks_with_title_drift.is_empty());
+    }
+
+    #[test]
+    fn test_plan_no_reviewers_tracked_when_empty() {
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), make_pr("feature", "main"))]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        assert!(plan.bookmarks_needing_reviewers.is_empty());
+    }
+
+    #[test]
     fn test_plan_identifies_draft_prs_for_ready() {
         let mut pr = make_pr("feature", "main");
         pr.draft = true;
@@ -529,11 +784,11 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         // With ready=false, no bookmarks_needing_ready
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
         assert!(plan.bookmarks_needing_ready.is_empty());
 
         // With ready=true, draft PR is identified
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_ready.len(), 1);
         assert_eq!(plan.bookmarks_needing_ready[0].pr_node_id, "PR_kwDOxyz");
     }

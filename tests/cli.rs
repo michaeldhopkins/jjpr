@@ -76,3 +76,21 @@ fn test_version() {
         .success()
         .stdout(predicate::str::contains("jjpr"));
 }
+
+#[test]
+fn test_help_shows_no_fetch() {
+    jjpr()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-fetch"));
+}
+
+#[test]
+fn test_submit_help_shows_no_fetch() {
+    jjpr()
+        .args(["submit", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--no-fetch"));
+}

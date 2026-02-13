@@ -83,4 +83,11 @@ pub trait GitHub: Send + Sync {
     ) -> Result<()>;
 
     fn get_authenticated_user(&self) -> Result<String>;
+
+    fn find_merged_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        head: &str,
+    ) -> Result<Option<PullRequest>>;
 }

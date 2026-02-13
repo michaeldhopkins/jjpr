@@ -21,6 +21,8 @@ jjpr submit --reviewer alice,bob  # Request reviewers on new PRs
 jjpr submit --remote upstream     # Use a specific git remote
 jjpr submit --draft               # Create new PRs as drafts
 jjpr submit --ready               # Mark existing draft PRs as ready
+jjpr --no-fetch                   # Show stacks without fetching
+jjpr submit --no-fetch            # Submit without fetching first
 jjpr auth test                    # Test GitHub authentication
 jjpr auth setup                   # Show auth setup instructions
 ```
@@ -53,6 +55,24 @@ When no bookmark is specified, jjpr infers the target from your working copy's p
 Use `--draft` to create new PRs as drafts. Existing PRs are not affected.
 
 Use `--ready` to convert all draft PRs in the stack to ready-for-review. These flags are mutually exclusive.
+
+### PR descriptions
+
+PR title and body are derived from the first commit's description in each bookmark's segment.
+
+The PR body is wrapped in HTML comment markers. When you re-submit after changing a commit message, only the managed section is updated — any text you add above or below (screenshots, notes, test plans) is preserved.
+
+If you manually remove the markers from the PR body, jjpr will stop updating the description for that PR.
+
+The PR title is not automatically updated after creation. If you change your commit's first line, jjpr will warn you about the drift.
+
+### Fetching
+
+By default, `jjpr` fetches all remotes before operating to ensure it has the latest state. Use `--no-fetch` to skip this (useful for offline work or when you've just fetched).
+
+### Reviewers
+
+Use `--reviewer alice,bob` to request reviewers. Reviewers are applied to all PRs in the stack — both newly created and existing ones.
 
 ## Requirements
 

@@ -6,13 +6,17 @@
 )]
 
 use std::env;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use std::collections::HashMap;
+
 use jjpr::github::remote;
-use jjpr::github::GhCli;
+use jjpr::github::types::PullRequest;
+use jjpr::github::{GhCli, GitHub};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::submit::{analyze, execute, plan, resolve};
@@ -28,6 +32,10 @@ struct Cli {
     /// Preview changes without executing
     #[arg(long, global = true)]
     dry_run: bool,
+
+    /// Skip fetching remotes before operating
+    #[arg(long, global = true)]
+    no_fetch: bool,
 }
 
 #[derive(Subcommand)]
@@ -89,6 +97,7 @@ fn main() -> Result<()> {
                 reviewers: &reviewer,
                 preferred_remote: remote.as_deref(),
                 dry_run: cli.dry_run,
+                no_fetch: cli.no_fetch,
                 draft_mode,
             })
         }
@@ -102,7 +111,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
-        None => cmd_stack_overview(),
+        None => cmd_stack_overview(cli.no_fetch),
     }
 }
 
@@ -117,6 +126,7 @@ struct SubmitOptions<'a> {
     reviewers: &'a [String],
     preferred_remote: Option<&'a str>,
     dry_run: bool,
+    no_fetch: bool,
     draft_mode: DraftMode,
 }
 
@@ -124,6 +134,11 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path)?;
     let github = GhCli::new();
+
+    if !opts.no_fetch {
+        eprintln!("Fetching remotes...");
+        jj.git_fetch()?;
+    }
 
     let remotes = jj.get_git_remotes()?;
     let (remote_name, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
@@ -143,7 +158,8 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
 
     let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
 
-    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, false)?;
+    let interactive = std::io::stdout().is_terminal();
+    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
 
     let submission_plan = plan::create_submission_plan(
         &github,
@@ -153,6 +169,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         &default_branch,
         matches!(opts.draft_mode, DraftMode::Draft),
         matches!(opts.draft_mode, DraftMode::Ready),
+        opts.reviewers,
     )?;
 
     if opts.bookmark.is_some() {
@@ -164,9 +181,14 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stack_overview() -> Result<()> {
+fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path)?;
+
+    if !no_fetch {
+        eprintln!("Fetching remotes...");
+        jj.git_fetch()?;
+    }
 
     let graph = change_graph::build_change_graph(&jj)?;
 
@@ -174,6 +196,9 @@ fn cmd_stack_overview() -> Result<()> {
         println!("No stacks found. Create bookmarks with `jj bookmark set <name>`.");
         return Ok(());
     }
+
+    // Try to resolve GitHub remote for PR info
+    let pr_info = try_load_pr_info(&jj, &graph);
 
     for (i, stack) in graph.stacks.iter().enumerate() {
         if i > 0 {
@@ -183,18 +208,30 @@ fn cmd_stack_overview() -> Result<()> {
             let bookmark_names: Vec<&str> =
                 segment.bookmarks.iter().map(|b| b.name.as_str()).collect();
             let name = bookmark_names.join(", ");
-            let status = if segment.bookmarks.iter().all(|b| b.is_synced) {
+            let sync_status = if segment.bookmarks.iter().all(|b| b.is_synced) {
                 "synced"
             } else {
                 "needs push"
             };
             let change_count = segment.changes.len();
+
+            let pr_label = segment
+                .bookmarks
+                .first()
+                .and_then(|b| pr_info.as_ref()?.get(&b.name))
+                .map(|pr| {
+                    let state = if pr.draft { "draft" } else { "open" };
+                    format!(", #{} {state}", pr.number)
+                })
+                .unwrap_or_default();
+
             println!(
-                "  {} ({} change{}, {})",
+                "  {} ({} change{}{}, {})",
                 name,
                 change_count,
                 if change_count == 1 { "" } else { "s" },
-                status
+                pr_label,
+                sync_status
             );
         }
     }
@@ -212,6 +249,37 @@ fn cmd_stack_overview() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn try_load_pr_info(
+    jj: &JjRunner,
+    graph: &change_graph::ChangeGraph,
+) -> Option<HashMap<String, PullRequest>> {
+    let remotes = jj.get_git_remotes().ok()?;
+    let (_remote_name, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
+    let github = GhCli::new();
+
+    let mut map = HashMap::new();
+    for stack in &graph.stacks {
+        for segment in &stack.segments {
+            for bookmark in &segment.bookmarks {
+                if let Ok(Some(pr)) =
+                    github.find_open_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)
+                {
+                    map.insert(bookmark.name.clone(), pr);
+                }
+            }
+        }
+    }
+
+    if map.is_empty() && !graph.stacks.is_empty() {
+        // Check if gh auth works; if not, hint to the user
+        if github.get_authenticated_user().is_err() {
+            eprintln!("hint: run `jjpr auth test` to see PR status in stack overview");
+        }
+    }
+
+    Some(map)
 }
 
 fn find_repo_root() -> Result<PathBuf> {

@@ -20,6 +20,8 @@ pub struct PullRequest {
     pub draft: bool,
     #[serde(default)]
     pub node_id: String,
+    #[serde(default)]
+    pub merged_at: Option<String>,
 }
 
 /// A ref (base or head) on a pull request.

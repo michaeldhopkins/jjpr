@@ -234,7 +234,7 @@ fn test_submit_creates_stacked_prs() {
         repo: REPO.to_string(),
     };
     let submission_plan = plan::create_submission_plan(
-        &github, &segments, "origin", &repo_info, "main", false, false,
+        &github, &segments, "origin", &repo_info, "main", false, false, &[],
     )
     .unwrap();
 

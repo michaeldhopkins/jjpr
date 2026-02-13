@@ -53,7 +53,7 @@ pub fn generate_comment_body(entries: &[StackEntry], default_branch: &str) -> St
     let mut body = String::new();
     body.push_str(SENTINEL);
     body.push('\n');
-    body.push_str(&format!("<!--- STACKER_DATA: {encoded} --->"));
+    body.push_str(&format!("<!--- JJPR_DATA: {encoded} --->"));
     body.push('\n');
     body.push_str(&format!(
         "This PR is part of a stack of {} bookmarks:\n\n",
@@ -77,14 +77,16 @@ pub fn generate_comment_body(entries: &[StackEntry], default_branch: &str) -> St
 
 /// Parse the machine-readable data from an existing stack comment.
 pub fn parse_comment_data(body: &str) -> Option<StackCommentData> {
-    let prefix = "<!--- STACKER_DATA: ";
     let suffix = " --->";
 
     for line in body.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix(prefix)
-            && let Some(encoded) = rest.strip_suffix(suffix)
-        {
+        let encoded = line
+            .strip_prefix("<!--- JJPR_DATA: ")
+            .or_else(|| line.strip_prefix("<!--- STACKER_DATA: "))
+            .and_then(|rest| rest.strip_suffix(suffix));
+
+        if let Some(encoded) = encoded {
             let bytes = BASE64.decode(encoded).ok()?;
             let data: StackCommentData = serde_json::from_slice(&bytes).ok()?;
             return Some(data);
@@ -215,5 +217,34 @@ mod tests {
             body: Some("nothing relevant".to_string()),
         }];
         assert!(find_stack_comment(&comments).is_none());
+    }
+
+    #[test]
+    fn test_new_comments_use_jjpr_data_prefix() {
+        let body = generate_comment_body(&sample_entries(), "main");
+        assert!(body.contains("JJPR_DATA"), "should use JJPR_DATA prefix");
+        assert!(
+            !body.contains("STACKER_DATA"),
+            "should not use old STACKER_DATA prefix"
+        );
+    }
+
+    #[test]
+    fn test_parse_legacy_stacker_data() {
+        // Simulate a comment written by the old version using STACKER_DATA
+        let data = StackCommentData {
+            version: 0,
+            stack: vec![StackCommentItem {
+                bookmark_name: "old-bookmark".to_string(),
+                pr_url: "https://github.com/o/r/pull/1".to_string(),
+                pr_number: 1,
+            }],
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let encoded = BASE64.encode(json.as_bytes());
+        let old_body = format!("<!--- STACKER_DATA: {encoded} --->");
+
+        let parsed = parse_comment_data(&old_body).expect("should parse legacy format");
+        assert_eq!(parsed.stack[0].bookmark_name, "old-bookmark");
     }
 }

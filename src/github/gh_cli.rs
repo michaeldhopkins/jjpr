@@ -185,6 +185,22 @@ impl GitHub for GhCli {
         Ok(())
     }
 
+    fn find_merged_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        head: &str,
+    ) -> Result<Option<PullRequest>> {
+        let endpoint = format!(
+            "repos/{owner}/{repo}/pulls?head={owner}:{head}&state=closed"
+        );
+        let output = self.run_gh(&["api", &endpoint])?;
+        let prs: Vec<PullRequest> = serde_json::from_str(&output)
+            .context("failed to parse closed PR list response")?;
+        // Filter for truly merged PRs (merged_at is set), not just closed ones
+        Ok(prs.into_iter().find(|pr| pr.merged_at.is_some()))
+    }
+
     fn get_authenticated_user(&self) -> Result<String> {
         let output = self.run_gh(&["api", "user"])?;
         let user: serde_json::Value =
