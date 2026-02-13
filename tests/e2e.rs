@@ -282,7 +282,7 @@ fn test_submit_creates_stacked_prs() {
             .any(|c| c["body"]
                 .as_str()
                 .unwrap_or("")
-                .contains("<!-- stacker:stack-info -->")),
+                .contains("<!-- jjpr:stack-info -->")),
         "auth PR should have stack comment"
     );
 
@@ -294,7 +294,7 @@ fn test_submit_creates_stacked_prs() {
             .any(|c| c["body"]
                 .as_str()
                 .unwrap_or("")
-                .contains("<!-- stacker:stack-info -->")),
+                .contains("<!-- jjpr:stack-info -->")),
         "profile PR should have stack comment"
     );
 }

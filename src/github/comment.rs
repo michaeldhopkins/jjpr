@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::IssueComment;
 
-const SENTINEL: &str = "<!-- stacker:stack-info -->";
+const SENTINEL: &str = "<!-- jjpr:stack-info -->";
 const FOOTER: &str = "*Created with [jjpr](https://github.com/michaeldhopkins/jjpr)*";
 // Also detect jj-stack comments for migration
 const LEGACY_FOOTER: &str = "*Created with [jj-stack]";
@@ -93,7 +93,7 @@ pub fn parse_comment_data(body: &str) -> Option<StackCommentData> {
     None
 }
 
-/// Find an existing stacker (or legacy jj-stack) comment in a list of comments.
+/// Find an existing jjpr (or legacy jj-stack) comment in a list of comments.
 pub fn find_stack_comment(comments: &[IssueComment]) -> Option<&IssueComment> {
     comments.iter().find(|c| {
         let body = c.body.as_deref().unwrap_or("");

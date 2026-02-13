@@ -40,7 +40,7 @@ impl JjTestRepo {
                 "set",
                 "--repo",
                 "user.email",
-                "test@stacker.dev",
+                "test@jjpr.dev",
             ],
             repo,
         );

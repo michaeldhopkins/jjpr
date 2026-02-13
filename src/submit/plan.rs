@@ -55,8 +55,8 @@ pub struct SubmissionPlan {
     pub draft: bool,
 }
 
-const DESCRIPTION_START: &str = "<!-- stacker:description -->";
-const DESCRIPTION_END: &str = "<!-- /stacker:description -->";
+const DESCRIPTION_START: &str = "<!-- jjpr:description -->";
+const DESCRIPTION_END: &str = "<!-- /jjpr:description -->";
 
 /// Derive the PR title and raw body text from the first change in a segment.
 fn derive_pr_title_body(segment: &NarrowedSegment) -> (String, String) {
@@ -472,19 +472,19 @@ mod tests {
         let wrapped = wrap_managed_body("hello world");
         assert_eq!(
             wrapped,
-            "<!-- stacker:description -->\nhello world\n<!-- /stacker:description -->"
+            "<!-- jjpr:description -->\nhello world\n<!-- /jjpr:description -->"
         );
     }
 
     #[test]
     fn test_extract_managed_body() {
-        let body = "<!-- stacker:description -->\nhello world\n<!-- /stacker:description -->";
+        let body = "<!-- jjpr:description -->\nhello world\n<!-- /jjpr:description -->";
         assert_eq!(extract_managed_body(body), Some("hello world"));
     }
 
     #[test]
     fn test_extract_managed_body_with_surrounding_content() {
-        let body = "User text\n\n<!-- stacker:description -->\nmanaged\n<!-- /stacker:description -->\n\nMore user text";
+        let body = "User text\n\n<!-- jjpr:description -->\nmanaged\n<!-- /jjpr:description -->\n\nMore user text";
         assert_eq!(extract_managed_body(body), Some("managed"));
     }
 
@@ -495,17 +495,17 @@ mod tests {
 
     #[test]
     fn test_extract_managed_body_only_start_marker() {
-        let body = "text\n<!-- stacker:description -->\nsome content but no end marker";
+        let body = "text\n<!-- jjpr:description -->\nsome content but no end marker";
         assert_eq!(extract_managed_body(body), None);
     }
 
     #[test]
     fn test_replace_managed_body_preserves_surroundings() {
-        let body = "Before\n<!-- stacker:description -->\nold\n<!-- /stacker:description -->\nAfter";
+        let body = "Before\n<!-- jjpr:description -->\nold\n<!-- /jjpr:description -->\nAfter";
         let result = replace_managed_body(body, "new content");
         assert_eq!(
             result,
-            "Before\n<!-- stacker:description -->\nnew content\n<!-- /stacker:description -->\nAfter"
+            "Before\n<!-- jjpr:description -->\nnew content\n<!-- /jjpr:description -->\nAfter"
         );
         assert_eq!(extract_managed_body(&result), Some("new content"));
     }

@@ -47,7 +47,7 @@ fn test_real_jj_log_parsing() {
     assert_eq!(entry.commit_id, bookmarks[0].commit_id);
     assert_eq!(entry.change_id, bookmarks[0].change_id);
     assert_eq!(entry.author_name, "Test User");
-    assert_eq!(entry.author_email, "test@stacker.dev");
+    assert_eq!(entry.author_email, "test@jjpr.dev");
     assert!(entry.description.starts_with("Add authentication"));
     assert_eq!(entry.description_first_line, "Add authentication");
     assert_eq!(entry.parents.len(), 1, "should have one parent (the initial commit)");

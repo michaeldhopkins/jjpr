@@ -479,7 +479,7 @@ mod tests {
             ) -> Result<Vec<IssueComment>> {
                 Ok(vec![IssueComment {
                     id: 99,
-                    body: Some("<!-- stacker:stack-info -->\nold comment".to_string()),
+                    body: Some("<!-- jjpr:stack-info -->\nold comment".to_string()),
                 }])
             }
             fn create_comment(
