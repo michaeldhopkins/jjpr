@@ -30,6 +30,10 @@ JJPR_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
 
 E2E tests use `michaeldhopkins/jjpr-testing-environment` (private repo). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
 
+## After verifying changes
+
+After tests pass and clippy is clean, always run `cargo install --path .` to install the updated binary.
+
 ## README
 
 Keep README.md up to date when adding features, commands, or changing usage patterns.

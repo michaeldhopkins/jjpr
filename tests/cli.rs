@@ -12,6 +12,8 @@ fn test_help_shows_usage() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Manage stacked pull requests"))
+        .stdout(predicate::str::contains("Run with no arguments"))
+        .stdout(predicate::str::contains("read-only"))
         .stdout(predicate::str::contains("submit"))
         .stdout(predicate::str::contains("auth"));
 }
@@ -22,7 +24,7 @@ fn test_submit_help() {
         .args(["submit", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Submit a bookmark stack"))
+        .stdout(predicate::str::contains("Push bookmarks and create/update pull requests"))
         .stdout(predicate::str::contains("--reviewer"))
         .stdout(predicate::str::contains("--remote"))
         .stdout(predicate::str::contains("--draft"))
@@ -72,6 +74,15 @@ fn test_draft_and_ready_conflict() {
 fn test_version() {
     jjpr()
         .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("jjpr"));
+}
+
+#[test]
+fn test_version_short() {
+    jjpr()
+        .arg("-v")
         .assert()
         .success()
         .stdout(predicate::str::contains("jjpr"));
