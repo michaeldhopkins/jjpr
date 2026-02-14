@@ -46,6 +46,11 @@ struct RawBookmark {
 }
 
 /// Parse `jj bookmark list` output into `Bookmark` values.
+///
+/// When a bookmark diverges from its remote, jj returns two entries: one for
+/// the local target and one for the remote target. We filter out remote-only
+/// entries (empty `localBookmarks`) to avoid the remote entry overwriting the
+/// local one in downstream HashMaps.
 pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
     output
         .lines()
@@ -62,18 +67,24 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
 
             let has_remote = !non_git_remotes.is_empty();
 
-            // Synced if a remote bookmark with the same name exists (excluding @git)
+            // Synced if a remote bookmark with the same name exists (excluding @git).
+            // For the local target, @origin only appears when both point to the same commit.
             let is_synced = non_git_remotes
                 .iter()
                 .any(|rb| rb.starts_with(&format!("{}@", raw.name)));
 
-            Ok(Bookmark {
+            Ok((raw.local_bookmarks.is_empty(), Bookmark {
                 name: raw.name,
                 commit_id: raw.commit_id,
                 change_id: raw.change_id,
                 has_remote,
                 is_synced,
-            })
+            }))
+        })
+        .filter_map(|result| match result {
+            Ok((true, _)) => None, // Skip remote-only entries
+            Ok((false, bookmark)) => Some(Ok(bookmark)),
+            Err(e) => Some(Err(e)),
         })
         .collect()
 }
@@ -174,6 +185,23 @@ mod tests {
         assert!(bookmarks[0].is_synced);
         assert_eq!(bookmarks[1].name, "profile");
         assert!(!bookmarks[1].has_remote);
+    }
+
+    #[test]
+    fn test_parse_bookmark_divergent_filters_remote_entry() {
+        // When a bookmark diverges, jj returns two entries: local and remote target.
+        // We should keep only the local entry.
+        let output = concat!(
+            r#"{"name":"feature","commitId":"new111","changeId":"ch1","localBookmarks":["feature"],"remoteBookmarks":["feature@git"]}"#,
+            "\n",
+            r#"{"name":"feature","commitId":"old222","changeId":"ch1","localBookmarks":[],"remoteBookmarks":["feature@origin"]}"#,
+            "\n",
+        );
+        let bookmarks = parse_bookmark_output(output).unwrap();
+        assert_eq!(bookmarks.len(), 1, "should filter out remote-only entry");
+        assert_eq!(bookmarks[0].commit_id, "new111", "should keep local target");
+        assert!(!bookmarks[0].is_synced, "divergent bookmark is not synced");
+        assert!(!bookmarks[0].has_remote, "local entry lacks @origin");
     }
 
     #[test]
