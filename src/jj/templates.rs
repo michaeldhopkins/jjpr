@@ -40,7 +40,6 @@ struct RawBookmark {
     name: String,
     commit_id: String,
     change_id: String,
-    #[allow(dead_code)]
     local_bookmarks: Vec<String>,
     remote_bookmarks: Vec<String>,
 }
@@ -57,7 +56,8 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let raw: RawBookmark =
-                serde_json::from_str(line).context("failed to parse bookmark JSON")?;
+                serde_json::from_str(line)
+                    .with_context(|| format!("failed to parse bookmark JSON: {line}"))?;
 
             let non_git_remotes: Vec<&String> = raw
                 .remote_bookmarks
@@ -112,7 +112,8 @@ pub fn parse_log_output(output: &str) -> Result<Vec<LogEntry>> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
             let raw: RawLogEntry =
-                serde_json::from_str(line).context("failed to parse log JSON")?;
+                serde_json::from_str(line)
+                    .with_context(|| format!("failed to parse log JSON: {line}"))?;
 
             Ok(LogEntry {
                 commit_id: raw.commit_id,

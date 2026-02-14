@@ -65,7 +65,7 @@ pub fn analyze_submission_graph(
 /// then returns the leaf (topmost) bookmark of that stack.
 pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<String> {
     let wc_commit_id = jj.get_working_copy_commit_id()?;
-    let wc_ancestry = jj.get_branch_changes(&wc_commit_id)?;
+    let wc_ancestry = jj.get_changes_to_commit(&wc_commit_id)?;
     let wc_change_ids: HashSet<String> = wc_ancestry.iter()
         .map(|e| e.change_id.clone()).collect();
 
@@ -207,7 +207,7 @@ mod tests {
     impl crate::jj::Jj for StubJj {
         fn git_fetch(&self) -> Result<()> { Ok(()) }
         fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-        fn get_branch_changes(&self, _to: &str) -> Result<Vec<LogEntry>> {
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
             Ok(self.branch_changes.clone())
         }
         fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }

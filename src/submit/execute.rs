@@ -143,7 +143,7 @@ pub fn execute_submission_plan(
             "  Marking PR #{} as ready for review ('{}')...",
             item.pr_number, item.bookmark.name
         );
-        if let Err(e) = github.convert_pr_to_ready(owner, repo, &item.pr_node_id) {
+        if let Err(e) = github.mark_pr_ready(owner, repo, &item.pr_node_id) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
@@ -174,12 +174,12 @@ pub fn execute_submission_plan(
     if !dry_run
         && let Err(e) = update_stack_comments(github, plan, &bookmark_to_pr)
     {
-        report_partial_failure(&completed_actions);
-        return Err(e);
+        eprintln!("  Warning: failed to update stack comments: {e}");
+        eprintln!("  (run `jjpr submit` again to retry)");
     }
 
     // Report title drift
-    report_title_drift(&plan.bookmarks_with_title_drift, &plan.repo_info);
+    print_title_drift_warnings(&plan.bookmarks_with_title_drift, &plan.repo_info);
 
     if !plan.has_actions() && plan.bookmarks_already_merged.is_empty() {
         println!("  Stack is up to date.");
@@ -188,7 +188,7 @@ pub fn execute_submission_plan(
     Ok(())
 }
 
-fn report_title_drift(drifts: &[super::plan::TitleDrift], repo_info: &crate::github::types::RepoInfo) {
+fn print_title_drift_warnings(drifts: &[super::plan::TitleDrift], repo_info: &crate::github::types::RepoInfo) {
     for drift in drifts {
         let escaped_title = drift.expected_title.replace('"', r#"\""#);
         println!(
@@ -357,12 +357,12 @@ mod tests {
             &self,
             _o: &str,
             _r: &str,
-            issue: u64,
+            number: u64,
             _b: &str,
         ) -> Result<IssueComment> {
             self.calls
                 .lock().expect("poisoned")
-                .push(format!("create_comment:#{issue}"));
+                .push(format!("create_comment:#{number}"));
             Ok(IssueComment {
                 id: 100,
                 body: Some("comment".to_string()),
@@ -380,10 +380,10 @@ mod tests {
                 .push(format!("update_pr_body:#{n}"));
             Ok(())
         }
-        fn convert_pr_to_ready(&self, _o: &str, _r: &str, node_id: &str) -> Result<()> {
+        fn mark_pr_ready(&self, _o: &str, _r: &str, node_id: &str) -> Result<()> {
             self.calls
                 .lock().expect("poisoned")
-                .push(format!("convert_ready:{node_id}"));
+                .push(format!("mark_pr_ready:{node_id}"));
             Ok(())
         }
         fn get_authenticated_user(&self) -> Result<String> {
@@ -419,7 +419,7 @@ mod tests {
         fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
             Ok(vec![])
         }
-        fn get_branch_changes(&self, _to: &str) -> Result<Vec<LogEntry>> {
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
             Ok(vec![])
         }
         fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
@@ -605,7 +605,7 @@ mod tests {
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
                 Ok(())
             }
-            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
                 Ok(())
             }
             fn get_authenticated_user(&self) -> Result<String> {
@@ -834,8 +834,8 @@ mod tests {
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
 
         assert!(
-            github.calls().iter().any(|c| c == "convert_ready:PR_kwDOxyz"),
-            "should call convert_pr_to_ready: {:?}",
+            github.calls().iter().any(|c| c == "mark_pr_ready:PR_kwDOxyz"),
+            "should call mark_pr_ready: {:?}",
             github.calls()
         );
     }
@@ -878,7 +878,7 @@ mod tests {
         impl Jj for FailingJj {
             fn git_fetch(&self) -> Result<()> { Ok(()) }
             fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-            fn get_branch_changes(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
             fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
             fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
             fn push_bookmark(&self, name: &str, _remote: &str) -> Result<()> {
@@ -1020,5 +1020,94 @@ mod tests {
         let title = r#"Fix "login" bug"#;
         let escaped = title.replace('"', r#"\""#);
         assert_eq!(escaped, r#"Fix \"login\" bug"#);
+    }
+
+    #[test]
+    fn test_comment_failure_does_not_abort() {
+        let jj = RecordingJj::new();
+
+        struct CommentFailsGitHub;
+        impl GitHub for CommentFailsGitHub {
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
+            fn create_pr(
+                &self, _o: &str, _r: &str, _t: &str, _b: &str,
+                _h: &str, _ba: &str, _draft: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(
+                &self, _o: &str, _r: &str, _n: u64, _revs: &[String],
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(
+                &self, _o: &str, _r: &str, _i: u64,
+            ) -> Result<Vec<IssueComment>> {
+                anyhow::bail!("GitHub API rate limited")
+            }
+            fn create_comment(
+                &self, _o: &str, _r: &str, _i: u64, _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                Ok(())
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("testuser".to_string())
+            }
+            fn find_merged_pr(
+                &self, _o: &str, _r: &str, _h: &str,
+            ) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+        }
+
+        let existing_pr = PullRequest {
+            number: 10,
+            html_url: "https://github.com/o/r/pull/10".to_string(),
+            title: "Add auth".to_string(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+        };
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo {
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+            },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        // Comment creation fails, but submission should still succeed
+        let result = execute_submission_plan(&jj, &CommentFailsGitHub, &plan, &[], false);
+        assert!(result.is_ok(), "comment failure should not abort: {result:?}");
     }
 }

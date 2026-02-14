@@ -66,7 +66,7 @@ impl Jj for JjRunner {
         templates::parse_bookmark_output(&output)
     }
 
-    fn get_branch_changes(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {
+    fn get_changes_to_commit(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {
         let revset = format!(r#"trunk().."{to_commit_id}""#);
 
         let output = self.run_jj(&[
@@ -111,7 +111,8 @@ impl Jj for JjRunner {
         ])?;
 
         let bookmarks: Vec<&str> = output.trim().split(',').collect();
-        for candidate in &["main", "master", "trunk"] {
+        const DEFAULT_BRANCH_CANDIDATES: &[&str] = &["main", "master", "trunk"];
+        for candidate in DEFAULT_BRANCH_CANDIDATES {
             if bookmarks.iter().any(|b| b.trim() == *candidate) {
                 return Ok(candidate.to_string());
             }

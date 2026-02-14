@@ -6,7 +6,18 @@ pub mod types;
 pub use gh_cli::GhCli;
 pub use types::*;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
+
+/// Build a map of branch name → PR, filtering out PRs from forks.
+pub fn build_pr_map(prs: Vec<PullRequest>, owner: &str) -> HashMap<String, PullRequest> {
+    let owner_prefix = format!("{owner}:");
+    prs.into_iter()
+        .filter(|pr| pr.head.label.starts_with(&owner_prefix) || pr.head.label.is_empty())
+        .map(|pr| (pr.head.ref_name.clone(), pr))
+        .collect()
+}
 
 /// Trait abstracting GitHub operations for testability.
 pub trait GitHub: Send + Sync {
@@ -47,14 +58,14 @@ pub trait GitHub: Send + Sync {
         &self,
         owner: &str,
         repo: &str,
-        issue: u64,
+        number: u64,
     ) -> Result<Vec<IssueComment>>;
 
     fn create_comment(
         &self,
         owner: &str,
         repo: &str,
-        issue: u64,
+        number: u64,
         body: &str,
     ) -> Result<IssueComment>;
 
@@ -74,7 +85,7 @@ pub trait GitHub: Send + Sync {
         body: &str,
     ) -> Result<()>;
 
-    fn convert_pr_to_ready(
+    fn mark_pr_ready(
         &self,
         owner: &str,
         repo: &str,
@@ -89,4 +100,47 @@ pub trait GitHub: Send + Sync {
         repo: &str,
         head: &str,
     ) -> Result<Option<PullRequest>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_pr(ref_name: &str, label: &str) -> PullRequest {
+        PullRequest {
+            number: 1,
+            html_url: String::new(),
+            title: String::new(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: ref_name.to_string(), label: label.to_string() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+        }
+    }
+
+    #[test]
+    fn test_build_pr_map_filters_forks() {
+        let prs = vec![
+            make_pr("feature", "owner:feature"),
+            make_pr("other", "someone-else:other"),
+        ];
+        let map = build_pr_map(prs, "owner");
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("feature"));
+    }
+
+    #[test]
+    fn test_build_pr_map_accepts_empty_label() {
+        let prs = vec![make_pr("feature", "")];
+        let map = build_pr_map(prs, "owner");
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_build_pr_map_empty_input() {
+        let map = build_pr_map(vec![], "owner");
+        assert!(map.is_empty());
+    }
 }

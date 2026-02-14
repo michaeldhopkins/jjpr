@@ -114,9 +114,9 @@ impl GitHub for GhCli {
         &self,
         owner: &str,
         repo: &str,
-        issue: u64,
+        number: u64,
     ) -> Result<Vec<IssueComment>> {
-        let endpoint = format!("repos/{owner}/{repo}/issues/{issue}/comments");
+        let endpoint = format!("repos/{owner}/{repo}/issues/{number}/comments");
         let output = self.run_gh(&["api", &endpoint, "--paginate"])?;
         serde_json::from_str(&output).context("failed to parse comments response")
     }
@@ -125,10 +125,10 @@ impl GitHub for GhCli {
         &self,
         owner: &str,
         repo: &str,
-        issue: u64,
+        number: u64,
         body: &str,
     ) -> Result<IssueComment> {
-        let endpoint = format!("repos/{owner}/{repo}/issues/{issue}/comments");
+        let endpoint = format!("repos/{owner}/{repo}/issues/{number}/comments");
         let output = self.run_gh(&[
             "api", &endpoint,
             "-f", &format!("body={body}"),
@@ -168,7 +168,7 @@ impl GitHub for GhCli {
         Ok(())
     }
 
-    fn convert_pr_to_ready(
+    fn mark_pr_ready(
         &self,
         _owner: &str,
         _repo: &str,

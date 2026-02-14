@@ -280,14 +280,7 @@ fn try_load_pr_info(
         }
     };
 
-    let owner_prefix = format!("{}:", repo_info.owner);
-    let map: HashMap<String, PullRequest> = all_prs
-        .into_iter()
-        .filter(|pr| pr.head.label.starts_with(&owner_prefix) || pr.head.label.is_empty())
-        .map(|pr| (pr.head.ref_name.clone(), pr))
-        .collect();
-
-    Some(map)
+    Some(jjpr::github::build_pr_map(all_prs, &repo_info.owner))
 }
 
 fn find_repo_root() -> Result<PathBuf> {

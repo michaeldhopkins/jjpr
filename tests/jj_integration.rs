@@ -40,7 +40,7 @@ fn test_real_jj_log_parsing() {
 
     let jj = repo.runner();
     let bookmarks = jj.get_my_bookmarks().unwrap();
-    let entries = jj.get_branch_changes(&bookmarks[0].commit_id).unwrap();
+    let entries = jj.get_changes_to_commit(&bookmarks[0].commit_id).unwrap();
 
     assert!(!entries.is_empty());
     let entry = &entries[0];

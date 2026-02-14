@@ -40,7 +40,7 @@ pub fn traverse_and_discover_segments(
         .map(|b| &b.change_id)
         .collect();
 
-    let entries = jj.get_branch_changes(start_commit_id)?;
+    let entries = jj.get_changes_to_commit(start_commit_id)?;
 
     for entry in &entries {
         if entry.parents.len() > 1 {
@@ -131,7 +131,7 @@ mod tests {
         fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
             Ok(vec![])
         }
-        fn get_branch_changes(&self, _to: &str) -> Result<Vec<LogEntry>> {
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
             Ok(self.entries.clone())
         }
         fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {

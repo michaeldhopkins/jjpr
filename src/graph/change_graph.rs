@@ -216,7 +216,7 @@ mod tests {
         fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
             Ok(self.bookmarks.clone())
         }
-        fn get_branch_changes(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {
+        fn get_changes_to_commit(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {
             Ok(self
                 .log_entries
                 .get(to_commit_id)

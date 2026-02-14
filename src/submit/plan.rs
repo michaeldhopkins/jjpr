@@ -149,12 +149,7 @@ pub fn create_submission_plan(
         .list_open_prs(&repo_info.owner, &repo_info.repo)
         .context("failed to list open PRs — check `jjpr auth test`")?;
 
-    let owner_prefix = format!("{}:", repo_info.owner);
-    let pr_map: HashMap<String, PullRequest> = all_open_prs
-        .into_iter()
-        .filter(|pr| pr.head.label.starts_with(&owner_prefix) || pr.head.label.is_empty())
-        .map(|pr| (pr.head.ref_name.clone(), pr))
-        .collect();
+    let pr_map = crate::github::build_pr_map(all_open_prs, &repo_info.owner);
 
     let mut bookmarks_needing_push = Vec::new();
     let mut bookmarks_needing_pr = Vec::new();
@@ -182,14 +177,21 @@ pub fn create_submission_plan(
 
         if existing_pr.is_none() {
             // No open PR — check if it was already merged before doing anything else
-            if let Ok(Some(merged_pr)) =
-                github.find_merged_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)
-            {
-                bookmarks_already_merged.push(MergedBookmark {
-                    bookmark: bookmark.clone(),
-                    pr_number: merged_pr.number,
-                });
-                continue;
+            match github.find_merged_pr(&repo_info.owner, &repo_info.repo, &bookmark.name) {
+                Ok(Some(merged_pr)) => {
+                    bookmarks_already_merged.push(MergedBookmark {
+                        bookmark: bookmark.clone(),
+                        pr_number: merged_pr.number,
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: could not check merged status for '{}': {e}",
+                        bookmark.name
+                    );
+                }
+                Ok(None) => {}
             }
         }
 
@@ -323,7 +325,7 @@ mod tests {
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
             unimplemented!()
         }
-        fn convert_pr_to_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
             unimplemented!()
         }
         fn get_authenticated_user(&self) -> Result<String> {
@@ -659,7 +661,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
         }
 
@@ -700,7 +702,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
         }
 
@@ -748,7 +750,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
         }
 
@@ -864,7 +866,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { unimplemented!() }
         }
@@ -876,5 +878,37 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("jjpr auth test"), "error should hint at auth: {msg}");
+    }
+
+    #[test]
+    fn test_plan_warns_on_merged_check_failure() {
+        struct MergedCheckFailsGitHub;
+        impl GitHub for MergedCheckFailsGitHub {
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                anyhow::bail!("network timeout")
+            }
+        }
+
+        let segments = vec![make_segment("feature", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        // Should succeed (not abort) and plan a PR despite merged check failing
+        let plan = create_submission_plan(
+            &MergedCheckFailsGitHub, &segments, "origin", &repo, "main", false, false, &[],
+        ).unwrap();
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1);
+        assert!(plan.bookmarks_already_merged.is_empty());
     }
 }
