@@ -23,9 +23,13 @@ use jjpr::submit::{analyze, execute, plan, resolve};
 
 #[derive(Parser)]
 #[command(name = "jjpr")]
-#[command(about = "Manage stacked pull requests in Jujutsu repositories")]
-#[command(version)]
+#[command(about = "Manage stacked pull requests in Jujutsu repositories\n\nRun with no arguments to see your stacks and their PR status on GitHub (read-only).\nUse `jjpr submit` to push, create PRs, and sync stack state.")]
+#[command(version, long_about = None, disable_version_flag = true)]
 struct Cli {
+    /// Print version
+    #[arg(short = 'v', short_alias = 'V', long = "version", action = clap::ArgAction::Version)]
+    version: (),
+
     #[command(subcommand)]
     command: Option<Commands>,
 
@@ -40,7 +44,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Submit a bookmark stack as pull requests
+    /// Push bookmarks and create/update pull requests for a stack.
+    /// Idempotent — run repeatedly after rebasing, editing commits, or restacking
+    /// to keep PRs in sync.
     Submit {
         /// Bookmark to submit (inferred from working copy if omitted)
         bookmark: Option<String>,
@@ -201,9 +207,13 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     let github = GhCli::new();
     let pr_info = try_load_pr_info(&jj, &github, &graph);
 
+    let multi = graph.stacks.len() > 1;
     for (i, stack) in graph.stacks.iter().enumerate() {
         if i > 0 {
             println!();
+        }
+        if multi {
+            println!("Stack {}:", i + 1);
         }
         for segment in &stack.segments {
             let bookmark_names: Vec<&str> =

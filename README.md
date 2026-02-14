@@ -29,11 +29,23 @@ jjpr auth setup                   # Show auth setup instructions
 
 ### Stack overview
 
-Run `jjpr` with no arguments to see your current stacks:
+Run `jjpr` with no arguments to see your current stacks and their PR status on GitHub. This is read-only — it fetches the latest state but doesn't push or modify anything.
 
 ```
-  auth (1 change, needs push)
-  profile (2 changes, synced)
+  auth (1 change, #42 open, needs push)
+  profile (2 changes, #41 draft, synced)
+```
+
+When you have multiple independent stacks, they're labeled:
+
+```
+Stack 1:
+  auth (1 change, #42 open, synced)
+  profile (2 changes, #43 open, synced)
+
+Stack 2:
+  payments (1 change, #44 draft, needs push)
+  checkout (3 changes, #45 open, synced)
 ```
 
 ### Submitting a stack
@@ -45,6 +57,8 @@ Run `jjpr` with no arguments to see your current stacks:
 3. Update PR base branches to maintain the stack structure
 4. Update PR bodies when commit descriptions have changed
 5. Add/update a stack-awareness comment on each PR
+
+Submit is idempotent — run it repeatedly as you work. After rebasing, editing commit messages, or restacking with `jj rebase`, just run `jjpr submit` again and it will push the updated commits, fix PR base branches, and sync descriptions. If everything is already up to date, it reports "Stack is up to date."
 
 PRs are created with the commit description as the title and body.
 
@@ -96,9 +110,9 @@ JJPR_E2E=1 cargo test  # Include E2E tests (requires gh auth + network)
 
 ### Test tiers
 
-- **Unit tests** (88): Fast, no I/O, use stub implementations of `Jj` and `GitHub` traits
-- **jj integration tests** (6): Real `jj` binary against temp repos, no network
-- **E2E tests** (1): Real `jj` + real GitHub against [jjpr-testing-environment](https://github.com/michaeldhopkins/jjpr-testing-environment), guarded by `JJPR_E2E` env var
+- **Unit tests**: Fast, no I/O, use stub implementations of `Jj` and `GitHub` traits
+- **jj integration tests**: Real `jj` binary against temp repos, no network
+- **E2E tests**: Real `jj` + real GitHub against [jjpr-testing-environment](https://github.com/michaeldhopkins/jjpr-testing-environment), guarded by `JJPR_E2E` env var
 
 ## License
 
