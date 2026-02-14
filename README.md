@@ -17,7 +17,7 @@ jjpr                              # Show stack overview
 jjpr submit                       # Submit stack (inferred from working copy)
 jjpr submit <bookmark>            # Submit stack up to bookmark
 jjpr submit --dry-run             # Preview without executing
-jjpr submit --reviewer alice,bob  # Request reviewers on new PRs
+jjpr submit --reviewer alice,bob  # Request reviewers on all PRs
 jjpr submit --remote upstream     # Use a specific git remote
 jjpr submit --draft               # Create new PRs as drafts
 jjpr submit --ready               # Mark existing draft PRs as ready

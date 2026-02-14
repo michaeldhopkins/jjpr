@@ -86,7 +86,9 @@ pub fn resolve_remote(
     }
 
     match github_remotes.len() {
-        0 => anyhow::bail!("no GitHub remotes found"),
+        0 => anyhow::bail!(
+            "no GitHub remotes found. Add one with: jj git remote add origin https://github.com/OWNER/REPO.git"
+        ),
         1 => Ok(github_remotes.into_iter().next().expect("len checked")),
         _ => {
             let names: Vec<&str> = github_remotes.iter().map(|(n, _)| n.as_str()).collect();
@@ -211,7 +213,10 @@ mod tests {
             name: "origin".to_string(),
             url: "https://gitlab.com/me/repo.git".to_string(),
         }];
-        assert!(resolve_remote(&remotes, None).is_err());
+        let err = resolve_remote(&remotes, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no GitHub remotes found"), "{msg}");
+        assert!(msg.contains("jj git remote add"), "should include remediation hint: {msg}");
     }
 
     #[test]

@@ -10,12 +10,11 @@ use anyhow::Result;
 
 /// Trait abstracting GitHub operations for testability.
 pub trait GitHub: Send + Sync {
-    fn find_open_pr(
+    fn list_open_prs(
         &self,
         owner: &str,
         repo: &str,
-        head: &str,
-    ) -> Result<Option<PullRequest>>;
+    ) -> Result<Vec<PullRequest>>;
 
     fn create_pr(
         &self,

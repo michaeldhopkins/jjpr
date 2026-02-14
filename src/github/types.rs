@@ -29,6 +29,8 @@ pub struct PullRequest {
 pub struct PullRequestRef {
     #[serde(rename = "ref")]
     pub ref_name: String,
+    #[serde(default)]
+    pub label: String,
 }
 
 /// A comment on a GitHub issue/PR.

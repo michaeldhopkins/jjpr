@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::github::types::{PullRequest, RepoInfo};
 use crate::github::GitHub;
@@ -74,6 +74,18 @@ pub struct SubmissionPlan {
     pub draft: bool,
 }
 
+impl SubmissionPlan {
+    /// Whether this plan has any actions that will modify remote state.
+    pub fn has_actions(&self) -> bool {
+        !self.bookmarks_needing_push.is_empty()
+            || !self.bookmarks_needing_pr.is_empty()
+            || !self.bookmarks_needing_base_update.is_empty()
+            || !self.bookmarks_needing_body_update.is_empty()
+            || !self.bookmarks_needing_ready.is_empty()
+            || !self.bookmarks_needing_reviewers.is_empty()
+    }
+}
+
 const DESCRIPTION_START: &str = "<!-- jjpr:description -->";
 const DESCRIPTION_END: &str = "<!-- /jjpr:description -->";
 
@@ -132,6 +144,18 @@ pub fn create_submission_plan(
     ready: bool,
     reviewers: &[String],
 ) -> Result<SubmissionPlan> {
+    // Batch: one API call for all open PRs instead of one per bookmark
+    let all_open_prs = github
+        .list_open_prs(&repo_info.owner, &repo_info.repo)
+        .context("failed to list open PRs — check `jjpr auth test`")?;
+
+    let owner_prefix = format!("{}:", repo_info.owner);
+    let pr_map: HashMap<String, PullRequest> = all_open_prs
+        .into_iter()
+        .filter(|pr| pr.head.label.starts_with(&owner_prefix) || pr.head.label.is_empty())
+        .map(|pr| (pr.head.ref_name.clone(), pr))
+        .collect();
+
     let mut bookmarks_needing_push = Vec::new();
     let mut bookmarks_needing_pr = Vec::new();
     let mut bookmarks_needing_base_update = Vec::new();
@@ -154,9 +178,7 @@ pub fn create_submission_plan(
             segments[i - 1].bookmark.name.clone()
         };
 
-        // Check if PR exists
-        let existing_pr =
-            github.find_open_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)?;
+        let existing_pr = pr_map.get(&bookmark.name).cloned();
 
         if existing_pr.is_none() {
             // No open PR — check if it was already merged before doing anything else
@@ -266,13 +288,12 @@ mod tests {
     }
 
     impl GitHub for StubGitHub {
-        fn find_open_pr(
+        fn list_open_prs(
             &self,
             _owner: &str,
             _repo: &str,
-            head: &str,
-        ) -> Result<Option<PullRequest>> {
-            Ok(self.prs.get(head).cloned())
+        ) -> Result<Vec<PullRequest>> {
+            Ok(self.prs.values().cloned().collect())
         }
         fn create_pr(
             &self, _o: &str, _r: &str, _t: &str, _b: &str,
@@ -345,8 +366,8 @@ mod tests {
             html_url: "https://github.com/o/r/pull/1".to_string(),
             title: format!("Add {name}"),
             body: Some("Detailed description".to_string()),
-            base: PullRequestRef { ref_name: base.to_string() },
-            head: PullRequestRef { ref_name: name.to_string() },
+            base: PullRequestRef { ref_name: base.to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: name.to_string(), label: String::new() },
             draft: false,
             node_id: String::new(),
             merged_at: None,
@@ -611,8 +632,8 @@ mod tests {
         struct GitHubWithMergedPr;
 
         impl GitHub for GitHubWithMergedPr {
-            fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
-                Ok(None)
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
             }
             fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
                 if head == "auth" {
@@ -621,8 +642,8 @@ mod tests {
                         html_url: "https://github.com/o/r/pull/99".to_string(),
                         title: "Add auth".to_string(),
                         body: None,
-                        base: PullRequestRef { ref_name: "main".to_string() },
-                        head: PullRequestRef { ref_name: "auth".to_string() },
+                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+                        head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
@@ -665,8 +686,8 @@ mod tests {
         struct GitHubWithClosedPr;
 
         impl GitHub for GitHubWithClosedPr {
-            fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
-                Ok(None)
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
             }
             fn find_merged_pr(&self, _o: &str, _r: &str, _head: &str) -> Result<Option<PullRequest>> {
                 // Closed but not merged — merged_at is None, so find_merged_pr returns None
@@ -700,8 +721,8 @@ mod tests {
         struct GitHubWithMergedPr;
 
         impl GitHub for GitHubWithMergedPr {
-            fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
-                Ok(None)
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
             }
             fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
                 if head == "auth" {
@@ -710,8 +731,8 @@ mod tests {
                         html_url: "https://github.com/o/r/pull/99".to_string(),
                         title: "Add auth".to_string(),
                         body: None,
-                        base: PullRequestRef { ref_name: "main".to_string() },
-                        head: PullRequestRef { ref_name: "auth".to_string() },
+                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+                        head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
@@ -791,5 +812,69 @@ mod tests {
         let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true, &[]).unwrap();
         assert_eq!(plan.bookmarks_needing_ready.len(), 1);
         assert_eq!(plan.bookmarks_needing_ready[0].pr_node_id, "PR_kwDOxyz");
+    }
+
+    #[test]
+    fn test_plan_filters_fork_prs() {
+        let mut fork_pr = make_pr("feature", "main");
+        fork_pr.head.label = "someone-else:feature".to_string();
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), fork_pr)]),
+        };
+        let segments = vec![make_segment("feature", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+
+        // Fork PR should be filtered out — treated as if no PR exists
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1);
+        assert!(plan.existing_prs.is_empty());
+    }
+
+    #[test]
+    fn test_plan_accepts_prs_with_empty_label() {
+        let mut pr = make_pr("feature", "main");
+        pr.head.label = String::new();
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+
+        // Empty label (e.g. from test stubs) should pass through the filter
+        assert!(plan.bookmarks_needing_pr.is_empty());
+        assert_eq!(plan.existing_prs.len(), 1);
+    }
+
+    #[test]
+    fn test_plan_error_context_on_list_failure() {
+        struct FailingGitHub;
+        impl GitHub for FailingGitHub {
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                anyhow::bail!("HTTP 401 Unauthorized")
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn convert_pr_to_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { unimplemented!() }
+        }
+
+        let segments = vec![make_segment("feature", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let err = create_submission_plan(&FailingGitHub, &segments, "origin", &repo, "main", false, false, &[])
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("jjpr auth test"), "error should hint at auth: {msg}");
     }
 }

@@ -178,15 +178,33 @@ pub fn execute_submission_plan(
         return Err(e);
     }
 
-    // Phase 8: Report title drift
-    for drift in &plan.bookmarks_with_title_drift {
-        println!(
-            "  Note: PR #{} title differs from commit ('{}' vs '{}')",
-            drift.pr_number, drift.current_title, drift.expected_title
-        );
+    // Report title drift
+    report_title_drift(&plan.bookmarks_with_title_drift, &plan.repo_info);
+
+    if !plan.has_actions() && plan.bookmarks_already_merged.is_empty() {
+        println!("  Stack is up to date.");
     }
 
     Ok(())
+}
+
+fn report_title_drift(drifts: &[super::plan::TitleDrift], repo_info: &crate::github::types::RepoInfo) {
+    for drift in drifts {
+        let escaped_title = drift.expected_title.replace('"', r#"\""#);
+        println!(
+            "  Note: PR #{} title differs from commit description\n\
+             \x20        current: \"{}\"\n\
+             \x20        expected: \"{}\"\n\
+             \x20        fix with: gh pr edit {} --repo {}/{} --title \"{}\"",
+            drift.pr_number,
+            drift.current_title,
+            drift.expected_title,
+            drift.pr_number,
+            repo_info.owner,
+            repo_info.repo,
+            escaped_title,
+        );
+    }
 }
 
 fn report_partial_failure(completed: &[String]) {
@@ -279,8 +297,8 @@ mod tests {
     }
 
     impl GitHub for RecordingGitHub {
-        fn find_open_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
-            Ok(None)
+        fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+            Ok(vec![])
         }
         fn create_pr(
             &self,
@@ -303,9 +321,11 @@ mod tests {
                 body: None,
                 base: PullRequestRef {
                     ref_name: base.to_string(),
+                    label: String::new(),
                 },
                 head: PullRequestRef {
                     ref_name: head.to_string(),
+                    label: String::new(),
                 },
                 draft,
                 node_id: "PR_node123".to_string(),
@@ -539,13 +559,8 @@ mod tests {
         }
 
         impl GitHub for GitHubWithExistingComment {
-            fn find_open_pr(
-                &self,
-                _o: &str,
-                _r: &str,
-                _h: &str,
-            ) -> Result<Option<PullRequest>> {
-                Ok(None)
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
             }
             fn create_pr(
                 &self, _o: &str, _r: &str, _t: &str, _b: &str,
@@ -612,8 +627,8 @@ mod tests {
             html_url: "https://github.com/o/r/pull/10".to_string(),
             title: "Add auth".to_string(),
             body: None,
-            base: PullRequestRef { ref_name: "main".to_string() },
-            head: PullRequestRef { ref_name: "auth".to_string() },
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
             draft: false,
             node_id: String::new(),
             merged_at: None,
@@ -656,8 +671,8 @@ mod tests {
             html_url: "https://github.com/o/r/pull/5".to_string(),
             title: "profile".to_string(),
             body: None,
-            base: PullRequestRef { ref_name: "main".to_string() },
-            head: PullRequestRef { ref_name: "profile".to_string() },
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "profile".to_string(), label: String::new() },
             draft: false,
             node_id: String::new(),
             merged_at: None,
@@ -717,8 +732,8 @@ mod tests {
                     html_url: "https://github.com/o/r/pull/10".to_string(),
                     title: "Old title".to_string(),
                     body: None,
-                    base: PullRequestRef { ref_name: "main".to_string() },
-                    head: PullRequestRef { ref_name: "auth".to_string() },
+                    base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+                    head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
                     draft: false,
                     node_id: String::new(),
                     merged_at: None,
@@ -928,5 +943,82 @@ mod tests {
             "dry run should not call any GitHub API: {:?}",
             github.calls()
         );
+    }
+
+    #[test]
+    fn test_noop_plan_succeeds_without_api_calls() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+
+        assert!(jj.pushes().is_empty());
+        assert!(github.calls().is_empty());
+    }
+
+    #[test]
+    fn test_has_actions_empty_plan() {
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+        assert!(!plan.has_actions());
+    }
+
+    #[test]
+    fn test_has_actions_with_push() {
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![make_bookmark("auth")],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::new(),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            all_bookmarks: vec![],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+        assert!(plan.has_actions());
+    }
+
+    #[test]
+    fn test_title_drift_escapes_quotes() {
+        let title = r#"Fix "login" bug"#;
+        let escaped = title.replace('"', r#"\""#);
+        assert_eq!(escaped, r#"Fix \"login\" bug"#);
     }
 }

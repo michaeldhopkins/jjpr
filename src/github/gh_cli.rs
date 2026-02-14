@@ -30,19 +30,14 @@ impl GhCli {
 }
 
 impl GitHub for GhCli {
-    fn find_open_pr(
+    fn list_open_prs(
         &self,
         owner: &str,
         repo: &str,
-        head: &str,
-    ) -> Result<Option<PullRequest>> {
-        let endpoint = format!(
-            "repos/{owner}/{repo}/pulls?head={owner}:{head}&state=open"
-        );
-        let output = self.run_gh(&["api", &endpoint])?;
-        let prs: Vec<PullRequest> = serde_json::from_str(&output)
-            .context("failed to parse PR list response")?;
-        Ok(prs.into_iter().next())
+    ) -> Result<Vec<PullRequest>> {
+        let endpoint = format!("repos/{owner}/{repo}/pulls?state=open");
+        let output = self.run_gh(&["api", &endpoint, "--paginate"])?;
+        serde_json::from_str(&output).context("failed to parse PR list response")
     }
 
     fn create_pr(

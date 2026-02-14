@@ -45,7 +45,7 @@ enum Commands {
         /// Bookmark to submit (inferred from working copy if omitted)
         bookmark: Option<String>,
 
-        /// Request reviewers (comma-separated usernames)
+        /// Request reviewers on all PRs in the stack (comma-separated)
         #[arg(long, value_delimiter = ',')]
         reviewer: Vec<String>,
 
@@ -198,7 +198,8 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     }
 
     // Try to resolve GitHub remote for PR info
-    let pr_info = try_load_pr_info(&jj, &graph);
+    let github = GhCli::new();
+    let pr_info = try_load_pr_info(&jj, &github, &graph);
 
     for (i, stack) in graph.stacks.iter().enumerate() {
         if i > 0 {
@@ -252,32 +253,29 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
 }
 
 fn try_load_pr_info(
-    jj: &JjRunner,
+    jj: &dyn Jj,
+    github: &dyn GitHub,
     graph: &change_graph::ChangeGraph,
 ) -> Option<HashMap<String, PullRequest>> {
     let remotes = jj.get_git_remotes().ok()?;
     let (_remote_name, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
-    let github = GhCli::new();
 
-    let mut map = HashMap::new();
-    for stack in &graph.stacks {
-        for segment in &stack.segments {
-            for bookmark in &segment.bookmarks {
-                if let Ok(Some(pr)) =
-                    github.find_open_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)
-                {
-                    map.insert(bookmark.name.clone(), pr);
-                }
+    let all_prs = match github.list_open_prs(&repo_info.owner, &repo_info.repo) {
+        Ok(prs) => prs,
+        Err(_) => {
+            if !graph.stacks.is_empty() && github.get_authenticated_user().is_err() {
+                eprintln!("hint: run `jjpr auth test` to see PR status in stack overview");
             }
+            return Some(HashMap::new());
         }
-    }
+    };
 
-    if map.is_empty() && !graph.stacks.is_empty() {
-        // Check if gh auth works; if not, hint to the user
-        if github.get_authenticated_user().is_err() {
-            eprintln!("hint: run `jjpr auth test` to see PR status in stack overview");
-        }
-    }
+    let owner_prefix = format!("{}:", repo_info.owner);
+    let map: HashMap<String, PullRequest> = all_prs
+        .into_iter()
+        .filter(|pr| pr.head.label.starts_with(&owner_prefix) || pr.head.label.is_empty())
+        .map(|pr| (pr.head.ref_name.clone(), pr))
+        .collect();
 
     Some(map)
 }
