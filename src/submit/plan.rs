@@ -282,7 +282,7 @@ pub fn create_submission_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::types::{IssueComment, PullRequestRef};
+    use crate::github::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, ReviewSummary};
     use crate::jj::types::LogEntry;
 
     struct StubGitHub {
@@ -336,6 +336,10 @@ mod tests {
         ) -> Result<Option<PullRequest>> {
             Ok(None)
         }
+        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+        fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+        fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+        fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
     }
 
     fn make_segment(name: &str, synced: bool) -> NarrowedSegment {
@@ -663,6 +667,10 @@ mod tests {
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         let segments = vec![
@@ -704,6 +712,10 @@ mod tests {
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         let segments = vec![make_segment("feature", false)];
@@ -752,6 +764,10 @@ mod tests {
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         // auth is not synced but already merged — should NOT be pushed
@@ -869,6 +885,10 @@ mod tests {
             fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { unimplemented!() }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         let segments = vec![make_segment("feature", false)];
@@ -899,6 +919,10 @@ mod tests {
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
                 anyhow::bail!("network timeout")
             }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         let segments = vec![make_segment("feature", false)];

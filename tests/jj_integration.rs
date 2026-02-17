@@ -106,7 +106,7 @@ fn test_infer_bookmark_from_working_copy() {
     // Working copy is at @, which is the child of the "profile" commit.
     // The stack contains auth -> profile, so inference should return "profile".
     let inferred = analyze::infer_target_bookmark(&graph, &jj).unwrap();
-    assert_eq!(inferred, "profile");
+    assert_eq!(inferred.as_deref(), Some("profile"));
 }
 
 #[test]

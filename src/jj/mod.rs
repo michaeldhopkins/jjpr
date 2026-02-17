@@ -17,4 +17,7 @@ pub trait Jj: Send + Sync {
     fn get_default_branch(&self) -> Result<String>;
     fn push_bookmark(&self, name: &str, remote: &str) -> Result<()>;
     fn get_working_copy_commit_id(&self) -> Result<String>;
+    /// Rebase the subtree rooted at `source` onto `destination`.
+    /// Runs `jj rebase -s <source> -d <destination>`.
+    fn rebase_onto(&self, source: &str, destination: &str) -> Result<()>;
 }

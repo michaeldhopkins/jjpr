@@ -100,6 +100,35 @@ pub trait GitHub: Send + Sync {
         repo: &str,
         head: &str,
     ) -> Result<Option<PullRequest>>;
+
+    fn merge_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        method: MergeMethod,
+    ) -> Result<()>;
+
+    fn get_pr_checks_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        head_ref: &str,
+    ) -> Result<ChecksStatus>;
+
+    fn get_pr_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<ReviewSummary>;
+
+    fn get_pr_mergeability(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PrMergeability>;
 }
 
 #[cfg(test)]

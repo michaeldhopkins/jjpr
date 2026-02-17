@@ -63,7 +63,7 @@ pub fn analyze_submission_graph(
 ///
 /// Queries `trunk()..@` to find which stack the working copy belongs to,
 /// then returns the leaf (topmost) bookmark of that stack.
-pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<String> {
+pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<Option<String>> {
     let wc_commit_id = jj.get_working_copy_commit_id()?;
     let wc_ancestry = jj.get_changes_to_commit(&wc_commit_id)?;
     let wc_change_ids: HashSet<String> = wc_ancestry.iter()
@@ -74,19 +74,14 @@ pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<String>
             seg.bookmarks.iter().any(|b| wc_change_ids.contains(&b.change_id))
         );
         if overlaps {
-            // Return the leaf bookmark (last segment's first bookmark)
             let leaf = stack.segments.last()
                 .and_then(|s| s.bookmarks.first())
                 .ok_or_else(|| anyhow::anyhow!("stack has no bookmarks"))?;
-            return Ok(leaf.name.clone());
+            return Ok(Some(leaf.name.clone()));
         }
     }
 
-    anyhow::bail!(
-        "no bookmark found in the working copy's ancestry. \
-         Set a bookmark with `jj bookmark set <name>` or specify one: \
-         `jjpr submit <bookmark>`"
-    )
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -216,6 +211,7 @@ mod tests {
         fn get_working_copy_commit_id(&self) -> Result<String> {
             Ok(self.wc_commit_id.clone())
         }
+        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
     }
 
     fn make_log_entry(change_id: &str) -> LogEntry {
@@ -245,7 +241,7 @@ mod tests {
         };
 
         let result = infer_target_bookmark(&graph, &jj).unwrap();
-        assert_eq!(result, "profile");
+        assert_eq!(result.as_deref(), Some("profile"));
     }
 
     #[test]
@@ -265,7 +261,7 @@ mod tests {
         };
 
         let result = infer_target_bookmark(&graph, &jj).unwrap();
-        assert_eq!(result, "profile");
+        assert_eq!(result.as_deref(), Some("profile"));
     }
 
     #[test]
@@ -276,8 +272,8 @@ mod tests {
             branch_changes: vec![make_log_entry("ch_other")],
         };
 
-        let err = infer_target_bookmark(&graph, &jj).unwrap_err();
-        assert!(err.to_string().contains("no bookmark found"));
+        let result = infer_target_bookmark(&graph, &jj).unwrap();
+        assert!(result.is_none());
     }
 
     #[test]
@@ -298,9 +294,7 @@ mod tests {
             branch_changes: vec![make_log_entry("ch_wc")],
         };
 
-        let err = infer_target_bookmark(&graph, &jj).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("no bookmark found"), "got: {msg}");
-        assert!(msg.contains("jj bookmark set"), "should suggest setting a bookmark: {msg}");
+        let result = infer_target_bookmark(&graph, &jj).unwrap();
+        assert!(result.is_none());
     }
 }

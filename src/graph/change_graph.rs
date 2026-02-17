@@ -235,6 +235,7 @@ mod tests {
         fn get_working_copy_commit_id(&self) -> Result<String> {
             Ok("wc_commit".to_string())
         }
+        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
     }
 
     fn make_log_entry(

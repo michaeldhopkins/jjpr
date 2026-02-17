@@ -276,7 +276,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::github::types::{IssueComment, PullRequestRef, RepoInfo};
+    use crate::github::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, RepoInfo, ReviewSummary};
     use crate::jj::types::{Bookmark, GitRemote, LogEntry};
     use crate::jj::Jj;
 
@@ -394,6 +394,10 @@ mod tests {
         ) -> Result<Option<PullRequest>> {
             Ok(None)
         }
+        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+        fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+        fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+        fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
     }
 
     struct RecordingJj {
@@ -435,6 +439,7 @@ mod tests {
         fn get_working_copy_commit_id(&self) -> Result<String> {
             Ok("wc_commit".to_string())
         }
+        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
     }
 
     fn make_bookmark(name: &str) -> Bookmark {
@@ -616,6 +621,10 @@ mod tests {
             ) -> Result<Option<PullRequest>> {
                 Ok(None)
             }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         let github = GitHubWithExistingComment {
@@ -888,6 +897,7 @@ mod tests {
                 Ok(())
             }
             fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
         }
 
         let github = RecordingGitHub::new();
@@ -1072,6 +1082,10 @@ mod tests {
             ) -> Result<Option<PullRequest>> {
                 Ok(None)
             }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
         }
 
         let existing_pr = PullRequest {

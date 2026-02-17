@@ -2,7 +2,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-use super::types::{IssueComment, PullRequest};
+use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, ReviewSummary};
 use super::GitHub;
 
 /// GitHub implementation that shells out to the `gh` CLI.
@@ -204,5 +204,145 @@ impl GitHub for GhCli {
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("user response missing login field"))
+    }
+
+    fn merge_pr(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        method: MergeMethod,
+    ) -> Result<()> {
+        let endpoint = format!("repos/{owner}/{repo}/pulls/{number}/merge");
+        let method_arg = format!("merge_method={method}");
+        self.run_gh(&[
+            "api", &endpoint,
+            "-X", "PUT",
+            "-f", &method_arg,
+        ])?;
+        Ok(())
+    }
+
+    fn get_pr_checks_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        head_ref: &str,
+    ) -> Result<ChecksStatus> {
+        // Check runs (Actions, third-party apps)
+        let check_runs_endpoint =
+            format!("repos/{owner}/{repo}/commits/{head_ref}/check-runs");
+        let check_runs_output = self.run_gh(&["api", &check_runs_endpoint])?;
+        let check_runs: serde_json::Value = serde_json::from_str(&check_runs_output)
+            .context("failed to parse check-runs response")?;
+
+        // Legacy commit status API
+        let status_endpoint =
+            format!("repos/{owner}/{repo}/commits/{head_ref}/status");
+        let status_output = self.run_gh(&["api", &status_endpoint])?;
+        let status: serde_json::Value = serde_json::from_str(&status_output)
+            .context("failed to parse commit status response")?;
+
+        let runs = check_runs["check_runs"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or_default();
+        let statuses = status["statuses"]
+            .as_array()
+            .map(|a| a.as_slice())
+            .unwrap_or_default();
+
+        if runs.is_empty() && statuses.is_empty() {
+            return Ok(ChecksStatus::None);
+        }
+
+        let mut has_pending = false;
+        let mut has_failure = false;
+
+        for run in runs {
+            match run["conclusion"].as_str() {
+                Some("success") | Some("skipped") | Some("neutral") => {}
+                None if run["status"].as_str() == Some("in_progress")
+                    || run["status"].as_str() == Some("queued") =>
+                {
+                    has_pending = true;
+                }
+                _ => has_failure = true,
+            }
+        }
+
+        for s in statuses {
+            match s["state"].as_str() {
+                Some("success") => {}
+                Some("pending") => has_pending = true,
+                _ => has_failure = true,
+            }
+        }
+
+        if has_failure {
+            Ok(ChecksStatus::Fail)
+        } else if has_pending {
+            Ok(ChecksStatus::Pending)
+        } else {
+            Ok(ChecksStatus::Pass)
+        }
+    }
+
+    fn get_pr_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<ReviewSummary> {
+        let endpoint = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
+        let output = self.run_gh(&["api", &endpoint, "--paginate"])?;
+        let reviews: Vec<serde_json::Value> = serde_json::from_str(&output)
+            .context("failed to parse reviews response")?;
+
+        // Track each reviewer's latest meaningful review state.
+        // COMMENTED and PENDING don't change approval status on GitHub,
+        // so we skip them to avoid overwriting a valid APPROVED state.
+        let mut latest: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for review in &reviews {
+            let user = review["user"]["login"].as_str().unwrap_or_default();
+            let state = review["state"].as_str().unwrap_or_default();
+            if !user.is_empty()
+                && matches!(state, "APPROVED" | "CHANGES_REQUESTED" | "DISMISSED")
+            {
+                latest.insert(user.to_string(), state.to_string());
+            }
+        }
+
+        let approved_count = latest.values().filter(|s| *s == "APPROVED").count() as u32;
+        let changes_requested = latest.values().any(|s| s == "CHANGES_REQUESTED");
+
+        Ok(ReviewSummary {
+            approved_count,
+            changes_requested,
+        })
+    }
+
+    fn get_pr_mergeability(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PrMergeability> {
+        let endpoint = format!("repos/{owner}/{repo}/pulls/{number}");
+        let output = self.run_gh(&["api", &endpoint])?;
+        let pr: serde_json::Value = serde_json::from_str(&output)
+            .context("failed to parse PR mergeability response")?;
+
+        let mergeable = pr["mergeable"].as_bool();
+        let mergeable_state = pr["mergeable_state"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+
+        Ok(PrMergeability {
+            mergeable,
+            mergeable_state,
+        })
     }
 }

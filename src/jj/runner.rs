@@ -150,6 +150,11 @@ impl Jj for JjRunner {
         }
         Ok(id)
     }
+
+    fn rebase_onto(&self, source: &str, destination: &str) -> Result<()> {
+        self.run_jj(&["rebase", "-s", source, "-d", destination])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

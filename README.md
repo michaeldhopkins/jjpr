@@ -21,6 +21,12 @@ jjpr submit --reviewer alice,bob  # Request reviewers on all PRs
 jjpr submit --remote upstream     # Use a specific git remote
 jjpr submit --draft               # Create new PRs as drafts
 jjpr submit --ready               # Mark existing draft PRs as ready
+jjpr merge                        # Merge stack from the bottom up
+jjpr merge <bookmark>             # Merge stack up to bookmark
+jjpr merge --merge-method rebase  # Use rebase merge method
+jjpr merge --no-ci-check          # Merge even if CI hasn't passed
+jjpr merge --dry-run              # Preview without executing
+jjpr config init                  # Create default config file
 jjpr --no-fetch                   # Show stacks without fetching
 jjpr submit --no-fetch            # Submit without fetching first
 jjpr auth test                    # Test GitHub authentication
@@ -79,6 +85,52 @@ The PR body is wrapped in HTML comment markers. When you re-submit after changin
 If you manually remove the markers from the PR body, jjpr will stop updating the description for that PR.
 
 The PR title is not automatically updated after creation. If you change your commit's first line, jjpr will warn you about the drift.
+
+### Merging a stack
+
+`jjpr merge` merges your stack from the bottom up. For each PR, it checks:
+
+- PR is not a draft
+- CI checks pass (configurable)
+- Required number of approvals (configurable)
+- No changes requested
+- No merge conflicts
+
+If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, rebases the remaining stack onto it with `jj rebase`, pushes all remaining bookmarks, and checks whether the next PR's base needs retargeting (GitHub sometimes does this automatically). Then it checks the next PR and continues until blocked or done.
+
+If a PR is blocked (e.g., CI pending), jjpr reports why and stops. Run `jjpr merge` again once the blocker is resolved.
+
+```
+  Skipping 'auth' — PR #42 already merged
+  Merging 'profile' (PR #43, squash)...
+    https://github.com/o/r/pull/43
+  Fetching remotes...
+  Rebasing remaining stack onto main...
+  Pushing 'settings'...
+  Updating PR #44 base to 'main'...
+  Blocked at 'settings' (PR #44):
+    - CI checks are pending
+  Run `jjpr merge` again once the issue is resolved.
+```
+
+CLI flags override the config file: `--merge-method`, `--required-approvals`, `--no-ci-check`.
+
+### Configuration
+
+jjpr uses an optional config file at `~/.config/jjpr/config.toml` (or `$XDG_CONFIG_HOME/jjpr/config.toml`). Run `jjpr config init` to create one with defaults:
+
+```toml
+# Merge method: "squash", "merge", or "rebase"
+merge_method = "squash"
+
+# Number of approving reviews required before merging
+required_approvals = 1
+
+# Whether CI checks must pass before merging
+require_ci_pass = true
+```
+
+If no config file exists, defaults are used. CLI flags always override the config file.
 
 ### Fetching
 

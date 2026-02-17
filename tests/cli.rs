@@ -105,3 +105,36 @@ fn test_submit_help_shows_no_fetch() {
         .success()
         .stdout(predicate::str::contains("--no-fetch"));
 }
+
+#[test]
+fn test_merge_help() {
+    jjpr()
+        .args(["merge", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Merge a stack of PRs from the bottom up"))
+        .stdout(predicate::str::contains("--merge-method"))
+        .stdout(predicate::str::contains("--required-approvals"))
+        .stdout(predicate::str::contains("--no-ci-check"))
+        .stdout(predicate::str::contains("--remote"))
+        .stdout(predicate::str::contains("--dry-run"));
+}
+
+#[test]
+fn test_config_init_help() {
+    jjpr()
+        .args(["config", "init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Create a default config file"));
+}
+
+#[test]
+fn test_help_shows_merge_command() {
+    jjpr()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("merge"))
+        .stdout(predicate::str::contains("config"));
+}

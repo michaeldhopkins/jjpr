@@ -14,11 +14,13 @@ use clap::{Parser, Subcommand};
 
 use std::collections::HashMap;
 
+use jjpr::config;
 use jjpr::github::remote;
-use jjpr::github::types::PullRequest;
+use jjpr::github::types::{MergeMethod, PullRequest};
 use jjpr::github::{GhCli, GitHub};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
+use jjpr::merge;
 use jjpr::submit::{analyze, execute, plan, resolve};
 
 #[derive(Parser)]
@@ -67,10 +69,39 @@ enum Commands {
         #[arg(long, conflicts_with = "draft")]
         ready: bool,
     },
+    /// Merge a stack of PRs from the bottom up.
+    /// Merges the bottommost mergeable PR, fetches, rebases the remaining stack
+    /// onto the updated default branch, pushes, and repeats until blocked.
+    /// Idempotent — re-run after CI passes or reviews are approved to continue.
+    Merge {
+        /// Bookmark to merge (inferred from working copy if omitted)
+        bookmark: Option<String>,
+
+        /// Merge method (overrides config file)
+        #[arg(long, value_enum)]
+        merge_method: Option<MergeMethod>,
+
+        /// Required approvals before merging (overrides config file)
+        #[arg(long)]
+        required_approvals: Option<u32>,
+
+        /// Skip CI check requirement
+        #[arg(long)]
+        no_ci_check: bool,
+
+        /// Git remote name (must be a GitHub remote)
+        #[arg(long)]
+        remote: Option<String>,
+    },
     /// Manage GitHub authentication
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+    /// Manage jjpr configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
     },
 }
 
@@ -80,6 +111,12 @@ enum AuthCommands {
     Test,
     /// Show authentication setup instructions
     Setup,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Create a default config file at ~/.config/jjpr/config.toml
+    Init,
 }
 
 fn main() -> Result<()> {
@@ -107,6 +144,26 @@ fn main() -> Result<()> {
                 draft_mode,
             })
         }
+        Some(Commands::Merge {
+            bookmark,
+            merge_method,
+            required_approvals,
+            no_ci_check,
+            remote,
+        }) => {
+            let ci_override = if no_ci_check { Some(false) } else { None };
+            cmd_merge(
+                MergeArgs {
+                    bookmark: bookmark.as_deref(),
+                    merge_method,
+                    required_approvals,
+                    ci_pass_override: ci_override,
+                    preferred_remote: remote.as_deref(),
+                },
+                cli.dry_run,
+                cli.no_fetch,
+            )
+        }
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Test => {
                 let github = GhCli::new();
@@ -116,6 +173,9 @@ fn main() -> Result<()> {
                 jjpr::auth::print_auth_help();
                 Ok(())
             }
+        },
+        Some(Commands::Config { command }) => match command {
+            ConfigCommands::Init => cmd_config_init(),
         },
         None => cmd_stack_overview(cli.no_fetch),
     }
@@ -141,6 +201,26 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let jj = JjRunner::new(repo_path)?;
     let github = GhCli::new();
 
+    // Infer bookmark before fetching to avoid a slow network round-trip
+    // when there's nothing to submit
+    let target_bookmark = match opts.bookmark {
+        Some(name) => name.to_string(),
+        None => {
+            let graph = change_graph::build_change_graph(&jj)?;
+            match analyze::infer_target_bookmark(&graph, &jj)? {
+                Some(inferred) => {
+                    println!("Submitting stack for '{inferred}' (inferred from working copy)\n");
+                    inferred
+                }
+                None => {
+                    println!("No bookmark found in the working copy's ancestry.");
+                    println!("Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr submit <bookmark>`");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
     if !opts.no_fetch {
         eprintln!("Fetching remotes...");
         jj.git_fetch()?;
@@ -152,15 +232,6 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let default_branch = jj.get_default_branch()?;
 
     let graph = change_graph::build_change_graph(&jj)?;
-
-    let target_bookmark = match opts.bookmark {
-        Some(name) => name.to_string(),
-        None => {
-            let inferred = analyze::infer_target_bookmark(&graph, &jj)?;
-            println!("Submitting stack for '{inferred}' (inferred from working copy)\n");
-            inferred
-        }
-    };
 
     let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
 
@@ -281,6 +352,101 @@ fn try_load_pr_info(
     };
 
     Some(jjpr::github::build_pr_map(all_prs, &repo_info.owner))
+}
+
+struct MergeArgs<'a> {
+    bookmark: Option<&'a str>,
+    merge_method: Option<MergeMethod>,
+    required_approvals: Option<u32>,
+    /// `None` = use config, `Some(false)` = `--no-ci-check`
+    ci_pass_override: Option<bool>,
+    preferred_remote: Option<&'a str>,
+}
+
+fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
+    let repo_path = find_repo_root()?;
+    let jj = JjRunner::new(repo_path)?;
+    let github = GhCli::new();
+    let cfg = config::load_config()?;
+
+    // Infer bookmark before fetching to avoid a slow network round-trip
+    // when there's nothing to merge
+    let target_bookmark = match args.bookmark {
+        Some(name) => name.to_string(),
+        None => {
+            let graph = change_graph::build_change_graph(&jj)?;
+            match analyze::infer_target_bookmark(&graph, &jj)? {
+                Some(inferred) => {
+                    println!("Merging stack for '{inferred}' (inferred from working copy)\n");
+                    inferred
+                }
+                None => {
+                    println!("No bookmark found in the working copy's ancestry.");
+                    println!("Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr merge <bookmark>`");
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    if !no_fetch {
+        eprintln!("Fetching remotes...");
+        jj.git_fetch()?;
+    }
+
+    let remotes = jj.get_git_remotes()?;
+    let (remote_name, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
+
+    let default_branch = jj.get_default_branch()?;
+
+    let graph = change_graph::build_change_graph(&jj)?;
+
+    let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
+
+    let interactive = std::io::stdout().is_terminal();
+    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
+
+    let merge_options = merge::plan::MergeOptions {
+        merge_method: args.merge_method.unwrap_or(cfg.merge_method),
+        required_approvals: args.required_approvals.unwrap_or(cfg.required_approvals),
+        require_ci_pass: args.ci_pass_override.unwrap_or(cfg.require_ci_pass),
+    };
+
+    let merge_plan = merge::plan::create_merge_plan(
+        &github,
+        &segments,
+        &repo_info,
+        &default_branch,
+        &remote_name,
+        &merge_options,
+    )?;
+
+    if args.bookmark.is_some() {
+        println!("Merging stack for '{target_bookmark}'...\n");
+    }
+
+    let result = merge::execute::execute_merge_plan(
+        &jj, &github, &merge_plan, &segments, dry_run,
+    )?;
+
+    if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
+        println!("\nNo PRs to merge in this stack.");
+    } else if result.blocked_at.is_some() {
+        println!("\nRun `jjpr merge` again once the issue is resolved.");
+    } else if result.merged.is_empty() && !result.skipped_merged.is_empty() {
+        println!("\nAll PRs in this stack are already merged.");
+    } else {
+        println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
+    }
+
+    Ok(())
+}
+
+fn cmd_config_init() -> Result<()> {
+    let path = config::write_default_config()?;
+    println!("Created default config at {}", path.display());
+    println!("Edit it to customize merge behavior.");
+    Ok(())
 }
 
 fn find_repo_root() -> Result<PathBuf> {
