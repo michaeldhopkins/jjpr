@@ -11,6 +11,8 @@ use crate::jj::Jj;
 pub struct SubmissionAnalysis {
     pub target_bookmark: String,
     pub relevant_segments: Vec<BookmarkSegment>,
+    /// If the stack is based on a foreign branch (not trunk), this is the branch name.
+    pub base_branch: Option<String>,
 }
 
 /// Find the stack containing `target_bookmark` and return all segments
@@ -49,6 +51,7 @@ pub fn analyze_submission_graph(
             return Ok(SubmissionAnalysis {
                 target_bookmark: target_bookmark.to_string(),
                 relevant_segments: relevant,
+                base_branch: stack.base_branch.clone(),
             });
         }
     }
@@ -133,6 +136,7 @@ mod tests {
             stack_roots: HashSet::new(),
             stacks: vec![BranchStack {
                 segments: segments.clone(),
+                base_branch: None,
             }],
             excluded_bookmarks: HashSet::new(),
             excluded_bookmark_count: 0,
@@ -296,5 +300,27 @@ mod tests {
 
         let result = infer_target_bookmark(&graph, &jj).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_analyze_propagates_base_branch() {
+        let segments = vec![
+            make_segment("auth", "ch1"),
+            make_segment("profile", "ch2"),
+        ];
+        let mut graph = make_graph(segments);
+        graph.stacks[0].base_branch = Some("coworker-feat".to_string());
+
+        let analysis = analyze_submission_graph(&graph, "profile").unwrap();
+        assert_eq!(analysis.base_branch, Some("coworker-feat".to_string()));
+    }
+
+    #[test]
+    fn test_analyze_no_base_branch_when_none() {
+        let segments = vec![make_segment("feature", "ch1")];
+        let graph = make_graph(segments);
+
+        let analysis = analyze_submission_graph(&graph, "feature").unwrap();
+        assert!(analysis.base_branch.is_none());
     }
 }

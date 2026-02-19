@@ -68,6 +68,10 @@ enum Commands {
         /// Mark existing draft PRs as ready for review
         #[arg(long, conflicts_with = "draft")]
         ready: bool,
+
+        /// Base branch for the bottom of the stack (auto-detected from remote bookmarks if omitted)
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Merge a stack of PRs from the bottom up.
     /// Merges the bottommost mergeable PR, fetches, rebases the remaining stack
@@ -92,6 +96,10 @@ enum Commands {
         /// Git remote name (must be a GitHub remote)
         #[arg(long)]
         remote: Option<String>,
+
+        /// Base branch for the bottom of the stack (auto-detected from remote bookmarks if omitted)
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Manage GitHub authentication
     Auth {
@@ -129,6 +137,7 @@ fn main() -> Result<()> {
             remote,
             draft,
             ready,
+            base,
         }) => {
             let draft_mode = match (draft, ready) {
                 (true, _) => DraftMode::Draft,
@@ -142,6 +151,7 @@ fn main() -> Result<()> {
                 dry_run: cli.dry_run,
                 no_fetch: cli.no_fetch,
                 draft_mode,
+                base_override: base.as_deref(),
             })
         }
         Some(Commands::Merge {
@@ -150,6 +160,7 @@ fn main() -> Result<()> {
             required_approvals,
             no_ci_check,
             remote,
+            base,
         }) => {
             let ci_override = if no_ci_check { Some(false) } else { None };
             cmd_merge(
@@ -159,6 +170,7 @@ fn main() -> Result<()> {
                     required_approvals,
                     ci_pass_override: ci_override,
                     preferred_remote: remote.as_deref(),
+                    base_override: base.as_deref(),
                 },
                 cli.dry_run,
                 cli.no_fetch,
@@ -194,6 +206,7 @@ struct SubmitOptions<'a> {
     dry_run: bool,
     no_fetch: bool,
     draft_mode: DraftMode,
+    base_override: Option<&'a str>,
 }
 
 fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
@@ -238,6 +251,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let interactive = std::io::stdout().is_terminal();
     let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
 
+    let stack_base = opts.base_override.or(analysis.base_branch.as_deref());
     let submission_plan = plan::create_submission_plan(
         &github,
         &segments,
@@ -247,6 +261,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         matches!(opts.draft_mode, DraftMode::Draft),
         matches!(opts.draft_mode, DraftMode::Ready),
         opts.reviewers,
+        stack_base,
     )?;
 
     if opts.bookmark.is_some() {
@@ -316,6 +331,9 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
                 sync_status
             );
         }
+        if let Some(base) = &stack.base_branch {
+            println!("  (based on {base})");
+        }
     }
 
     if graph.excluded_bookmark_count > 0 {
@@ -361,6 +379,7 @@ struct MergeArgs<'a> {
     /// `None` = use config, `Some(false)` = `--no-ci-check`
     ci_pass_override: Option<bool>,
     preferred_remote: Option<&'a str>,
+    base_override: Option<&'a str>,
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
@@ -412,6 +431,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         require_ci_pass: args.ci_pass_override.unwrap_or(cfg.require_ci_pass),
     };
 
+    let stack_base = args.base_override.or(analysis.base_branch.as_deref());
     let merge_plan = merge::plan::create_merge_plan(
         &github,
         &segments,
@@ -419,6 +439,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         &default_branch,
         &remote_name,
         &merge_options,
+        stack_base,
     )?;
 
     if args.bookmark.is_some() {

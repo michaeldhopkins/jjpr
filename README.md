@@ -26,6 +26,8 @@ jjpr merge <bookmark>             # Merge stack up to bookmark
 jjpr merge --merge-method rebase  # Use rebase merge method
 jjpr merge --no-ci-check          # Merge even if CI hasn't passed
 jjpr merge --dry-run              # Preview without executing
+jjpr submit --base coworker-feat  # Override auto-detected base branch
+jjpr merge --base coworker-feat   # Override auto-detected base branch
 jjpr config init                  # Create default config file
 jjpr --no-fetch                   # Show stacks without fetching
 jjpr submit --no-fetch            # Submit without fetching first
@@ -69,6 +71,18 @@ Submit is idempotent — run it repeatedly as you work. After rebasing, editing 
 PRs are created with the commit description as the title and body.
 
 When no bookmark is specified, jjpr infers the target from your working copy's position — it finds which stack overlaps with `trunk()..@` and submits up to the topmost bookmark.
+
+### Stacking on other branches
+
+jjpr auto-detects when your stack is based on someone else's branch. If a commit in your stack's ancestry has a remote bookmark that isn't one of your own, jjpr treats it as a foreign base and targets your first PR at that branch instead of the default branch (e.g., `main`).
+
+```
+  auth (1 change, #42 open, synced)
+  profile (1 change, needs push)
+  (based on coworker-feat)
+```
+
+Use `--base <branch>` on `submit` or `merge` to override auto-detection — for example, when the coworker hasn't pushed yet, or when you want to target a specific branch.
 
 ### Draft PRs
 

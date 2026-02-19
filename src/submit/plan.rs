@@ -143,6 +143,7 @@ pub fn create_submission_plan(
     draft: bool,
     ready: bool,
     reviewers: &[String],
+    stack_base: Option<&str>,
 ) -> Result<SubmissionPlan> {
     // Batch: one API call for all open PRs instead of one per bookmark
     let all_open_prs = github
@@ -168,7 +169,7 @@ pub fn create_submission_plan(
 
         // Determine expected base branch
         let base_branch = if i == 0 {
-            default_branch.to_string()
+            stack_base.unwrap_or(default_branch).to_string()
         } else {
             segments[i - 1].bookmark.name.clone()
         };
@@ -391,7 +392,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_push.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
@@ -413,7 +414,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_needing_push.is_empty());
         assert!(plan.bookmarks_needing_pr.is_empty());
         assert!(plan.bookmarks_needing_base_update.is_empty());
@@ -435,7 +436,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_base_update.len(), 1);
         assert_eq!(
             plan.bookmarks_needing_base_update[0].expected_base,
@@ -458,7 +459,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
         assert_eq!(plan.bookmarks_needing_pr[2].base_branch, "profile");
@@ -477,7 +478,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -492,7 +493,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert_eq!(plan.bookmarks_with_title_drift.len(), 1);
         assert_eq!(plan.bookmarks_with_title_drift[0].current_title, "Old title");
         assert_eq!(plan.bookmarks_with_title_drift[0].expected_title, "Add feature");
@@ -507,7 +508,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
         let reviewers = ["alice".to_string()];
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &reviewers).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &reviewers, None).unwrap();
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
         assert_eq!(plan.bookmarks_needing_reviewers[0].1, 1); // pr number
     }
@@ -523,7 +524,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         // The new body should contain the updated managed section
         assert!(extract_managed_body(&plan.bookmarks_needing_body_update[0].new_body)
@@ -541,7 +542,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -560,7 +561,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         let new_body = &plan.bookmarks_needing_body_update[0].new_body;
         assert!(new_body.starts_with("User notes above"));
@@ -580,7 +581,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -680,7 +681,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &GitHubWithMergedPr, &segments, "origin", &repo, "main", false, false, &[],
+            &GitHubWithMergedPr, &segments, "origin", &repo, "main", false, false, &[], None,
         ).unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
@@ -722,7 +723,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &GitHubWithClosedPr, &segments, "origin", &repo, "main", false, false, &[],
+            &GitHubWithClosedPr, &segments, "origin", &repo, "main", false, false, &[], None,
         ).unwrap();
 
         // A closed-but-not-merged PR should NOT be treated as merged
@@ -775,7 +776,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &GitHubWithMergedPr, &segments, "origin", &repo, "main", false, false, &[],
+            &GitHubWithMergedPr, &segments, "origin", &repo, "main", false, false, &[], None,
         ).unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
@@ -794,7 +795,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_with_title_drift.is_empty());
     }
 
@@ -806,7 +807,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_needing_reviewers.is_empty());
     }
 
@@ -823,11 +824,11 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         // With ready=false, no bookmarks_needing_ready
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_needing_ready.is_empty());
 
         // With ready=true, draft PR is identified
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_ready.len(), 1);
         assert_eq!(plan.bookmarks_needing_ready[0].pr_node_id, "PR_kwDOxyz");
     }
@@ -843,7 +844,7 @@ mod tests {
         let segments = vec![make_segment("feature", false)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
 
         // Fork PR should be filtered out — treated as if no PR exists
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
@@ -861,7 +862,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[]).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, false, &[], None).unwrap();
 
         // Empty label (e.g. from test stubs) should pass through the filter
         assert!(plan.bookmarks_needing_pr.is_empty());
@@ -894,7 +895,7 @@ mod tests {
         let segments = vec![make_segment("feature", false)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let err = create_submission_plan(&FailingGitHub, &segments, "origin", &repo, "main", false, false, &[])
+        let err = create_submission_plan(&FailingGitHub, &segments, "origin", &repo, "main", false, false, &[], None)
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("jjpr auth test"), "error should hint at auth: {msg}");
@@ -930,9 +931,42 @@ mod tests {
 
         // Should succeed (not abort) and plan a PR despite merged check failing
         let plan = create_submission_plan(
-            &MergedCheckFailsGitHub, &segments, "origin", &repo, "main", false, false, &[],
+            &MergedCheckFailsGitHub, &segments, "origin", &repo, "main", false, false, &[], None,
         ).unwrap();
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert!(plan.bookmarks_already_merged.is_empty());
+    }
+
+    #[test]
+    fn test_plan_uses_stack_base_for_first_pr() {
+        let gh = StubGitHub {
+            prs: HashMap::new(),
+        };
+        let segments = vec![
+            make_segment("auth", false),
+            make_segment("profile", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, "main", false, false, &[],
+            Some("coworker-feat"),
+        ).unwrap();
+        assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "coworker-feat");
+        assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
+    }
+
+    #[test]
+    fn test_plan_falls_back_to_default_branch() {
+        let gh = StubGitHub {
+            prs: HashMap::new(),
+        };
+        let segments = vec![make_segment("feature", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, "main", false, false, &[], None,
+        ).unwrap();
+        assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
     }
 }

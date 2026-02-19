@@ -35,6 +35,8 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
     let mut fully_collected: HashSet<String> = HashSet::new();
     let mut excluded_names: HashSet<String> = HashSet::new();
     let mut excluded_count = 0;
+    // Maps root change_id → foreign branch name for stacks based on non-trunk branches
+    let mut foreign_bases: HashMap<String, String> = HashMap::new();
 
     for bookmark in &bookmarks {
         all_bookmarks.insert(bookmark.name.clone(), bookmark.clone());
@@ -92,6 +94,11 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
             adjacency_list.insert(last.clone(), stopped.clone());
         }
 
+        // Track foreign base for this path's root
+        if let (Some(root), Some(base)) = (&prev_change_id, &result.foreign_base) {
+            foreign_bases.insert(root.clone(), base.clone());
+        }
+
         for change_id in result.seen_change_ids {
             fully_collected.insert(change_id);
         }
@@ -130,6 +137,7 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
         &adjacency_list,
         &change_id_to_segment,
         &all_bookmarks,
+        &foreign_bases,
     );
 
     Ok(ChangeGraph {
@@ -150,6 +158,7 @@ fn build_stacks(
     adjacency_list: &HashMap<String, String>,
     change_id_to_segment: &HashMap<String, Vec<LogEntry>>,
     bookmarks: &HashMap<String, Bookmark>,
+    foreign_bases: &HashMap<String, String>,
 ) -> Vec<BranchStack> {
     // Invert adjacency: parent -> child, so we can walk from root to leaf
     let mut parent_to_child: HashMap<&String, &String> = HashMap::new();
@@ -190,7 +199,8 @@ fn build_stacks(
             .collect();
 
         if !segments.is_empty() {
-            stacks.push(BranchStack { segments });
+            let base_branch = path.first().and_then(|root| foreign_bases.get(root)).cloned();
+            stacks.push(BranchStack { segments, base_branch });
         }
     }
 
@@ -398,5 +408,108 @@ mod tests {
         assert_eq!(graph.excluded_bookmark_count, 0);
         // Each bookmark is its own stack (no adjacency relationship)
         assert_eq!(graph.stacks.len(), 2);
+    }
+
+    fn make_log_entry_with_remote_bookmarks(
+        commit_id: &str,
+        change_id: &str,
+        parents: Vec<&str>,
+        bookmarks: Vec<&str>,
+        remote_bookmarks: Vec<&str>,
+    ) -> LogEntry {
+        let mut e = make_log_entry(commit_id, change_id, parents, bookmarks);
+        e.remote_bookmarks = remote_bookmarks.into_iter().map(|s| s.to_string()).collect();
+        e
+    }
+
+    #[test]
+    fn test_stack_with_foreign_base() {
+        // trunk -> coworker_commit (foreign remote bookmark) -> commit_a (bookmarked "feature")
+        let jj = StubJj {
+            bookmarks: vec![make_bookmark("feature", "commit_a", "change_a")],
+            log_entries: HashMap::from([(
+                "commit_a".to_string(),
+                vec![
+                    make_log_entry("commit_a", "change_a", vec!["coworker_c"], vec!["feature"]),
+                    make_log_entry_with_remote_bookmarks(
+                        "coworker_c", "coworker_ch", vec!["trunk"],
+                        vec![], vec!["coworker-feat@origin"],
+                    ),
+                ],
+            )]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+        assert_eq!(graph.stacks.len(), 1);
+        assert_eq!(
+            graph.stacks[0].base_branch,
+            Some("coworker-feat".to_string()),
+        );
+        assert_eq!(graph.stacks[0].segments.len(), 1);
+        assert_eq!(graph.stacks[0].segments[0].bookmarks[0].name, "feature");
+    }
+
+    #[test]
+    fn test_stack_without_foreign_base() {
+        // Normal stack: trunk -> commit_a (bookmarked "feature")
+        let jj = StubJj {
+            bookmarks: vec![make_bookmark("feature", "commit_a", "change_a")],
+            log_entries: HashMap::from([(
+                "commit_a".to_string(),
+                vec![make_log_entry(
+                    "commit_a", "change_a", vec!["trunk"], vec!["feature"],
+                )],
+            )]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+        assert_eq!(graph.stacks.len(), 1);
+        assert!(graph.stacks[0].base_branch.is_none());
+    }
+
+    #[test]
+    fn test_multi_segment_stack_with_foreign_base() {
+        // trunk -> coworker_commit (foreign) -> commit_a (auth) -> commit_b (profile)
+        // Both auth and profile should be in the same stack with base_branch set.
+        let jj = StubJj {
+            bookmarks: vec![
+                make_bookmark("auth", "commit_a", "change_a"),
+                make_bookmark("profile", "commit_b", "change_b"),
+            ],
+            log_entries: HashMap::from([
+                (
+                    "commit_a".to_string(),
+                    vec![
+                        make_log_entry("commit_a", "change_a", vec!["coworker_c"], vec!["auth"]),
+                        make_log_entry_with_remote_bookmarks(
+                            "coworker_c", "coworker_ch", vec!["trunk"],
+                            vec![], vec!["coworker-feat@origin"],
+                        ),
+                    ],
+                ),
+                (
+                    "commit_b".to_string(),
+                    vec![
+                        make_log_entry("commit_b", "change_b", vec!["commit_a"], vec!["profile"]),
+                        make_log_entry("commit_a", "change_a", vec!["coworker_c"], vec!["auth"]),
+                        make_log_entry_with_remote_bookmarks(
+                            "coworker_c", "coworker_ch", vec!["trunk"],
+                            vec![], vec!["coworker-feat@origin"],
+                        ),
+                    ],
+                ),
+            ]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+        assert_eq!(graph.stacks.len(), 1);
+        assert_eq!(
+            graph.stacks[0].base_branch,
+            Some("coworker-feat".to_string()),
+            "multi-segment stack should propagate foreign base"
+        );
+        assert_eq!(graph.stacks[0].segments.len(), 2);
+        assert_eq!(graph.stacks[0].segments[0].bookmarks[0].name, "auth");
+        assert_eq!(graph.stacks[0].segments[1].bookmarks[0].name, "profile");
     }
 }

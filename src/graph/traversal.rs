@@ -13,6 +13,9 @@ pub struct TraversalResult {
     /// If traversal stopped because it hit a fully_collected change, this is that change_id.
     /// Used to link the new segments to the existing graph.
     pub stopped_at: Option<String>,
+    /// If traversal stopped at a commit with a remote bookmark not owned by the user,
+    /// this is the branch name (e.g., "coworker-auth"). Used to set the stack's base branch.
+    pub foreign_base: Option<String>,
 }
 
 /// Traverse from a bookmark's commit toward trunk, discovering segments.
@@ -60,6 +63,32 @@ pub fn traverse_and_discover_segments(
             continue;
         }
 
+        // Check for foreign remote bookmarks before adding this entry.
+        // A foreign bookmark is one pushed by someone else — its branch name
+        // is not in all_bookmarks (the user's own bookmarks).
+        let foreign = entry
+            .remote_bookmarks
+            .iter()
+            .filter(|rb| !rb.ends_with("@git"))
+            .filter_map(|rb| rb.rsplit_once('@').map(|(name, _remote)| name))
+            .find(|name| !all_bookmarks.contains_key(*name));
+
+        if let Some(foreign_name) = foreign {
+            if !current_segment_changes.is_empty() {
+                segments.push(BookmarkSegment {
+                    bookmarks: std::mem::take(&mut current_segment_bookmarks),
+                    changes: std::mem::take(&mut current_segment_changes),
+                });
+            }
+            return Ok(TraversalResult {
+                segments,
+                seen_change_ids,
+                has_merge,
+                stopped_at: None,
+                foreign_base: Some(foreign_name.to_string()),
+            });
+        }
+
         seen_change_ids.insert(entry.change_id.clone());
 
         // If this is already fully collected, stop
@@ -75,6 +104,7 @@ pub fn traverse_and_discover_segments(
                 seen_change_ids,
                 has_merge,
                 stopped_at: Some(entry.change_id.clone()),
+                foreign_base: None,
             });
         }
 
@@ -111,6 +141,7 @@ pub fn traverse_and_discover_segments(
         seen_change_ids,
         has_merge,
         stopped_at: None,
+        foreign_base: None,
     })
 }
 
@@ -253,5 +284,148 @@ mod tests {
         // Should have collected c2 but stopped at c1
         assert!(result.seen_change_ids.contains("ch2"));
         assert!(result.seen_change_ids.contains("ch1"));
+    }
+
+    fn entry_with_remote_bookmarks(
+        commit_id: &str,
+        change_id: &str,
+        parents: Vec<&str>,
+        remote_bookmarks: Vec<&str>,
+    ) -> LogEntry {
+        let mut e = entry(commit_id, change_id, parents);
+        e.remote_bookmarks = remote_bookmarks.into_iter().map(|s| s.to_string()).collect();
+        e
+    }
+
+    #[test]
+    fn test_foreign_remote_bookmark_stops_traversal() {
+        // Two entries: user's change on top, coworker's commit at bottom
+        let jj = StubJj {
+            entries: vec![
+                entry("c2", "ch2", vec!["c1"]),
+                entry_with_remote_bookmarks(
+                    "c1", "ch1", vec!["trunk"],
+                    vec!["coworker-feat@origin"],
+                ),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "c2",
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.foreign_base, Some("coworker-feat".to_string()));
+        assert_eq!(result.segments.len(), 1);
+        assert_eq!(result.segments[0].changes.len(), 1);
+        assert_eq!(result.segments[0].changes[0].change_id, "ch2");
+    }
+
+    #[test]
+    fn test_own_remote_bookmark_continues() {
+        let bookmark = Bookmark {
+            name: "my-feat".to_string(),
+            commit_id: "c1".to_string(),
+            change_id: "ch1".to_string(),
+            has_remote: true,
+            is_synced: true,
+        };
+        let all_bookmarks = HashMap::from([("my-feat".to_string(), bookmark)]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("c2", "ch2", vec!["c1"]),
+                entry_with_remote_bookmarks(
+                    "c1", "ch1", vec!["trunk"],
+                    vec!["my-feat@origin"],
+                ),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "c2",
+            &HashSet::new(),
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert!(result.foreign_base.is_none());
+        // Both entries should be collected
+        assert!(result.seen_change_ids.contains("ch1"));
+        assert!(result.seen_change_ids.contains("ch2"));
+    }
+
+    #[test]
+    fn test_git_remote_ignored() {
+        // @git is jj's internal tracking, not a real foreign remote
+        let jj = StubJj {
+            entries: vec![
+                entry_with_remote_bookmarks(
+                    "c1", "ch1", vec!["trunk"],
+                    vec!["something@git"],
+                ),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "c1",
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(result.foreign_base.is_none());
+        assert!(result.seen_change_ids.contains("ch1"));
+    }
+
+    #[test]
+    fn test_foreign_base_flushes_pending_segment() {
+        // user change (unbookmarked) -> coworker's commit with remote bookmark
+        // The user's change should be flushed as a segment
+        let bookmark = Bookmark {
+            name: "my-feat".to_string(),
+            commit_id: "c3".to_string(),
+            change_id: "ch3".to_string(),
+            has_remote: false,
+            is_synced: false,
+        };
+        let all_bookmarks = HashMap::from([("my-feat".to_string(), bookmark)]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("c3", "ch3", vec!["c2"]),
+                entry("c2", "ch2", vec!["c1"]),
+                entry_with_remote_bookmarks(
+                    "c1", "ch1", vec!["trunk"],
+                    vec!["coworker-base@origin"],
+                ),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "c3",
+            &HashSet::new(),
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert_eq!(result.foreign_base, Some("coworker-base".to_string()));
+        // c3 is bookmarked, so it forms its own segment; c2 is unbookmarked,
+        // flushed as a tail segment when we hit the foreign base
+        assert_eq!(result.segments.len(), 2);
+        // First segment: my-feat (c3)
+        assert_eq!(result.segments[0].bookmarks[0].name, "my-feat");
+        // Second segment: unbookmarked tail (c2)
+        assert_eq!(result.segments[1].changes[0].change_id, "ch2");
     }
 }

@@ -138,3 +138,21 @@ fn test_help_shows_merge_command() {
         .stdout(predicate::str::contains("merge"))
         .stdout(predicate::str::contains("config"));
 }
+
+#[test]
+fn test_submit_base_flag_in_help() {
+    jjpr()
+        .args(["submit", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--base"));
+}
+
+#[test]
+fn test_merge_base_flag_in_help() {
+    jjpr()
+        .args(["merge", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--base"));
+}

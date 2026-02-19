@@ -43,6 +43,8 @@ pub struct NarrowedSegment {
 #[derive(Debug, Clone)]
 pub struct BranchStack {
     pub segments: Vec<BookmarkSegment>,
+    /// If the stack is based on a foreign branch (not trunk), this is the branch name.
+    pub base_branch: Option<String>,
 }
 
 /// A git remote.

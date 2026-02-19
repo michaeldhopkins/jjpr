@@ -57,6 +57,7 @@ pub fn execute_merge_plan(
 
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
+    let effective_base = plan.stack_base.as_deref().unwrap_or(&plan.default_branch);
 
     let mut merged = Vec::new();
     let mut blocked_at = None;
@@ -121,12 +122,11 @@ pub fn execute_merge_plan(
 
                     let next_segment = &segments[seg_idx + 1];
                     println!(
-                        "  Rebasing remaining stack onto {}...",
-                        plan.default_branch
+                        "  Rebasing remaining stack onto {effective_base}..."
                     );
                     jj.rebase_onto(
                         &next_segment.bookmark.change_id,
-                        &plan.default_branch,
+                        effective_base,
                     )
                     .context("failed to rebase remaining stack")?;
 
@@ -145,17 +145,17 @@ pub fn execute_merge_plan(
                     // Retarget next PR if its base still points at the merged branch
                     let next_name = &segments[seg_idx + 1].bookmark.name;
                     if let Some(next_pr) = fresh_map.get(next_name)
-                        && next_pr.base.ref_name != plan.default_branch
+                        && next_pr.base.ref_name != effective_base
                     {
                         println!(
-                            "  Updating PR #{} base to '{}'...",
-                            next_pr.number, plan.default_branch
+                            "  Updating PR #{} base to '{effective_base}'...",
+                            next_pr.number
                         );
                         github.update_pr_base(
                             owner,
                             repo,
                             next_pr.number,
-                            &plan.default_branch,
+                            effective_base,
                         )?;
                     }
 
@@ -510,6 +510,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         }
     }
 
@@ -572,6 +573,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -612,6 +614,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -647,6 +650,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "upstream".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -679,6 +683,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -705,6 +710,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth")];
 
@@ -772,6 +778,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -810,6 +817,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![
             make_segment("auth"),
@@ -880,6 +888,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -928,6 +937,7 @@ mod tests {
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
+            stack_base: None,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -950,6 +960,52 @@ mod tests {
         assert!(
             !gh.calls().iter().any(|c| c.contains("#2")),
             "should not merge profile when CI is pending: {:?}",
+            gh.calls()
+        );
+    }
+
+    #[test]
+    fn test_merge_with_stack_base_retargets_to_base() {
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        // Profile's base still points at auth (needs retarget to coworker-feat, not main)
+        gh.open_prs.lock().expect("poisoned")[0]
+            .base
+            .ref_name = "auth".to_string();
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: Some("coworker-feat".to_string()),
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+
+        // Should rebase onto coworker-feat, not main
+        assert!(
+            jj.calls().iter().any(|c| c == "rebase:ch_profile:coworker-feat"),
+            "should rebase onto stack_base: {:?}",
+            jj.calls()
+        );
+        // Should retarget to coworker-feat, not main
+        assert!(
+            gh.calls().iter().any(|c| c == "update_base:#2:coworker-feat"),
+            "should retarget to stack_base: {:?}",
             gh.calls()
         );
     }
