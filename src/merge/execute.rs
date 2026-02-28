@@ -58,6 +58,7 @@ pub fn execute_merge_plan(
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
     let effective_base = plan.stack_base.as_deref().unwrap_or(&plan.default_branch);
+    let fk = plan.forge_kind;
 
     let mut merged = Vec::new();
     let mut blocked_at = None;
@@ -88,7 +89,8 @@ pub fn execute_merge_plan(
                 pr_number,
             } => {
                 println!(
-                    "  Skipping '{bookmark_name}' \u{2014} PR #{pr_number} already merged"
+                    "  Skipping '{bookmark_name}' \u{2014} {} already merged",
+                    fk.format_ref(pr_number)
                 );
                 skipped_merged.push(SkippedMergedPr {
                     bookmark_name,
@@ -98,15 +100,15 @@ pub fn execute_merge_plan(
 
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
                 println!(
-                    "  Merging '{bookmark_name}' (PR #{}, {})...",
-                    pr.number, plan.options.merge_method
+                    "  Merging '{bookmark_name}' ({}, {})...",
+                    fk.format_ref(pr.number), plan.options.merge_method
                 );
                 println!("    {}", pr.html_url);
 
                 github
                     .merge_pr(owner, repo, pr.number, plan.options.merge_method)
                     .with_context(|| {
-                        format!("failed to merge PR #{} for '{bookmark_name}'", pr.number)
+                        format!("failed to merge {} for '{bookmark_name}'", fk.format_ref(pr.number))
                     })?;
 
                 merged.push(MergedPr {
@@ -148,8 +150,8 @@ pub fn execute_merge_plan(
                         && next_pr.base.ref_name != effective_base
                     {
                         println!(
-                            "  Updating PR #{} base to '{effective_base}'...",
-                            next_pr.number
+                            "  Updating {} base to '{effective_base}'...",
+                            fk.format_ref(next_pr.number)
                         );
                         github.update_pr_base(
                             owner,
@@ -170,7 +172,7 @@ pub fn execute_merge_plan(
             } => {
                 let pr_label = pr
                     .as_ref()
-                    .map(|p| format!(" (PR #{})", p.number))
+                    .map(|p| format!(" ({})", fk.format_ref(p.number)))
                     .unwrap_or_default();
                 println!("  Blocked at '{bookmark_name}'{pr_label}:");
                 for reason in &reasons {
@@ -195,6 +197,7 @@ pub fn execute_merge_plan(
 }
 
 fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
+    let fk = plan.forge_kind;
     let mut merged = Vec::new();
     let mut blocked_at = None;
     let mut skipped_merged = Vec::new();
@@ -206,7 +209,8 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
                 pr_number,
             } => {
                 println!(
-                    "  Skipping '{bookmark_name}' \u{2014} PR #{pr_number} already merged"
+                    "  Skipping '{bookmark_name}' \u{2014} {} already merged",
+                    fk.format_ref(*pr_number)
                 );
                 skipped_merged.push(SkippedMergedPr {
                     bookmark_name: bookmark_name.clone(),
@@ -215,8 +219,8 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
             }
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
                 println!(
-                    "  Would merge '{bookmark_name}' (PR #{}, {})",
-                    pr.number, plan.options.merge_method
+                    "  Would merge '{bookmark_name}' ({}, {})",
+                    fk.format_ref(pr.number), plan.options.merge_method
                 );
                 merged.push(MergedPr {
                     bookmark_name: bookmark_name.clone(),
@@ -231,7 +235,7 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
             } => {
                 let pr_label = pr
                     .as_ref()
-                    .map(|p| format!(" (PR #{})", p.number))
+                    .map(|p| format!(" ({})", fk.format_ref(p.number)))
                     .unwrap_or_default();
                 println!("  Blocked at '{bookmark_name}'{pr_label}:");
                 for reason in reasons {
@@ -278,6 +282,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::forge::ForgeKind;
     use crate::forge::types::{
         ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, PullRequestRef,
         RepoInfo, ReviewSummary,
@@ -507,6 +512,7 @@ mod tests {
                 pr: make_pr(name, pr_number),
             }],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -570,6 +576,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -611,6 +618,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -647,6 +655,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "upstream".to_string(),
@@ -680,6 +689,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -707,6 +717,7 @@ mod tests {
                 reasons: vec![BlockReason::Draft, BlockReason::ChecksFailing],
             }],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -775,6 +786,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -814,6 +826,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -885,6 +898,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -934,6 +948,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
@@ -987,6 +1002,7 @@ mod tests {
                 },
             ],
             repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
             options: default_options(),
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),

@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jjpr::forge::GhCli;
+use jjpr::forge::{ForgeKind, GhCli};
 use jjpr::forge::types::RepoInfo;
 use jjpr::graph::change_graph;
 use jjpr::submit::{analyze, execute, plan, resolve};
@@ -234,7 +234,7 @@ fn test_submit_creates_stacked_prs() {
         repo: REPO.to_string(),
     };
     let submission_plan = plan::create_submission_plan(
-        &github, &segments, "origin", &repo_info, "main", false, false, &[], None,
+        &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main", false, false, &[], None,
     )
     .unwrap();
 
