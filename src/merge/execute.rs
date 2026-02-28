@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 
 use crate::forge::types::PullRequest;
-use crate::forge::Forge;
+use crate::forge::{Forge, ForgeKind};
 use crate::jj::types::NarrowedSegment;
 use crate::jj::Jj;
 
@@ -176,7 +176,7 @@ pub fn execute_merge_plan(
                     .unwrap_or_default();
                 println!("  Blocked at '{bookmark_name}'{pr_label}:");
                 for reason in &reasons {
-                    println!("    - {}", format_block_reason(reason));
+                    println!("    - {}", format_block_reason(reason, fk));
                 }
 
                 blocked_at = Some(BlockedPr {
@@ -239,7 +239,7 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
                     .unwrap_or_default();
                 println!("  Blocked at '{bookmark_name}'{pr_label}:");
                 for reason in reasons {
-                    println!("    - {}", format_block_reason(reason));
+                    println!("    - {}", format_block_reason(reason, fk));
                 }
                 blocked_at = Some(BlockedPr {
                     bookmark_name: bookmark_name.clone(),
@@ -258,19 +258,20 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
     })
 }
 
-fn format_block_reason(reason: &BlockReason) -> String {
+fn format_block_reason(reason: &BlockReason, fk: ForgeKind) -> String {
+    let abbr = fk.request_abbreviation();
     match reason {
-        BlockReason::NoPr => "No PR exists for this bookmark".to_string(),
-        BlockReason::Draft => "PR is still a draft".to_string(),
+        BlockReason::NoPr => format!("No {abbr} exists for this bookmark"),
+        BlockReason::Draft => format!("{abbr} is still a draft"),
         BlockReason::ChecksFailing => "CI checks are failing".to_string(),
         BlockReason::ChecksPending => "CI checks are pending".to_string(),
         BlockReason::InsufficientApprovals { have, need } => {
             format!("Insufficient approvals ({have}/{need})")
         }
         BlockReason::ChangesRequested => "Changes have been requested".to_string(),
-        BlockReason::Conflicted => "PR has merge conflicts".to_string(),
+        BlockReason::Conflicted => "Has merge conflicts".to_string(),
         BlockReason::MergeabilityUnknown => {
-            "GitHub is still computing mergeability (try again in a moment)".to_string()
+            "Mergeability is still being computed (try again in a moment)".to_string()
         }
     }
 }
@@ -1027,17 +1028,25 @@ mod tests {
     }
 
     #[test]
-    fn test_format_block_reasons() {
-        assert_eq!(format_block_reason(&BlockReason::NoPr), "No PR exists for this bookmark");
-        assert_eq!(format_block_reason(&BlockReason::Draft), "PR is still a draft");
-        assert_eq!(format_block_reason(&BlockReason::ChecksFailing), "CI checks are failing");
-        assert_eq!(format_block_reason(&BlockReason::ChecksPending), "CI checks are pending");
+    fn test_format_block_reasons_github() {
+        let fk = ForgeKind::GitHub;
+        assert_eq!(format_block_reason(&BlockReason::NoPr, fk), "No PR exists for this bookmark");
+        assert_eq!(format_block_reason(&BlockReason::Draft, fk), "PR is still a draft");
+        assert_eq!(format_block_reason(&BlockReason::ChecksFailing, fk), "CI checks are failing");
+        assert_eq!(format_block_reason(&BlockReason::ChecksPending, fk), "CI checks are pending");
         assert_eq!(
-            format_block_reason(&BlockReason::InsufficientApprovals { have: 0, need: 2 }),
+            format_block_reason(&BlockReason::InsufficientApprovals { have: 0, need: 2 }, fk),
             "Insufficient approvals (0/2)"
         );
-        assert_eq!(format_block_reason(&BlockReason::ChangesRequested), "Changes have been requested");
-        assert_eq!(format_block_reason(&BlockReason::Conflicted), "PR has merge conflicts");
-        assert!(format_block_reason(&BlockReason::MergeabilityUnknown).contains("still computing"));
+        assert_eq!(format_block_reason(&BlockReason::ChangesRequested, fk), "Changes have been requested");
+        assert_eq!(format_block_reason(&BlockReason::Conflicted, fk), "Has merge conflicts");
+        assert!(format_block_reason(&BlockReason::MergeabilityUnknown, fk).contains("still being computed"));
+    }
+
+    #[test]
+    fn test_format_block_reasons_gitlab() {
+        let fk = ForgeKind::GitLab;
+        assert_eq!(format_block_reason(&BlockReason::NoPr, fk), "No MR exists for this bookmark");
+        assert_eq!(format_block_reason(&BlockReason::Draft, fk), "MR is still a draft");
     }
 }
