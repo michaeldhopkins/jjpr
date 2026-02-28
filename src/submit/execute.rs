@@ -19,13 +19,14 @@ pub fn execute_submission_plan(
 ) -> Result<()> {
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
+    let fk = plan.forge_kind;
     let mut completed_actions: Vec<String> = Vec::new();
 
     // Report merged bookmarks
     for item in &plan.bookmarks_already_merged {
         println!(
-            "  Skipping '{}' — PR #{} already merged",
-            item.bookmark.name, item.pr_number
+            "  Skipping '{}' — {} already merged",
+            item.bookmark.name, fk.format_ref(item.pr_number)
         );
     }
 
@@ -54,13 +55,13 @@ pub fn execute_submission_plan(
     for item in &plan.bookmarks_needing_pr {
         if dry_run {
             println!(
-                "  Would create PR for '{}' (base: {})",
-                item.bookmark.name, item.base_branch
+                "  Would create {} for '{}' (base: {})",
+                fk.request_abbreviation(), item.bookmark.name, item.base_branch
             );
             continue;
         }
         let label = if plan.draft { " (draft)" } else { "" };
-        println!("  Creating PR{label} for '{}'...", item.bookmark.name);
+        println!("  Creating {}{label} for '{}'...", fk.request_abbreviation(), item.bookmark.name);
         let pr = match github.create_pr(
             owner,
             repo,
@@ -77,7 +78,7 @@ pub fn execute_submission_plan(
             }
         };
         println!("    {}", pr.html_url);
-        completed_actions.push(format!("Created PR #{} for '{}'", pr.number, item.bookmark.name));
+        completed_actions.push(format!("Created {} for '{}'", fk.format_ref(pr.number), item.bookmark.name));
 
         // Request reviewers on new PRs
         if !reviewers.is_empty()
@@ -94,80 +95,80 @@ pub fn execute_submission_plan(
     for item in &plan.bookmarks_needing_base_update {
         if dry_run {
             println!(
-                "  Would update PR #{} base: {} -> {}",
-                item.pr.number, item.pr.base.ref_name, item.expected_base
+                "  Would update {} base: {} -> {}",
+                fk.format_ref(item.pr.number), item.pr.base.ref_name, item.expected_base
             );
             continue;
         }
         println!(
-            "  Updating PR #{} base to '{}'...",
-            item.pr.number, item.expected_base
+            "  Updating {} base to '{}'...",
+            fk.format_ref(item.pr.number), item.expected_base
         );
         if let Err(e) = github.update_pr_base(owner, repo, item.pr.number, &item.expected_base) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
-        completed_actions.push(format!("Updated PR #{} base to '{}'", item.pr.number, item.expected_base));
+        completed_actions.push(format!("Updated {} base to '{}'", fk.format_ref(item.pr.number), item.expected_base));
     }
 
     // Phase 4: Update stale PR bodies
     for item in &plan.bookmarks_needing_body_update {
         if dry_run {
             println!(
-                "  Would update PR #{} body for '{}'",
-                item.pr_number, item.bookmark.name
+                "  Would update {} body for '{}'",
+                fk.format_ref(item.pr_number), item.bookmark.name
             );
             continue;
         }
         println!(
-            "  Updating PR #{} body for '{}'...",
-            item.pr_number, item.bookmark.name
+            "  Updating {} body for '{}'...",
+            fk.format_ref(item.pr_number), item.bookmark.name
         );
         if let Err(e) = github.update_pr_body(owner, repo, item.pr_number, &item.new_body) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
-        completed_actions.push(format!("Updated PR #{} body", item.pr_number));
+        completed_actions.push(format!("Updated {} body", fk.format_ref(item.pr_number)));
     }
 
     // Phase 5: Convert draft PRs to ready
     for item in &plan.bookmarks_needing_ready {
         if dry_run {
             println!(
-                "  Would mark PR #{} as ready for review ('{}')",
-                item.pr_number, item.bookmark.name
+                "  Would mark {} as ready for review ('{}')",
+                fk.format_ref(item.pr_number), item.bookmark.name
             );
             continue;
         }
         println!(
-            "  Marking PR #{} as ready for review ('{}')...",
-            item.pr_number, item.bookmark.name
+            "  Marking {} as ready for review ('{}')...",
+            fk.format_ref(item.pr_number), item.bookmark.name
         );
         if let Err(e) = github.mark_pr_ready(owner, repo, item.pr_number) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
-        completed_actions.push(format!("Marked PR #{} as ready", item.pr_number));
+        completed_actions.push(format!("Marked {} as ready", fk.format_ref(item.pr_number)));
     }
 
     // Phase 6: Request reviewers on existing PRs
     for (bookmark, pr_number) in &plan.bookmarks_needing_reviewers {
         if dry_run {
             println!(
-                "  Would request reviewers on PR #{} ('{}')",
-                pr_number, bookmark.name
+                "  Would request reviewers on {} ('{}')",
+                fk.format_ref(*pr_number), bookmark.name
             );
             continue;
         }
         println!(
-            "  Requesting reviewers on PR #{}...",
-            pr_number
+            "  Requesting reviewers on {}...",
+            fk.format_ref(*pr_number)
         );
         if let Err(e) = github.request_reviewers(owner, repo, *pr_number, reviewers) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
-        completed_actions.push(format!("Requested reviewers on PR #{}", pr_number));
+        completed_actions.push(format!("Requested reviewers on {}", fk.format_ref(*pr_number)));
     }
 
     // Phase 7: Update/create stack comments on all PRs
@@ -276,6 +277,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::forge::ForgeKind;
     use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, RepoInfo, ReviewSummary};
     use crate::jj::types::{Bookmark, GitRemote, LogEntry};
     use crate::jj::Jj;
@@ -473,6 +475,7 @@ mod tests {
                 owner: "o".to_string(),
                 repo: "r".to_string(),
             },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -658,6 +661,7 @@ mod tests {
                 owner: "o".to_string(),
                 repo: "r".to_string(),
             },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -706,6 +710,7 @@ mod tests {
                 owner: "o".to_string(),
                 repo: "r".to_string(),
             },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
@@ -750,6 +755,7 @@ mod tests {
             )]),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -784,6 +790,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -834,6 +841,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -865,6 +873,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -913,6 +922,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth"), make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
@@ -939,6 +949,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -971,6 +982,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
@@ -996,6 +1008,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![],
             default_branch: "main".to_string(),
             draft: false,
@@ -1017,6 +1030,7 @@ mod tests {
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![],
             default_branch: "main".to_string(),
             draft: false,
@@ -1114,6 +1128,7 @@ mod tests {
                 owner: "o".to_string(),
                 repo: "r".to_string(),
             },
+            forge_kind: ForgeKind::GitHub,
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,

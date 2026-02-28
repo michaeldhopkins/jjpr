@@ -240,7 +240,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     }
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, _forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
+    let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -257,6 +257,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         &segments,
         &remote_name,
         &repo_info,
+        forge_kind,
         &default_branch,
         matches!(opts.draft_mode, DraftMode::Draft),
         matches!(opts.draft_mode, DraftMode::Ready),
@@ -289,9 +290,10 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Try to resolve GitHub remote for PR info
+    // Try to resolve forge remote for PR info
     let github = GhCli::new();
-    let pr_info = try_load_pr_info(&jj, &github, &graph);
+    let (forge_kind, pr_info) = try_load_pr_info(&jj, &github, &graph)
+        .unwrap_or((ForgeKind::GitHub, HashMap::new()));
 
     let multi = graph.stacks.len() > 1;
     for (i, stack) in graph.stacks.iter().enumerate() {
@@ -315,10 +317,10 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
             let pr_label = segment
                 .bookmarks
                 .first()
-                .and_then(|b| pr_info.as_ref()?.get(&b.name))
+                .and_then(|b| pr_info.get(&b.name))
                 .map(|pr| {
                     let state = if pr.draft { "draft" } else { "open" };
-                    format!(", #{} {state}", pr.number)
+                    format!(", {} {state}", forge_kind.format_ref(pr.number))
                 })
                 .unwrap_or_default();
 
@@ -355,9 +357,9 @@ fn try_load_pr_info(
     jj: &dyn Jj,
     github: &dyn Forge,
     graph: &change_graph::ChangeGraph,
-) -> Option<HashMap<String, PullRequest>> {
+) -> Option<(ForgeKind, HashMap<String, PullRequest>)> {
     let remotes = jj.get_git_remotes().ok()?;
-    let (_remote_name, _forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
+    let (_remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
 
     let all_prs = match github.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -365,11 +367,11 @@ fn try_load_pr_info(
             if !graph.stacks.is_empty() && github.get_authenticated_user().is_err() {
                 eprintln!("hint: run `jjpr auth test` to see PR status in stack overview");
             }
-            return Some(HashMap::new());
+            return Some((forge_kind, HashMap::new()));
         }
     };
 
-    Some(jjpr::forge::build_pr_map(all_prs, &repo_info.owner))
+    Some((forge_kind, jjpr::forge::build_pr_map(all_prs, &repo_info.owner)))
 }
 
 struct MergeArgs<'a> {
@@ -414,7 +416,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, _forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
+    let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -436,6 +438,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         &github,
         &segments,
         &repo_info,
+        forge_kind,
         &default_branch,
         &remote_name,
         &merge_options,
