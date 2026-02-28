@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::github::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
-use crate::github::GitHub;
+use crate::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
+use crate::forge::Forge;
 use crate::jj::types::NarrowedSegment;
 
 /// Why a PR can't be merged right now.
@@ -59,7 +59,7 @@ pub struct MergePlan {
 
 /// Evaluate a single bookmark's merge readiness against current GitHub state.
 pub fn evaluate_segment(
-    github: &dyn GitHub,
+    github: &dyn Forge,
     bookmark_name: &str,
     repo_info: &RepoInfo,
     pr_map: &HashMap<String, PullRequest>,
@@ -157,7 +157,7 @@ pub fn evaluate_segment(
 /// Build a merge plan by checking each segment's PR status bottom-to-top.
 /// Stops evaluating after the first blocked segment.
 pub fn create_merge_plan(
-    github: &dyn GitHub,
+    github: &dyn Forge,
     segments: &[NarrowedSegment],
     repo_info: &RepoInfo,
     default_branch: &str,
@@ -166,7 +166,7 @@ pub fn create_merge_plan(
     stack_base: Option<&str>,
 ) -> Result<MergePlan> {
     let all_open_prs = github.list_open_prs(&repo_info.owner, &repo_info.repo)?;
-    let pr_map = crate::github::build_pr_map(all_open_prs, &repo_info.owner);
+    let pr_map = crate::forge::build_pr_map(all_open_prs, &repo_info.owner);
 
     let mut actions = Vec::new();
 
@@ -194,7 +194,7 @@ pub fn create_merge_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::types::{IssueComment, PrMergeability, PullRequestRef, ReviewSummary};
+    use crate::forge::types::{IssueComment, PrMergeability, PullRequestRef, ReviewSummary};
     use crate::jj::types::{Bookmark, LogEntry};
     use std::collections::HashMap;
 
@@ -291,7 +291,7 @@ mod tests {
         }
     }
 
-    impl GitHub for StubGitHub {
+    impl Forge for StubGitHub {
         fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
             Ok(self.open_prs.clone())
         }
@@ -323,7 +323,7 @@ mod tests {
         fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
         fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
         fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
     }
@@ -645,7 +645,7 @@ mod tests {
     #[test]
     fn test_find_merged_pr_error_propagates() {
         struct ErrorGitHub;
-        impl GitHub for ErrorGitHub {
+        impl Forge for ErrorGitHub {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
                 anyhow::bail!("network timeout")
@@ -657,7 +657,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }

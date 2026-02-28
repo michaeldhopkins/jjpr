@@ -3,8 +3,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jjpr::github::GhCli;
-use jjpr::github::types::RepoInfo;
+use jjpr::forge::GhCli;
+use jjpr::forge::types::RepoInfo;
 use jjpr::graph::change_graph;
 use jjpr::submit::{analyze, execute, plan, resolve};
 

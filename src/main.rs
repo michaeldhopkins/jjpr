@@ -15,9 +15,9 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 
 use jjpr::config;
-use jjpr::github::remote;
-use jjpr::github::types::{MergeMethod, PullRequest};
-use jjpr::github::{GhCli, GitHub};
+use jjpr::forge::remote;
+use jjpr::forge::types::{MergeMethod, PullRequest};
+use jjpr::forge::{Forge, ForgeKind, GhCli};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
                 jjpr::auth::test_auth(&github)
             }
             AuthCommands::Setup => {
-                jjpr::auth::print_auth_help();
+                jjpr::auth::print_auth_help(ForgeKind::GitHub);
                 Ok(())
             }
         },
@@ -240,7 +240,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     }
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
+    let (remote_name, _forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -353,11 +353,11 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
 
 fn try_load_pr_info(
     jj: &dyn Jj,
-    github: &dyn GitHub,
+    github: &dyn Forge,
     graph: &change_graph::ChangeGraph,
 ) -> Option<HashMap<String, PullRequest>> {
     let remotes = jj.get_git_remotes().ok()?;
-    let (_remote_name, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
+    let (_remote_name, _forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
 
     let all_prs = match github.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -369,7 +369,7 @@ fn try_load_pr_info(
         }
     };
 
-    Some(jjpr::github::build_pr_map(all_prs, &repo_info.owner))
+    Some(jjpr::forge::build_pr_map(all_prs, &repo_info.owner))
 }
 
 struct MergeArgs<'a> {
@@ -414,7 +414,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
+    let (remote_name, _forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
 
     let default_branch = jj.get_default_branch()?;
 

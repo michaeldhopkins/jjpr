@@ -1,14 +1,66 @@
 pub mod comment;
-pub mod gh_cli;
+pub mod github;
 pub mod remote;
 pub mod types;
 
-pub use gh_cli::GhCli;
+pub use github::GhCli;
 pub use types::*;
 
 use std::collections::HashMap;
 
 use anyhow::Result;
+
+/// Which forge a remote points to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgeKind {
+    GitHub,
+    GitLab,
+    Forgejo,
+}
+
+impl ForgeKind {
+    /// "pull request" or "merge request"
+    pub fn request_noun(&self) -> &'static str {
+        match self {
+            Self::GitHub | Self::Forgejo => "pull request",
+            Self::GitLab => "merge request",
+        }
+    }
+
+    /// "PR" or "MR"
+    pub fn request_abbreviation(&self) -> &'static str {
+        match self {
+            Self::GitHub | Self::Forgejo => "PR",
+            Self::GitLab => "MR",
+        }
+    }
+
+    /// "#5" or "!5"
+    pub fn format_ref(&self, number: u64) -> String {
+        match self {
+            Self::GitHub | Self::Forgejo => format!("#{number}"),
+            Self::GitLab => format!("!{number}"),
+        }
+    }
+
+    /// CLI name for help messages
+    pub fn cli_name(&self) -> &'static str {
+        match self {
+            Self::GitHub => "gh",
+            Self::GitLab => "glab",
+            Self::Forgejo => "tea",
+        }
+    }
+
+    /// Token environment variable name
+    pub fn token_env_var(&self) -> &'static str {
+        match self {
+            Self::GitHub => "GITHUB_TOKEN",
+            Self::GitLab => "GITLAB_TOKEN",
+            Self::Forgejo => "FORGEJO_TOKEN",
+        }
+    }
+}
 
 /// Build a map of branch name → PR, filtering out PRs from forks.
 pub fn build_pr_map(prs: Vec<PullRequest>, owner: &str) -> HashMap<String, PullRequest> {
@@ -19,8 +71,8 @@ pub fn build_pr_map(prs: Vec<PullRequest>, owner: &str) -> HashMap<String, PullR
         .collect()
 }
 
-/// Trait abstracting GitHub operations for testability.
-pub trait GitHub: Send + Sync {
+/// Trait abstracting forge operations (GitHub, GitLab, Forgejo) for testability.
+pub trait Forge: Send + Sync {
     fn list_open_prs(
         &self,
         owner: &str,
@@ -89,7 +141,7 @@ pub trait GitHub: Send + Sync {
         &self,
         owner: &str,
         repo: &str,
-        pr_node_id: &str,
+        number: u64,
     ) -> Result<()>;
 
     fn get_authenticated_user(&self) -> Result<String>;
@@ -171,5 +223,19 @@ mod tests {
     fn test_build_pr_map_empty_input() {
         let map = build_pr_map(vec![], "owner");
         assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_forge_kind_vocabulary() {
+        assert_eq!(ForgeKind::GitHub.request_abbreviation(), "PR");
+        assert_eq!(ForgeKind::GitLab.request_abbreviation(), "MR");
+        assert_eq!(ForgeKind::Forgejo.request_abbreviation(), "PR");
+
+        assert_eq!(ForgeKind::GitHub.format_ref(5), "#5");
+        assert_eq!(ForgeKind::GitLab.format_ref(5), "!5");
+        assert_eq!(ForgeKind::Forgejo.format_ref(5), "#5");
+
+        assert_eq!(ForgeKind::GitHub.request_noun(), "pull request");
+        assert_eq!(ForgeKind::GitLab.request_noun(), "merge request");
     }
 }

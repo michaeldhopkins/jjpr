@@ -3,7 +3,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, ReviewSummary};
-use super::GitHub;
+use super::Forge;
 
 /// GitHub implementation that shells out to the `gh` CLI.
 #[derive(Default)]
@@ -29,7 +29,7 @@ impl GhCli {
     }
 }
 
-impl GitHub for GhCli {
+impl Forge for GhCli {
     fn list_open_prs(
         &self,
         owner: &str,
@@ -170,12 +170,21 @@ impl GitHub for GhCli {
 
     fn mark_pr_ready(
         &self,
-        _owner: &str,
-        _repo: &str,
-        pr_node_id: &str,
+        owner: &str,
+        repo: &str,
+        number: u64,
     ) -> Result<()> {
+        // Fetch node_id from the PR (GitHub GraphQL requires it)
+        let endpoint = format!("repos/{owner}/{repo}/pulls/{number}");
+        let output = self.run_gh(&["api", &endpoint])?;
+        let pr: serde_json::Value = serde_json::from_str(&output)
+            .context("failed to parse PR response for node_id")?;
+        let node_id = pr["node_id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("PR response missing node_id field"))?;
+
         let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }";
-        let id_arg = format!("id={pr_node_id}");
+        let id_arg = format!("id={node_id}");
         self.run_gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &id_arg])?;
         Ok(())
     }
@@ -192,7 +201,6 @@ impl GitHub for GhCli {
         let output = self.run_gh(&["api", &endpoint])?;
         let prs: Vec<PullRequest> = serde_json::from_str(&output)
             .context("failed to parse closed PR list response")?;
-        // Filter for truly merged PRs (merged_at is set), not just closed ones
         Ok(prs.into_iter().find(|pr| pr.merged_at.is_some()))
     }
 
@@ -229,14 +237,12 @@ impl GitHub for GhCli {
         repo: &str,
         head_ref: &str,
     ) -> Result<ChecksStatus> {
-        // Check runs (Actions, third-party apps)
         let check_runs_endpoint =
             format!("repos/{owner}/{repo}/commits/{head_ref}/check-runs");
         let check_runs_output = self.run_gh(&["api", &check_runs_endpoint])?;
         let check_runs: serde_json::Value = serde_json::from_str(&check_runs_output)
             .context("failed to parse check-runs response")?;
 
-        // Legacy commit status API
         let status_endpoint =
             format!("repos/{owner}/{repo}/commits/{head_ref}/status");
         let status_output = self.run_gh(&["api", &status_endpoint])?;

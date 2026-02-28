@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::github::types::MergeMethod;
+use crate::forge::types::MergeMethod;
 
 /// User configuration for jjpr, loaded from `~/.config/jjpr/config.toml`.
 #[derive(Debug, Clone, Deserialize)]

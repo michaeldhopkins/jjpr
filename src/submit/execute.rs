@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::github::comment::{self, StackEntry};
-use crate::github::types::PullRequest;
-use crate::github::GitHub;
+use crate::forge::comment::{self, StackEntry};
+use crate::forge::types::PullRequest;
+use crate::forge::Forge;
 use crate::jj::Jj;
 
 use super::plan::SubmissionPlan;
@@ -12,7 +12,7 @@ use super::plan::SubmissionPlan;
 /// Execute the submission plan: push, create PRs, update bases, manage comments.
 pub fn execute_submission_plan(
     jj: &dyn Jj,
-    github: &dyn GitHub,
+    github: &dyn Forge,
     plan: &SubmissionPlan,
     reviewers: &[String],
     dry_run: bool,
@@ -143,7 +143,7 @@ pub fn execute_submission_plan(
             "  Marking PR #{} as ready for review ('{}')...",
             item.pr_number, item.bookmark.name
         );
-        if let Err(e) = github.mark_pr_ready(owner, repo, &item.pr_node_id) {
+        if let Err(e) = github.mark_pr_ready(owner, repo, item.pr_number) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
@@ -188,7 +188,7 @@ pub fn execute_submission_plan(
     Ok(())
 }
 
-fn print_title_drift_warnings(drifts: &[super::plan::TitleDrift], repo_info: &crate::github::types::RepoInfo) {
+fn print_title_drift_warnings(drifts: &[super::plan::TitleDrift], repo_info: &crate::forge::types::RepoInfo) {
     for drift in drifts {
         let escaped_title = drift.expected_title.replace('"', r#"\""#);
         println!(
@@ -219,7 +219,7 @@ fn report_partial_failure(completed: &[String]) {
 
 /// Visible for testing only — not part of the public API.
 fn update_stack_comments(
-    github: &dyn GitHub,
+    github: &dyn Forge,
     plan: &SubmissionPlan,
     bookmark_to_pr: &HashMap<String, PullRequest>,
 ) -> Result<()> {
@@ -276,7 +276,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::github::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, RepoInfo, ReviewSummary};
+    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, RepoInfo, ReviewSummary};
     use crate::jj::types::{Bookmark, GitRemote, LogEntry};
     use crate::jj::Jj;
 
@@ -296,7 +296,7 @@ mod tests {
         }
     }
 
-    impl GitHub for RecordingGitHub {
+    impl Forge for RecordingGitHub {
         fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
             Ok(vec![])
         }
@@ -380,10 +380,10 @@ mod tests {
                 .push(format!("update_pr_body:#{n}"));
             Ok(())
         }
-        fn mark_pr_ready(&self, _o: &str, _r: &str, node_id: &str) -> Result<()> {
+        fn mark_pr_ready(&self, _o: &str, _r: &str, number: u64) -> Result<()> {
             self.calls
                 .lock().expect("poisoned")
-                .push(format!("mark_pr_ready:{node_id}"));
+                .push(format!("mark_pr_ready:#{number}"));
             Ok(())
         }
         fn get_authenticated_user(&self) -> Result<String> {
@@ -563,7 +563,7 @@ mod tests {
             calls: Mutex<Vec<String>>,
         }
 
-        impl GitHub for GitHubWithExistingComment {
+        impl Forge for GitHubWithExistingComment {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
@@ -610,7 +610,7 @@ mod tests {
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
                 Ok(())
             }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
                 Ok(())
             }
             fn get_authenticated_user(&self) -> Result<String> {
@@ -827,7 +827,6 @@ mod tests {
             bookmarks_needing_ready: vec![super::super::plan::BookmarkNeedingReady {
                 bookmark: make_bookmark("auth"),
                 pr_number: 10,
-                pr_node_id: "PR_kwDOxyz".to_string(),
             }],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
@@ -843,7 +842,7 @@ mod tests {
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
 
         assert!(
-            github.calls().iter().any(|c| c == "mark_pr_ready:PR_kwDOxyz"),
+            github.calls().iter().any(|c| c == "mark_pr_ready:#10"),
             "should call mark_pr_ready: {:?}",
             github.calls()
         );
@@ -1037,7 +1036,7 @@ mod tests {
         let jj = RecordingJj::new();
 
         struct CommentFailsGitHub;
-        impl GitHub for CommentFailsGitHub {
+        impl Forge for CommentFailsGitHub {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
@@ -1071,7 +1070,7 @@ mod tests {
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
                 Ok(())
             }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
                 Ok(())
             }
             fn get_authenticated_user(&self) -> Result<String> {

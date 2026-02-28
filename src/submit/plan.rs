@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::github::types::{PullRequest, RepoInfo};
-use crate::github::GitHub;
+use crate::forge::types::{PullRequest, RepoInfo};
+use crate::forge::Forge;
 use crate::jj::types::{Bookmark, NarrowedSegment};
 
 /// What needs to happen for a bookmark that doesn't have a PR yet.
@@ -36,7 +36,6 @@ pub struct BookmarkNeedingBodyUpdate {
 pub struct BookmarkNeedingReady {
     pub bookmark: Bookmark,
     pub pr_number: u64,
-    pub pr_node_id: String,
 }
 
 /// A bookmark whose PR title doesn't match the current commit description.
@@ -135,7 +134,7 @@ fn replace_managed_body(pr_body: &str, new_commit_body: &str) -> String {
 
 /// Build a submission plan by comparing local state with GitHub state.
 pub fn create_submission_plan(
-    github: &dyn GitHub,
+    github: &dyn Forge,
     segments: &[NarrowedSegment],
     remote_name: &str,
     repo_info: &RepoInfo,
@@ -150,7 +149,7 @@ pub fn create_submission_plan(
         .list_open_prs(&repo_info.owner, &repo_info.repo)
         .context("failed to list open PRs — check `jjpr auth test`")?;
 
-    let pr_map = crate::github::build_pr_map(all_open_prs, &repo_info.owner);
+    let pr_map = crate::forge::build_pr_map(all_open_prs, &repo_info.owner);
 
     let mut bookmarks_needing_push = Vec::new();
     let mut bookmarks_needing_pr = Vec::new();
@@ -240,7 +239,6 @@ pub fn create_submission_plan(
                 bookmarks_needing_ready.push(BookmarkNeedingReady {
                     bookmark: bookmark.clone(),
                     pr_number: pr.number,
-                    pr_node_id: pr.node_id.clone(),
                 });
             }
 
@@ -283,14 +281,14 @@ pub fn create_submission_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, ReviewSummary};
+    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, ReviewSummary};
     use crate::jj::types::LogEntry;
 
     struct StubGitHub {
         prs: HashMap<String, PullRequest>,
     }
 
-    impl GitHub for StubGitHub {
+    impl Forge for StubGitHub {
         fn list_open_prs(
             &self,
             _owner: &str,
@@ -326,7 +324,7 @@ mod tests {
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
             unimplemented!()
         }
-        fn mark_pr_ready(&self, _o: &str, _r: &str, _node_id: &str) -> Result<()> {
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
             unimplemented!()
         }
         fn get_authenticated_user(&self) -> Result<String> {
@@ -638,7 +636,7 @@ mod tests {
     fn test_plan_skips_merged_prs() {
         struct GitHubWithMergedPr;
 
-        impl GitHub for GitHubWithMergedPr {
+        impl Forge for GitHubWithMergedPr {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
@@ -666,7 +664,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
@@ -696,7 +694,7 @@ mod tests {
     fn test_plan_does_not_skip_closed_but_unmerged_prs() {
         struct GitHubWithClosedPr;
 
-        impl GitHub for GitHubWithClosedPr {
+        impl Forge for GitHubWithClosedPr {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
@@ -711,7 +709,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
@@ -735,7 +733,7 @@ mod tests {
     fn test_plan_merged_bookmark_not_pushed() {
         struct GitHubWithMergedPr;
 
-        impl GitHub for GitHubWithMergedPr {
+        impl Forge for GitHubWithMergedPr {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
@@ -763,7 +761,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
@@ -830,7 +828,7 @@ mod tests {
         // With ready=true, draft PR is identified
         let plan = create_submission_plan(&gh, &segments, "origin", &repo, "main", false, true, &[], None).unwrap();
         assert_eq!(plan.bookmarks_needing_ready.len(), 1);
-        assert_eq!(plan.bookmarks_needing_ready[0].pr_node_id, "PR_kwDOxyz");
+        assert_eq!(plan.bookmarks_needing_ready[0].pr_number, 1);
     }
 
     #[test]
@@ -872,7 +870,7 @@ mod tests {
     #[test]
     fn test_plan_error_context_on_list_failure() {
         struct FailingGitHub;
-        impl GitHub for FailingGitHub {
+        impl Forge for FailingGitHub {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 anyhow::bail!("HTTP 401 Unauthorized")
             }
@@ -883,7 +881,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { unimplemented!() }
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
@@ -904,7 +902,7 @@ mod tests {
     #[test]
     fn test_plan_warns_on_merged_check_failure() {
         struct MergedCheckFailsGitHub;
-        impl GitHub for MergedCheckFailsGitHub {
+        impl Forge for MergedCheckFailsGitHub {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
@@ -915,7 +913,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
                 anyhow::bail!("network timeout")

@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 
 use std::collections::HashMap;
 
-use crate::github::types::PullRequest;
-use crate::github::GitHub;
+use crate::forge::types::PullRequest;
+use crate::forge::Forge;
 use crate::jj::types::NarrowedSegment;
 use crate::jj::Jj;
 
@@ -46,7 +46,7 @@ pub struct MergeResult {
 /// live GitHub state rather than trusting the upfront plan.
 pub fn execute_merge_plan(
     jj: &dyn Jj,
-    github: &dyn GitHub,
+    github: &dyn Forge,
     plan: &MergePlan,
     segments: &[NarrowedSegment],
     dry_run: bool,
@@ -140,7 +140,7 @@ pub fn execute_merge_plan(
 
                     // Refresh PR state from GitHub after merge
                     let fresh_prs = github.list_open_prs(owner, repo)?;
-                    let fresh_map = crate::github::build_pr_map(fresh_prs, owner);
+                    let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
 
                     // Retarget next PR if its base still points at the merged branch
                     let next_name = &segments[seg_idx + 1].bookmark.name;
@@ -278,7 +278,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::github::types::{
+    use crate::forge::types::{
         ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, PullRequestRef,
         RepoInfo, ReviewSummary,
     };
@@ -388,7 +388,7 @@ mod tests {
         }
     }
 
-    impl GitHub for RecordingGitHub {
+    impl Forge for RecordingGitHub {
         fn merge_pr(&self, _o: &str, _r: &str, n: u64, m: MergeMethod) -> Result<()> {
             self.calls
                 .lock()
@@ -452,7 +452,7 @@ mod tests {
         fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
         fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
     }
 
@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn test_merge_failure_reports_error() {
         struct FailingMergeGitHub;
-        impl GitHub for FailingMergeGitHub {
+        impl Forge for FailingMergeGitHub {
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
                 anyhow::bail!("merge conflict detected")
             }
@@ -739,7 +739,7 @@ mod tests {
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
