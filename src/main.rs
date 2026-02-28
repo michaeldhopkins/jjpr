@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use jjpr::config;
 use jjpr::forge::remote;
 use jjpr::forge::types::{MergeMethod, PullRequest};
-use jjpr::forge::{Forge, ForgeKind, GhCli};
+use jjpr::forge::{Forge, ForgeKind, GhCli, GlabCli};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
@@ -25,7 +25,7 @@ use jjpr::submit::{analyze, execute, plan, resolve};
 
 #[derive(Parser)]
 #[command(name = "jjpr")]
-#[command(about = "Manage stacked pull requests in Jujutsu repositories\n\nRun with no arguments to see your stacks and their PR status on GitHub (read-only).\nUse `jjpr submit` to push, create PRs, and sync stack state.")]
+#[command(about = "Manage stacked pull requests in Jujutsu repositories\n\nRun with no arguments to see your stacks and their PR/MR status (read-only).\nUse `jjpr submit` to push, create PRs/MRs, and sync stack state.")]
 #[command(version, long_about = None, disable_version_flag = true)]
 struct Cli {
     /// Print version
@@ -57,7 +57,7 @@ enum Commands {
         #[arg(long, value_delimiter = ',')]
         reviewer: Vec<String>,
 
-        /// Git remote name (must be a GitHub remote)
+        /// Git remote name
         #[arg(long)]
         remote: Option<String>,
 
@@ -93,7 +93,7 @@ enum Commands {
         #[arg(long)]
         no_ci_check: bool,
 
-        /// Git remote name (must be a GitHub remote)
+        /// Git remote name
         #[arg(long)]
         remote: Option<String>,
 
@@ -101,7 +101,7 @@ enum Commands {
         #[arg(long)]
         base: Option<String>,
     },
-    /// Manage GitHub authentication
+    /// Manage forge authentication
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
@@ -115,7 +115,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum AuthCommands {
-    /// Test GitHub authentication
+    /// Test forge authentication
     Test,
     /// Show authentication setup instructions
     Setup,
@@ -176,16 +176,19 @@ fn main() -> Result<()> {
                 cli.no_fetch,
             )
         }
-        Some(Commands::Auth { command }) => match command {
-            AuthCommands::Test => {
-                let github = GhCli::new();
-                jjpr::auth::test_auth(&github)
+        Some(Commands::Auth { command }) => {
+            let forge_kind = detect_forge_kind_for_cwd();
+            match command {
+                AuthCommands::Test => {
+                    let forge = build_forge(forge_kind);
+                    jjpr::auth::test_auth(forge.as_ref())
+                }
+                AuthCommands::Setup => {
+                    jjpr::auth::print_auth_help(forge_kind);
+                    Ok(())
+                }
             }
-            AuthCommands::Setup => {
-                jjpr::auth::print_auth_help(ForgeKind::GitHub);
-                Ok(())
-            }
-        },
+        }
         Some(Commands::Config { command }) => match command {
             ConfigCommands::Init => cmd_config_init(),
         },
@@ -212,7 +215,6 @@ struct SubmitOptions<'a> {
 fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path)?;
-    let github = GhCli::new();
 
     // Infer bookmark before fetching to avoid a slow network round-trip
     // when there's nothing to submit
@@ -241,6 +243,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
 
     let remotes = jj.get_git_remotes()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
+    let forge = build_forge(forge_kind);
 
     let default_branch = jj.get_default_branch()?;
 
@@ -253,7 +256,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
 
     let stack_base = opts.base_override.or(analysis.base_branch.as_deref());
     let submission_plan = plan::create_submission_plan(
-        &github,
+        forge.as_ref(),
         &segments,
         &remote_name,
         &repo_info,
@@ -268,7 +271,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     if opts.bookmark.is_some() {
         println!("Submitting stack for '{target_bookmark}'...\n");
     }
-    execute::execute_submission_plan(&jj, &github, &submission_plan, opts.reviewers, opts.dry_run)?;
+    execute::execute_submission_plan(&jj, forge.as_ref(), &submission_plan, opts.reviewers, opts.dry_run)?;
     println!("\nDone.");
 
     Ok(())
@@ -291,8 +294,7 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     }
 
     // Try to resolve forge remote for PR info
-    let github = GhCli::new();
-    let (forge_kind, pr_info) = try_load_pr_info(&jj, &github, &graph)
+    let (forge_kind, pr_info) = try_load_pr_info(&jj, &graph)
         .unwrap_or((ForgeKind::GitHub, HashMap::new()));
 
     let multi = graph.stacks.len() > 1;
@@ -355,17 +357,17 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
 
 fn try_load_pr_info(
     jj: &dyn Jj,
-    github: &dyn Forge,
     graph: &change_graph::ChangeGraph,
 ) -> Option<(ForgeKind, HashMap<String, PullRequest>)> {
     let remotes = jj.get_git_remotes().ok()?;
     let (_remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
+    let forge = build_forge(forge_kind);
 
-    let all_prs = match github.list_open_prs(&repo_info.owner, &repo_info.repo) {
+    let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
         Err(_) => {
-            if !graph.stacks.is_empty() && github.get_authenticated_user().is_err() {
-                eprintln!("hint: run `jjpr auth test` to see PR status in stack overview");
+            if !graph.stacks.is_empty() && forge.get_authenticated_user().is_err() {
+                eprintln!("hint: run `jjpr auth test` to check authentication for stack overview");
             }
             return Some((forge_kind, HashMap::new()));
         }
@@ -387,7 +389,6 @@ struct MergeArgs<'a> {
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path)?;
-    let github = GhCli::new();
     let cfg = config::load_config()?;
 
     // Infer bookmark before fetching to avoid a slow network round-trip
@@ -417,6 +418,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
 
     let remotes = jj.get_git_remotes()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
+    let forge = build_forge(forge_kind);
 
     let default_branch = jj.get_default_branch()?;
 
@@ -435,7 +437,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
 
     let stack_base = args.base_override.or(analysis.base_branch.as_deref());
     let merge_plan = merge::plan::create_merge_plan(
-        &github,
+        forge.as_ref(),
         &segments,
         &repo_info,
         forge_kind,
@@ -450,7 +452,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     let result = merge::execute::execute_merge_plan(
-        &jj, &github, &merge_plan, &segments, dry_run,
+        &jj, forge.as_ref(), &merge_plan, &segments, dry_run,
     )?;
 
     if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
@@ -471,6 +473,34 @@ fn cmd_config_init() -> Result<()> {
     println!("Created default config at {}", path.display());
     println!("Edit it to customize merge behavior.");
     Ok(())
+}
+
+fn build_forge(kind: ForgeKind) -> Box<dyn Forge> {
+    match kind {
+        ForgeKind::GitHub => Box::new(GhCli::new()),
+        ForgeKind::GitLab => Box::new(GlabCli::new()),
+        ForgeKind::Forgejo => {
+            eprintln!("Forgejo support is not yet implemented");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Best-effort forge detection for commands that run before we have a resolved remote
+/// (e.g. `auth test`). Falls back to GitHub if detection fails.
+fn detect_forge_kind_for_cwd() -> ForgeKind {
+    let Ok(repo_path) = find_repo_root() else {
+        return ForgeKind::GitHub;
+    };
+    let Ok(jj) = JjRunner::new(repo_path) else {
+        return ForgeKind::GitHub;
+    };
+    let Ok(remotes) = jj.get_git_remotes() else {
+        return ForgeKind::GitHub;
+    };
+    remote::resolve_remote(&remotes, None)
+        .map(|(_, kind, _)| kind)
+        .unwrap_or(ForgeKind::GitHub)
 }
 
 fn find_repo_root() -> Result<PathBuf> {

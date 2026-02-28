@@ -1,9 +1,11 @@
 pub mod comment;
 pub mod github;
+pub mod gitlab;
 pub mod remote;
 pub mod types;
 
 pub use github::GhCli;
+pub use gitlab::GlabCli;
 pub use types::*;
 
 use std::collections::HashMap;

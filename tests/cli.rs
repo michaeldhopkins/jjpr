@@ -38,7 +38,7 @@ fn test_auth_help() {
         .args(["auth", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Manage GitHub authentication"))
+        .stdout(predicate::str::contains("Manage forge authentication"))
         .stdout(predicate::str::contains("test"))
         .stdout(predicate::str::contains("setup"));
 }
@@ -49,7 +49,7 @@ fn test_auth_test_help() {
         .args(["auth", "test", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Test GitHub authentication"));
+        .stdout(predicate::str::contains("Test forge authentication"));
 }
 
 #[test]

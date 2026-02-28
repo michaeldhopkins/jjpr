@@ -180,7 +180,7 @@ pub fn execute_submission_plan(
     }
 
     // Report title drift
-    print_title_drift_warnings(&plan.bookmarks_with_title_drift, &plan.repo_info);
+    print_title_drift_warnings(&plan.bookmarks_with_title_drift, &plan.repo_info, fk);
 
     if !plan.has_actions() && plan.bookmarks_already_merged.is_empty() {
         println!("  Stack is up to date.");
@@ -189,21 +189,31 @@ pub fn execute_submission_plan(
     Ok(())
 }
 
-fn print_title_drift_warnings(drifts: &[super::plan::TitleDrift], repo_info: &crate::forge::types::RepoInfo) {
+fn print_title_drift_warnings(
+    drifts: &[super::plan::TitleDrift],
+    repo_info: &crate::forge::types::RepoInfo,
+    forge_kind: crate::forge::ForgeKind,
+) {
     for drift in drifts {
         let escaped_title = drift.expected_title.replace('"', r#"\""#);
+        let fix_hint = match forge_kind {
+            crate::forge::ForgeKind::GitHub | crate::forge::ForgeKind::Forgejo => format!(
+                "gh pr edit {} --repo {}/{} --title \"{}\"",
+                drift.pr_number, repo_info.owner, repo_info.repo, escaped_title,
+            ),
+            crate::forge::ForgeKind::GitLab => format!(
+                "glab mr update {} --title \"{}\"",
+                drift.pr_number, escaped_title,
+            ),
+        };
         println!(
-            "  Note: PR #{} title differs from commit description\n\
+            "  Note: {} title differs from commit description\n\
              \x20        current: \"{}\"\n\
              \x20        expected: \"{}\"\n\
-             \x20        fix with: gh pr edit {} --repo {}/{} --title \"{}\"",
-            drift.pr_number,
+             \x20        fix with: {fix_hint}",
+            forge_kind.format_ref(drift.pr_number),
             drift.current_title,
             drift.expected_title,
-            drift.pr_number,
-            repo_info.owner,
-            repo_info.repo,
-            escaped_title,
         );
     }
 }
