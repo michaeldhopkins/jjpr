@@ -2,12 +2,15 @@ pub mod comment;
 pub mod forgejo;
 pub mod github;
 pub mod gitlab;
+pub mod http;
 pub mod remote;
+pub mod token;
 pub mod types;
 
-pub use forgejo::ForgejoCli;
+pub use forgejo::ForgejoForge;
 pub use github::GhCli;
 pub use gitlab::GlabCli;
+pub use http::{AuthScheme, ForgeClient, PaginationStyle};
 pub use types::*;
 
 use std::collections::HashMap;

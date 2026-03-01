@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use jjpr::config;
 use jjpr::forge::remote;
 use jjpr::forge::types::{MergeMethod, PullRequest, RepoInfo};
-use jjpr::forge::{Forge, ForgejoCli, ForgeKind, GhCli, GlabCli};
+use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GhCli, GlabCli, PaginationStyle};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
@@ -629,7 +629,9 @@ fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Re
             let token = token.ok_or_else(|| anyhow::anyhow!(
                 "FORGEJO_TOKEN not set. Run `jjpr auth setup` for instructions."
             ))?;
-            Ok(Box::new(ForgejoCli::new(host, token)))
+            let base_url = format!("https://{host}/api/v1");
+            let client = ForgeClient::new(&base_url, token, AuthScheme::Token, PaginationStyle::PageNumber { limit: 50 });
+            Ok(Box::new(ForgejoForge::new(client)))
         }
     }
 }

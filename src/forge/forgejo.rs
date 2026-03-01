@@ -1,98 +1,19 @@
-use std::process::Command;
-
 use anyhow::{Context, Result};
 
+use super::http::ForgeClient;
 use super::types::{
     ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, ReviewSummary,
 };
 use super::Forge;
 
-/// Forgejo/Codeberg implementation that shells out to `curl`.
-///
-/// All curl details are contained in `api_request`. Swapping to a
-/// dedicated CLI tool (like `tea`) means changing only that method.
-#[derive(Debug)]
-pub struct ForgejoCli {
-    base_url: String,
-    token: String,
+/// Forgejo/Codeberg implementation using direct HTTP via `ForgeClient`.
+pub struct ForgejoForge {
+    client: ForgeClient,
 }
 
-impl ForgejoCli {
-    pub fn new(host: &str, token: String) -> Self {
-        Self {
-            base_url: format!("https://{host}/api/v1"),
-            token,
-        }
-    }
-
-    fn api_request(
-        &self,
-        method: &str,
-        path: &str,
-        json_body: Option<&str>,
-    ) -> Result<String> {
-        let url = format!("{}/{path}", self.base_url);
-        let auth_header = format!("Authorization: token {}", self.token);
-        let mut cmd = Command::new("curl");
-        cmd.args([
-            "-sS",
-            "-w", "\n%{http_code}",
-            "-X", method,
-            "-H", &auth_header,
-            "-H", "Accept: application/json",
-        ]);
-        if let Some(body) = json_body {
-            cmd.args(["-H", "Content-Type: application/json", "-d", body]);
-        }
-        cmd.arg(&url);
-
-        let output = cmd.output().context("failed to run curl")?;
-        let raw = String::from_utf8_lossy(&output.stdout);
-
-        let (body, status_line) = raw.rsplit_once('\n').unwrap_or((&raw, "000"));
-        let status: u16 = status_line.trim().parse().unwrap_or(0);
-
-        if !output.status.success() || status >= 400 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let detail = if stderr.trim().is_empty() {
-                body.trim()
-            } else {
-                stderr.trim()
-            };
-            anyhow::bail!("Forgejo API {method} {path} failed (HTTP {status}): {detail}");
-        }
-
-        Ok(body.to_string())
-    }
-
-    fn api_get(&self, path: &str) -> Result<String> {
-        self.api_request("GET", path, None)
-    }
-
-    fn api_post(&self, path: &str, body: &str) -> Result<String> {
-        self.api_request("POST", path, Some(body))
-    }
-
-    fn api_patch(&self, path: &str, body: &str) -> Result<String> {
-        self.api_request("PATCH", path, Some(body))
-    }
-
-    fn api_get_paginated(&self, path: &str) -> Result<Vec<serde_json::Value>> {
-        let separator = if path.contains('?') { '&' } else { '?' };
-        let mut all_items = Vec::new();
-        let mut page = 1u32;
-        loop {
-            let paged = format!("{path}{separator}page={page}&limit=50");
-            let body = self.api_get(&paged)?;
-            let items: Vec<serde_json::Value> =
-                serde_json::from_str(&body).context("failed to parse paginated response")?;
-            if items.is_empty() {
-                break;
-            }
-            all_items.extend(items);
-            page += 1;
-        }
-        Ok(all_items)
+impl ForgejoForge {
+    pub fn new(client: ForgeClient) -> Self {
+        Self { client }
     }
 }
 
@@ -173,12 +94,12 @@ fn parse_mergeability(pr: &serde_json::Value) -> PrMergeability {
     }
 }
 
-impl Forge for ForgejoCli {
+impl Forge for ForgejoForge {
     fn list_open_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>> {
         let path = format!("repos/{owner}/{repo}/pulls?state=open");
-        let items = self.api_get_paginated(&path)?;
-        let json = serde_json::to_string(&items)?;
-        serde_json::from_str(&json).context("failed to parse PR list response")
+        let items = self.client.get_paginated(&path)?;
+        serde_json::from_value(serde_json::Value::Array(items))
+            .context("failed to parse PR list response")
     }
 
     fn create_pr(
@@ -199,8 +120,8 @@ impl Forge for ForgejoCli {
             "base": base,
             "draft": draft,
         });
-        let output = self.api_post(&path, &json_body.to_string())?;
-        serde_json::from_str(&output).context("failed to parse created PR response")
+        let output = self.client.post(&path, &json_body)?;
+        serde_json::from_value(output).context("failed to parse created PR response")
     }
 
     fn update_pr_base(
@@ -212,7 +133,7 @@ impl Forge for ForgejoCli {
     ) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "base": base });
-        self.api_patch(&path, &json_body.to_string())?;
+        self.client.patch(&path, &json_body)?;
         Ok(())
     }
 
@@ -228,7 +149,7 @@ impl Forge for ForgejoCli {
         }
         let path = format!("repos/{owner}/{repo}/pulls/{number}/requested_reviewers");
         let json_body = serde_json::json!({ "reviewers": reviewers });
-        self.api_post(&path, &json_body.to_string())?;
+        self.client.post(&path, &json_body)?;
         Ok(())
     }
 
@@ -239,9 +160,9 @@ impl Forge for ForgejoCli {
         number: u64,
     ) -> Result<Vec<IssueComment>> {
         let path = format!("repos/{owner}/{repo}/issues/{number}/comments");
-        let items = self.api_get_paginated(&path)?;
-        let json = serde_json::to_string(&items)?;
-        serde_json::from_str(&json).context("failed to parse comments response")
+        let items = self.client.get_paginated(&path)?;
+        serde_json::from_value(serde_json::Value::Array(items))
+            .context("failed to parse comments response")
     }
 
     fn create_comment(
@@ -253,8 +174,8 @@ impl Forge for ForgejoCli {
     ) -> Result<IssueComment> {
         let path = format!("repos/{owner}/{repo}/issues/{number}/comments");
         let json_body = serde_json::json!({ "body": body });
-        let output = self.api_post(&path, &json_body.to_string())?;
-        serde_json::from_str(&output).context("failed to parse created comment response")
+        let output = self.client.post(&path, &json_body)?;
+        serde_json::from_value(output).context("failed to parse created comment response")
     }
 
     fn update_comment(
@@ -266,7 +187,7 @@ impl Forge for ForgejoCli {
     ) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/issues/comments/{comment_id}");
         let json_body = serde_json::json!({ "body": body });
-        self.api_patch(&path, &json_body.to_string())?;
+        self.client.patch(&path, &json_body)?;
         Ok(())
     }
 
@@ -279,7 +200,7 @@ impl Forge for ForgejoCli {
     ) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "body": body });
-        self.api_patch(&path, &json_body.to_string())?;
+        self.client.patch(&path, &json_body)?;
         Ok(())
     }
 
@@ -291,15 +212,13 @@ impl Forge for ForgejoCli {
     ) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "draft": false });
-        self.api_patch(&path, &json_body.to_string())?;
+        self.client.patch(&path, &json_body)?;
         Ok(())
     }
 
     fn get_authenticated_user(&self) -> Result<String> {
-        let output = self.api_get("user")?;
-        let user: serde_json::Value =
-            serde_json::from_str(&output).context("failed to parse user response")?;
-        user["login"]
+        let output = self.client.get("user")?;
+        output["login"]
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("user response missing login field"))
@@ -317,9 +236,9 @@ impl Forge for ForgejoCli {
         let base_path = format!("repos/{owner}/{repo}/pulls?state=closed");
         for page in 1..=5u32 {
             let paged = format!("{base_path}&page={page}&limit=50");
-            let body = self.api_get(&paged)?;
+            let body = self.client.get(&paged)?;
             let prs: Vec<PullRequest> =
-                serde_json::from_str(&body).context("failed to parse closed PR list response")?;
+                serde_json::from_value(body).context("failed to parse closed PR list response")?;
             if prs.is_empty() {
                 break;
             }
@@ -347,7 +266,7 @@ impl Forge for ForgejoCli {
             MergeMethod::Rebase => "rebase",
         };
         let json_body = serde_json::json!({ "Do": do_value });
-        self.api_post(&path, &json_body.to_string())?;
+        self.client.post(&path, &json_body)?;
         Ok(())
     }
 
@@ -358,10 +277,8 @@ impl Forge for ForgejoCli {
         head_ref: &str,
     ) -> Result<ChecksStatus> {
         let path = format!("repos/{owner}/{repo}/commits/{head_ref}/status");
-        let output = self.api_get(&path)?;
-        let status: serde_json::Value =
-            serde_json::from_str(&output).context("failed to parse commit status response")?;
-        Ok(parse_combined_status(&status))
+        let output = self.client.get(&path)?;
+        Ok(parse_combined_status(&output))
     }
 
     fn get_pr_reviews(
@@ -371,7 +288,7 @@ impl Forge for ForgejoCli {
         number: u64,
     ) -> Result<ReviewSummary> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
-        let items = self.api_get_paginated(&path)?;
+        let items = self.client.get_paginated(&path)?;
         Ok(parse_reviews(&items))
     }
 
@@ -382,10 +299,8 @@ impl Forge for ForgejoCli {
         number: u64,
     ) -> Result<PrMergeability> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
-        let output = self.api_get(&path)?;
-        let pr: serde_json::Value =
-            serde_json::from_str(&output).context("failed to parse PR mergeability response")?;
-        Ok(parse_mergeability(&pr))
+        let output = self.client.get(&path)?;
+        Ok(parse_mergeability(&output))
     }
 }
 
@@ -393,7 +308,7 @@ impl Forge for ForgejoCli {
 mod tests {
     use super::*;
 
-    // --- JSON fixture tests: verify parsing without any CLI ---
+    // --- JSON fixture tests: verify parsing without any HTTP ---
 
     const FORGEJO_PR_RESPONSE: &str = r#"{
         "number": 42,
@@ -633,18 +548,5 @@ mod tests {
 
         let rebase = serde_json::json!({ "Do": "rebase" });
         assert_eq!(rebase["Do"].as_str().unwrap(), "rebase");
-    }
-
-    #[test]
-    fn test_constructor_stores_fields() {
-        let cli = ForgejoCli::new("codeberg.org", "tok_abc".to_string());
-        assert_eq!(cli.base_url, "https://codeberg.org/api/v1");
-        assert_eq!(cli.token, "tok_abc");
-    }
-
-    #[test]
-    fn test_base_url_self_hosted() {
-        let cli = ForgejoCli::new("forgejo.example.com", "tok".to_string());
-        assert_eq!(cli.base_url, "https://forgejo.example.com/api/v1");
     }
 }
