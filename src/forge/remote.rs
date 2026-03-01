@@ -155,7 +155,8 @@ pub fn resolve_remote(
 
     match forge_remotes.len() {
         0 => anyhow::bail!(
-            "no supported forge remotes found. Add one with: jj git remote add origin https://github.com/OWNER/REPO.git"
+            "no supported forge remotes found. Either add a supported remote \
+             (jj git remote add origin <URL>) or set forge = \"...\" in .jj/jjpr.toml"
         ),
         1 => Ok(forge_remotes.into_iter().next().expect("len checked")),
         _ => {

@@ -24,6 +24,16 @@ pub enum ForgeKind {
     Forgejo,
 }
 
+impl std::fmt::Display for ForgeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GitHub => write!(f, "GitHub"),
+            Self::GitLab => write!(f, "GitLab"),
+            Self::Forgejo => write!(f, "Forgejo"),
+        }
+    }
+}
+
 impl ForgeKind {
     /// "pull request" or "merge request"
     pub fn request_noun(&self) -> &'static str {
@@ -243,5 +253,9 @@ mod tests {
 
         assert_eq!(ForgeKind::GitHub.request_noun(), "pull request");
         assert_eq!(ForgeKind::GitLab.request_noun(), "merge request");
+
+        assert_eq!(ForgeKind::GitHub.to_string(), "GitHub");
+        assert_eq!(ForgeKind::GitLab.to_string(), "GitLab");
+        assert_eq!(ForgeKind::Forgejo.to_string(), "Forgejo");
     }
 }

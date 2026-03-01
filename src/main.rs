@@ -183,18 +183,29 @@ fn main() -> Result<()> {
         Some(Commands::Auth { command }) => {
             match command {
                 AuthCommands::Test => {
-                    let Some((forge_kind, host)) = detect_forge_for_cwd() else {
+                    let Some(detected) = detect_forge_for_cwd() else {
                         anyhow::bail!(
                             "could not detect forge. Run from a jj repo with a supported remote, \
                              or set forge = \"...\" in .jj/jjpr.toml"
                         );
                     };
-                    let forge = build_forge(forge_kind, host.as_deref(), None)?;
+                    print_forge_detection(&detected);
+                    if detected.token.is_none() && detected.kind == ForgeKind::Forgejo {
+                        let env_var = detected.token_env_var.as_deref().unwrap_or("FORGEJO_TOKEN");
+                        anyhow::bail!(
+                            "{env_var} not set. Set this environment variable or adjust \
+                             forge_token_env in .jj/jjpr.toml"
+                        );
+                    }
+                    let forge = build_forge(detected.kind, detected.host.as_deref(), detected.token)?;
                     jjpr::auth::test_auth(forge.as_ref())
                 }
                 AuthCommands::Setup => {
                     match detect_forge_for_cwd() {
-                        Some((forge_kind, _)) => jjpr::auth::print_auth_help(forge_kind),
+                        Some(detected) => {
+                            print_forge_detection(&detected);
+                            jjpr::auth::print_auth_help(detected.kind);
+                        }
                         None => jjpr::auth::print_auth_help_all(),
                     }
                     Ok(())
@@ -539,6 +550,13 @@ fn resolve_forge_from_config(
     let env_var = token_env.unwrap_or(kind.token_env_var());
     let token = std::env::var(env_var).ok();
 
+    if token.is_none() && kind == ForgeKind::Forgejo {
+        anyhow::bail!(
+            "{env_var} not set. Set this environment variable or adjust \
+             forge_token_env in .jj/jjpr.toml"
+        );
+    }
+
     let remote = pick_remote(remotes, preferred_remote)?;
     let host = remote::extract_host(&remote.url);
     let repo_info = remote::parse_url_as(&remote.url, kind)
@@ -616,10 +634,31 @@ fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Re
     }
 }
 
+fn print_forge_detection(detected: &DetectedForge) {
+    let source = match &detected.source {
+        ForgeSource::Config => "from config".to_string(),
+        ForgeSource::Remote(name) => format!("from remote '{name}'"),
+    };
+    println!("Detected forge: {} ({source})", detected.kind);
+}
+
+struct DetectedForge {
+    kind: ForgeKind,
+    host: Option<String>,
+    token: Option<String>,
+    /// The env var name used to resolve the token (for error messages)
+    token_env_var: Option<String>,
+    source: ForgeSource,
+}
+
+enum ForgeSource {
+    Config,
+    Remote(String),
+}
+
 /// Best-effort forge detection for auth commands.
 /// Checks repo-local config first; falls back to auto-detection from remotes.
-/// Returns `None` if detection fails (caller decides what to show).
-fn detect_forge_for_cwd() -> Option<(ForgeKind, Option<String>)> {
+fn detect_forge_for_cwd() -> Option<DetectedForge> {
     let repo_path = find_repo_root().ok()?;
     let cfg = config::load_config_with_repo(Some(&repo_path)).ok()?;
     let jj = JjRunner::new(repo_path).ok()?;
@@ -629,12 +668,20 @@ fn detect_forge_for_cwd() -> Option<(ForgeKind, Option<String>)> {
         let host = pick_remote(&remotes, None)
             .ok()
             .and_then(|r| remote::extract_host(&r.url).map(|s| s.to_string()));
-        return Some((kind, host));
+        let env_var = cfg.forge_token_env.as_deref().unwrap_or(kind.token_env_var());
+        let token = std::env::var(env_var).ok();
+        return Some(DetectedForge {
+            kind,
+            host,
+            token,
+            token_env_var: Some(env_var.to_string()),
+            source: ForgeSource::Config,
+        });
     }
 
     let (remote_name, kind, _) = remote::resolve_remote(&remotes, None).ok()?;
     let host = find_remote_host(&remotes, &remote_name).map(|s| s.to_string());
-    Some((kind, host))
+    Some(DetectedForge { kind, host, token: None, token_env_var: None, source: ForgeSource::Remote(remote_name) })
 }
 
 fn find_repo_root() -> Result<PathBuf> {
