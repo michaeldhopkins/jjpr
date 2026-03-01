@@ -117,6 +117,16 @@ fn parse_gitlab_path(path: &str) -> Option<RepoInfo> {
     })
 }
 
+/// Parse owner/repo from a URL for a specific forge kind, ignoring host detection.
+/// Used when config explicitly sets the forge type.
+pub fn parse_url_as(url: &str, kind: ForgeKind) -> Option<RepoInfo> {
+    let (_, path) = extract_host_and_path(url)?;
+    match kind {
+        ForgeKind::GitLab => parse_gitlab_path(path),
+        ForgeKind::GitHub | ForgeKind::Forgejo => parse_owner_repo(path),
+    }
+}
+
 /// Filter a list of git remotes to supported forge remotes.
 pub fn find_forge_remotes(remotes: &[GitRemote]) -> Vec<(String, ForgeKind, RepoInfo)> {
     remotes
@@ -380,5 +390,32 @@ mod tests {
         ];
         let err = resolve_remote(&remotes, None).unwrap_err();
         assert!(err.to_string().contains("multiple forge remotes"));
+    }
+
+    // parse_url_as tests — used when config explicitly sets forge type
+    #[test]
+    fn test_parse_url_as_github_from_any_host() {
+        let info = parse_url_as("https://forgejo.example.com/me/repo.git", ForgeKind::GitHub).unwrap();
+        assert_eq!(info.owner, "me");
+        assert_eq!(info.repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_url_as_forgejo_from_any_host() {
+        let info = parse_url_as("git@git.mycompany.com:team/project.git", ForgeKind::Forgejo).unwrap();
+        assert_eq!(info.owner, "team");
+        assert_eq!(info.repo, "project");
+    }
+
+    #[test]
+    fn test_parse_url_as_gitlab_uses_nested_groups() {
+        let info = parse_url_as("https://git.mycompany.com/group/sub/repo.git", ForgeKind::GitLab).unwrap();
+        assert_eq!(info.owner, "group/sub");
+        assert_eq!(info.repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_url_as_invalid_url() {
+        assert!(parse_url_as("", ForgeKind::GitHub).is_none());
     }
 }
