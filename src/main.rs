@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use jjpr::config;
 use jjpr::forge::remote;
 use jjpr::forge::types::{MergeMethod, PullRequest, RepoInfo};
-use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GlabCli, PaginationStyle};
+use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
 use jjpr::forge::token as forge_token;
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
@@ -625,10 +625,16 @@ fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Re
             let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
             Ok(Box::new(GitHubForge::new(client)))
         }
-        ForgeKind::GitLab => match token {
-            Some(t) => Ok(Box::new(GlabCli::with_token(t))),
-            None => Ok(Box::new(GlabCli::new())),
-        },
+        ForgeKind::GitLab => {
+            let token = match token {
+                Some(t) => t,
+                None => forge_token::resolve_token(ForgeKind::GitLab, None)?,
+            };
+            let gitlab_host = host.unwrap_or("gitlab.com");
+            let base_url = format!("https://{gitlab_host}/api/v4");
+            let client = ForgeClient::new(&base_url, token, AuthScheme::PrivateToken, PaginationStyle::LinkHeader);
+            Ok(Box::new(GitLabForge::new(client)))
+        }
         ForgeKind::Forgejo => {
             let host = host.ok_or_else(|| anyhow::anyhow!("could not determine Forgejo host from remote URL"))?;
             let token = token.ok_or_else(|| anyhow::anyhow!(

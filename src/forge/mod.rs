@@ -9,7 +9,7 @@ pub mod types;
 
 pub use forgejo::ForgejoForge;
 pub use github::GitHubForge;
-pub use gitlab::GlabCli;
+pub use gitlab::GitLabForge;
 pub use http::{AuthScheme, ForgeClient, PaginationStyle};
 pub use types::*;
 
