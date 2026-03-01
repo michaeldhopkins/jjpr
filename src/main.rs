@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use jjpr::config;
 use jjpr::forge::remote;
 use jjpr::forge::types::{MergeMethod, PullRequest, RepoInfo};
-use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GhCli, GlabCli, PaginationStyle};
+use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GlabCli, PaginationStyle};
+use jjpr::forge::token as forge_token;
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
@@ -616,10 +617,14 @@ fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -
 
 fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Result<Box<dyn Forge>> {
     match kind {
-        ForgeKind::GitHub => match token {
-            Some(t) => Ok(Box::new(GhCli::with_token(t))),
-            None => Ok(Box::new(GhCli::new())),
-        },
+        ForgeKind::GitHub => {
+            let token = match token {
+                Some(t) => t,
+                None => forge_token::resolve_token(ForgeKind::GitHub, None)?,
+            };
+            let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+            Ok(Box::new(GitHubForge::new(client)))
+        }
         ForgeKind::GitLab => match token {
             Some(t) => Ok(Box::new(GlabCli::with_token(t))),
             None => Ok(Box::new(GlabCli::new())),

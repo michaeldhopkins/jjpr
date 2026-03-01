@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jjpr::forge::{ForgeKind, GhCli};
+use jjpr::forge::{AuthScheme, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
 use jjpr::forge::types::RepoInfo;
 use jjpr::graph::change_graph;
 use jjpr::submit::{analyze, execute, plan, resolve};
@@ -212,7 +212,10 @@ fn test_submit_creates_stacked_prs() {
 
     // Build graph and submit
     let jj = ctx.runner();
-    let github = GhCli::new();
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+    let github = GitHubForge::new(client);
 
     let graph = change_graph::build_change_graph(&jj).unwrap();
     let analysis =
