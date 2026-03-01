@@ -176,13 +176,15 @@ Use `--reviewer alice,bob` to request reviewers. Reviewers are applied to all PR
 - [jj](https://jj-vcs.github.io/jj/) (Jujutsu VCS)
 - A colocated jj/git repository with a supported remote
 
-Plus the CLI tool for your forge:
+Authentication is token-based. jjpr talks directly to forge APIs — no CLI tools required.
 
-| Forge | CLI | Auth |
-|-------|-----|------|
-| GitHub | [gh](https://cli.github.com/) | `gh auth login` |
-| GitLab | [glab](https://gitlab.com/gitlab-org/cli) | `glab auth login` |
-| Forgejo/Codeberg | — (uses REST API directly) | Set `FORGEJO_TOKEN` env var |
+| Forge | Token env var | CLI fallback |
+|-------|--------------|--------------|
+| GitHub | `GITHUB_TOKEN` or `GH_TOKEN` | `gh auth login` (reads stored credentials) |
+| GitLab | `GITLAB_TOKEN` | `glab auth login` (reads stored credentials) |
+| Forgejo/Codeberg | `FORGEJO_TOKEN` | — |
+
+If you already use `gh` or `glab`, jjpr picks up your existing credentials automatically — no extra setup needed.
 
 For Forgejo/Codeberg, generate an API token with `repo` scope from your instance's settings (e.g., `https://codeberg.org/user/settings/applications`) and export it:
 
@@ -198,7 +200,7 @@ forge = "forgejo"
 
 ## How it works
 
-jjpr auto-detects the forge from your remote URL and shells out to `jj` and the appropriate CLI tool for all operations. It discovers stacks by walking bookmarks toward trunk, builds an adjacency graph, and plans submissions by comparing local state with the forge.
+jjpr auto-detects the forge from your remote URL and talks directly to forge APIs via HTTP. It shells out to `jj` for version control operations, discovers stacks by walking bookmarks toward trunk, builds an adjacency graph, and plans submissions by comparing local state with the forge.
 
 Auto-detection recognizes `github.com`, `gitlab.com`, and `codeberg.org` (plus Enterprise subdomains for GitHub/GitLab). For self-hosted instances, set `forge` in `.jj/jjpr.toml` — see [Repo-local config](#repo-local-config).
 

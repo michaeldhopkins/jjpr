@@ -78,6 +78,38 @@ fn parse_note(note: &serde_json::Value) -> Option<IssueComment> {
     Some(IssueComment { id, body })
 }
 
+/// Map a GitLab pipeline status string to `ChecksStatus`.
+fn parse_pipeline_status(pipeline: Option<&serde_json::Value>) -> ChecksStatus {
+    let Some(latest) = pipeline else {
+        return ChecksStatus::None;
+    };
+    match latest["status"].as_str().unwrap_or("unknown") {
+        "success" => ChecksStatus::Pass,
+        "failed" | "canceled" => ChecksStatus::Fail,
+        "created" | "waiting_for_resource" | "preparing" | "pending" | "running"
+        | "manual" | "scheduled" => ChecksStatus::Pending,
+        _ => ChecksStatus::Pending,
+    }
+}
+
+/// Parse a GitLab MR's `detailed_merge_status` into `PrMergeability`.
+fn parse_mergeability(mr: &serde_json::Value) -> PrMergeability {
+    let detailed_status = mr["detailed_merge_status"]
+        .as_str()
+        .unwrap_or("unknown");
+
+    let mergeable = match detailed_status {
+        "mergeable" => Some(true),
+        "checking" | "unchecked" | "preparing" => None,
+        _ => Some(false),
+    };
+
+    PrMergeability {
+        mergeable,
+        mergeable_state: detailed_status.to_string(),
+    }
+}
+
 impl Forge for GitLabForge {
     fn list_open_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>> {
         let project = Self::encode_project(owner, repo);
@@ -300,17 +332,7 @@ impl Forge for GitLabForge {
         let pipelines: Vec<serde_json::Value> = serde_json::from_value(output)
             .context("failed to parse pipelines response")?;
 
-        let Some(latest) = pipelines.first() else {
-            return Ok(ChecksStatus::None);
-        };
-
-        match latest["status"].as_str().unwrap_or("unknown") {
-            "success" => Ok(ChecksStatus::Pass),
-            "failed" | "canceled" => Ok(ChecksStatus::Fail),
-            "created" | "waiting_for_resource" | "preparing" | "pending" | "running"
-            | "manual" | "scheduled" => Ok(ChecksStatus::Pending),
-            _ => Ok(ChecksStatus::Pending),
-        }
+        Ok(parse_pipeline_status(pipelines.first()))
     }
 
     fn get_pr_reviews(
@@ -353,20 +375,7 @@ impl Forge for GitLabForge {
         let path = format!("projects/{project}/merge_requests/{number}");
         let mr = self.client.get(&path)?;
 
-        let detailed_status = mr["detailed_merge_status"]
-            .as_str()
-            .unwrap_or("unknown");
-
-        let mergeable = match detailed_status {
-            "mergeable" => Some(true),
-            "checking" | "unchecked" | "preparing" => None,
-            _ => Some(false),
-        };
-
-        Ok(PrMergeability {
-            mergeable,
-            mergeable_state: detailed_status.to_string(),
-        })
+        Ok(parse_mergeability(&mr))
     }
 }
 
@@ -571,15 +580,15 @@ mod tests {
         ];
 
         for (status, expected) in cases {
-            let result = match status {
-                "success" => ChecksStatus::Pass,
-                "failed" | "canceled" => ChecksStatus::Fail,
-                "created" | "waiting_for_resource" | "preparing" | "pending" | "running"
-                | "manual" | "scheduled" => ChecksStatus::Pending,
-                _ => ChecksStatus::Pending,
-            };
+            let pipeline = serde_json::json!({"status": status});
+            let result = parse_pipeline_status(Some(&pipeline));
             assert_eq!(result, expected, "status '{status}' should map correctly");
         }
+    }
+
+    #[test]
+    fn test_pipeline_status_none_when_empty() {
+        assert_eq!(parse_pipeline_status(None), ChecksStatus::None);
     }
 
     #[test]
@@ -596,16 +605,22 @@ mod tests {
         ];
 
         for (status, expected) in cases {
-            let result = match status {
-                "mergeable" => Some(true),
-                "checking" | "unchecked" | "preparing" => None,
-                _ => Some(false),
-            };
+            let mr = serde_json::json!({"detailed_merge_status": status});
+            let result = parse_mergeability(&mr);
             assert_eq!(
-                result, expected,
+                result.mergeable, expected,
                 "detailed_merge_status '{status}' should map correctly"
             );
+            assert_eq!(result.mergeable_state, status);
         }
+    }
+
+    #[test]
+    fn test_mergeability_missing_field() {
+        let mr = serde_json::json!({});
+        let result = parse_mergeability(&mr);
+        assert_eq!(result.mergeable, Some(false));
+        assert_eq!(result.mergeable_state, "unknown");
     }
 
     #[test]

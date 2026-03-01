@@ -13,27 +13,22 @@ pub fn test_auth(forge: &dyn Forge) -> Result<()> {
 pub fn print_auth_help(kind: ForgeKind) {
     match kind {
         ForgeKind::GitHub => {
-            println!("jjpr uses the GitHub CLI (gh) for authentication.\n");
-            println!("Setup:");
-            println!("  1. Install gh: https://cli.github.com");
-            println!("  2. Run: gh auth login");
-            println!("  3. Verify: jjpr auth test\n");
-            println!("Alternatively, set GITHUB_TOKEN or GH_TOKEN environment variable.");
+            println!("GitHub authentication options (in order of priority):\n");
+            println!("  1. Set GITHUB_TOKEN (or GH_TOKEN) environment variable");
+            println!("  2. Run `gh auth login` (jjpr reads gh's stored credentials)\n");
+            println!("Verify: jjpr auth test");
         }
         ForgeKind::GitLab => {
-            println!("jjpr uses the GitLab CLI (glab) for authentication.\n");
-            println!("Setup:");
-            println!("  1. Install glab: https://gitlab.com/gitlab-org/cli");
-            println!("  2. Run: glab auth login");
-            println!("  3. Verify: jjpr auth test\n");
-            println!("Alternatively, set GITLAB_TOKEN environment variable.");
+            println!("GitLab authentication options (in order of priority):\n");
+            println!("  1. Set GITLAB_TOKEN environment variable");
+            println!("  2. Run `glab auth login` (jjpr reads glab's stored credentials)\n");
+            println!("Verify: jjpr auth test");
         }
         ForgeKind::Forgejo => {
-            println!("jjpr uses token-based authentication for Forgejo/Codeberg.\n");
-            println!("Setup:");
+            println!("Forgejo/Codeberg authentication:\n");
             println!("  1. Generate a token in your Forgejo/Codeberg account settings");
-            println!("  2. Set FORGEJO_TOKEN environment variable");
-            println!("  3. Verify: jjpr auth test");
+            println!("  2. Set FORGEJO_TOKEN environment variable\n");
+            println!("Verify: jjpr auth test");
         }
     }
 }

@@ -25,7 +25,7 @@ pub enum AuthScheme {
 }
 
 /// Shared HTTP client wrapping a `ureq::Agent` with auth, base URL, and pagination.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ForgeClient {
     agent: ureq::Agent,
     base_url: String,

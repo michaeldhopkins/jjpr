@@ -2,19 +2,19 @@
 
 ## Project overview
 
-Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) repositories. Shells out to `jj` and `gh` for all external operations — no async runtime, no HTTP client libraries.
+Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) repositories. Shells out to `jj` for version control; talks directly to forge APIs via `ureq` (sync HTTP client).
 
 ## Architecture
 
 - `src/jj/` — Jj trait + JjRunner (shells out to jj binary), template strings, type definitions
-- `src/github/` — GitHub trait + GhCli (shells out to gh CLI), PR comment generation, remote URL parsing
+- `src/forge/` — Forge trait + backends (GitHub, GitLab, Forgejo) using `ForgeClient` (ureq HTTP wrapper), token resolution, remote URL parsing, PR comment generation
 - `src/graph/` — Change graph construction from bookmarks, traversal toward trunk
 - `src/submit/` — Analyze target stack, resolve multi-bookmark segments, plan submission, execute (push/PR/comments)
 - `src/auth.rs` — Auth test/help commands
 
 ## Key conventions
 
-- Traits (`Jj`, `GitHub`) for all external I/O — enables testing with stubs
+- Traits (`Jj`, `Forge`) for all external I/O — enables testing with stubs
 - Test stubs use `Mutex<Vec<String>>` for recording calls (traits require Send + Sync)
 - Co-located `#[cfg(test)] mod tests` in every module
 - jj templates produce line-delimited JSON; `escape_json()` includes surrounding quotes

@@ -191,14 +191,12 @@ fn main() -> Result<()> {
                         );
                     };
                     print_forge_detection(&detected);
-                    if detected.token.is_none() && detected.kind == ForgeKind::Forgejo {
-                        let env_var = detected.token_env_var.as_deref().unwrap_or("FORGEJO_TOKEN");
-                        anyhow::bail!(
-                            "{env_var} not set. Set this environment variable or adjust \
-                             forge_token_env in .jj/jjpr.toml"
-                        );
-                    }
-                    let forge = build_forge(detected.kind, detected.host.as_deref(), detected.token)?;
+                    let forge = build_forge(
+                        detected.kind,
+                        detected.host.as_deref(),
+                        detected.token,
+                        detected.token_env_var.as_deref(),
+                    )?;
                     jjpr::auth::test_auth(forge.as_ref())
                 }
                 AuthCommands::Setup => {
@@ -549,14 +547,7 @@ fn resolve_forge_from_config(
     preferred_remote: Option<&str>,
 ) -> Result<ResolvedForge> {
     let env_var = token_env.unwrap_or(kind.token_env_var());
-    let token = std::env::var(env_var).ok();
-
-    if token.is_none() && kind == ForgeKind::Forgejo {
-        anyhow::bail!(
-            "{env_var} not set. Set this environment variable or adjust \
-             forge_token_env in .jj/jjpr.toml"
-        );
-    }
+    let token = std::env::var(env_var).ok().filter(|v| !v.is_empty());
 
     let remote = pick_remote(remotes, preferred_remote)?;
     let host = remote::extract_host(&remote.url);
@@ -566,7 +557,7 @@ fn resolve_forge_from_config(
             remote.name, remote.url
         ))?;
 
-    let forge = build_forge(kind, host, token)?;
+    let forge = build_forge(kind, host, token, token_env)?;
     Ok(ResolvedForge {
         forge,
         kind,
@@ -581,7 +572,7 @@ fn resolve_forge_auto(
 ) -> Result<ResolvedForge> {
     let (remote_name, kind, repo_info) = remote::resolve_remote(remotes, preferred_remote)?;
     let host = find_remote_host(remotes, &remote_name);
-    let forge = build_forge(kind, host, None)?;
+    let forge = build_forge(kind, host, None, None)?;
     Ok(ResolvedForge {
         forge,
         kind,
@@ -615,21 +606,17 @@ fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -
         .and_then(|r| remote::extract_host(&r.url))
 }
 
-fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Result<Box<dyn Forge>> {
+fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>, token_env: Option<&str>) -> Result<Box<dyn Forge>> {
+    let token = match token {
+        Some(t) => t,
+        None => forge_token::resolve_token(kind, token_env)?,
+    };
     match kind {
         ForgeKind::GitHub => {
-            let token = match token {
-                Some(t) => t,
-                None => forge_token::resolve_token(ForgeKind::GitHub, None)?,
-            };
             let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
             Ok(Box::new(GitHubForge::new(client)))
         }
         ForgeKind::GitLab => {
-            let token = match token {
-                Some(t) => t,
-                None => forge_token::resolve_token(ForgeKind::GitLab, None)?,
-            };
             let gitlab_host = host.unwrap_or("gitlab.com");
             let base_url = format!("https://{gitlab_host}/api/v4");
             let client = ForgeClient::new(&base_url, token, AuthScheme::PrivateToken, PaginationStyle::LinkHeader);
@@ -637,9 +624,6 @@ fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Re
         }
         ForgeKind::Forgejo => {
             let host = host.ok_or_else(|| anyhow::anyhow!("could not determine Forgejo host from remote URL"))?;
-            let token = token.ok_or_else(|| anyhow::anyhow!(
-                "FORGEJO_TOKEN not set. Run `jjpr auth setup` for instructions."
-            ))?;
             let base_url = format!("https://{host}/api/v1");
             let client = ForgeClient::new(&base_url, token, AuthScheme::Token, PaginationStyle::PageNumber { limit: 50 });
             Ok(Box::new(ForgejoForge::new(client)))
