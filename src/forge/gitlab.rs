@@ -1,44 +1,20 @@
-use std::process::Command;
-
 use anyhow::{Context, Result};
 
+use super::http::ForgeClient;
 use super::types::{
     ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, PullRequestRef,
     ReviewSummary,
 };
 use super::Forge;
 
-/// GitLab implementation that shells out to the `glab` CLI.
-#[derive(Default)]
-pub struct GlabCli {
-    token: Option<String>,
+/// GitLab implementation using direct HTTP via `ForgeClient`.
+pub struct GitLabForge {
+    client: ForgeClient,
 }
 
-impl GlabCli {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_token(token: String) -> Self {
-        Self { token: Some(token) }
-    }
-
-    fn run_glab(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = Command::new("glab");
-        cmd.args(args);
-        if let Some(token) = &self.token {
-            cmd.env("GITLAB_TOKEN", token);
-        }
-        let output = cmd
-            .output()
-            .context("failed to run glab. Install it: https://gitlab.com/gitlab-org/cli")?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("glab {} failed: {}", args.join(" "), stderr.trim())
-        }
+impl GitLabForge {
+    pub fn new(client: ForgeClient) -> Self {
+        Self { client }
     }
 
     /// URL-encode the project path for GitLab API endpoints.
@@ -102,14 +78,12 @@ fn parse_note(note: &serde_json::Value) -> Option<IssueComment> {
     Some(IssueComment { id, body })
 }
 
-impl Forge for GlabCli {
+impl Forge for GitLabForge {
     fn list_open_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests?state=opened");
-        let output = self.run_glab(&["api", &endpoint, "--paginate"])?;
-        let mrs: Vec<serde_json::Value> =
-            serde_json::from_str(&output).context("failed to parse MR list response")?;
-        mrs.iter().map(parse_mr).collect()
+        let path = format!("projects/{project}/merge_requests?state=opened&per_page=100");
+        let items = self.client.get_paginated(&path)?;
+        items.iter().map(parse_mr).collect()
     }
 
     fn create_pr(
@@ -123,26 +97,18 @@ impl Forge for GlabCli {
         draft: bool,
     ) -> Result<PullRequest> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests");
-        let title_arg = format!("title={title}");
-        let source_arg = format!("source_branch={head}");
-        let target_arg = format!("target_branch={base}");
-        let desc_arg = format!("description={body}");
-        let mut args = vec![
-            "api", &endpoint, "-X", "POST",
-            "-f", &title_arg,
-            "-f", &source_arg,
-            "-f", &target_arg,
-            "-f", &desc_arg,
-        ];
+        let path = format!("projects/{project}/merge_requests");
+        let mut json_body = serde_json::json!({
+            "title": title,
+            "source_branch": head,
+            "target_branch": base,
+            "description": body,
+        });
         if draft {
-            args.push("-F");
-            args.push("draft=true");
+            json_body["draft"] = serde_json::json!(true);
         }
-        let output = self.run_glab(&args)?;
-        let mr: serde_json::Value =
-            serde_json::from_str(&output).context("failed to parse created MR response")?;
-        parse_mr(&mr)
+        let output = self.client.post(&path, &json_body)?;
+        parse_mr(&output)
     }
 
     fn update_pr_base(
@@ -153,12 +119,8 @@ impl Forge for GlabCli {
         base: &str,
     ) -> Result<()> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}");
-        self.run_glab(&[
-            "api", &endpoint,
-            "-X", "PUT",
-            "-f", &format!("target_branch={base}"),
-        ])?;
+        let path = format!("projects/{project}/merge_requests/{number}");
+        self.client.put(&path, &serde_json::json!({ "target_branch": base }))?;
         Ok(())
     }
 
@@ -176,10 +138,11 @@ impl Forge for GlabCli {
         // GitLab requires numeric user IDs, so look up each username
         let mut reviewer_ids = Vec::new();
         for username in reviewers {
-            let user_output =
-                self.run_glab(&["api", &format!("users?username={username}")])?;
-            let users: Vec<serde_json::Value> = serde_json::from_str(&user_output)
-                .context("failed to parse user lookup response")?;
+            let users: Vec<serde_json::Value> = {
+                let output = self.client.get(&format!("users?username={username}"))?;
+                serde_json::from_value(output)
+                    .context("failed to parse user lookup response")?
+            };
             let user_id = users
                 .first()
                 .and_then(|u| u["id"].as_u64())
@@ -188,17 +151,8 @@ impl Forge for GlabCli {
         }
 
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}");
-        let mut args = vec!["api", &endpoint, "-X", "PUT"];
-        let formatted: Vec<String> = reviewer_ids
-            .iter()
-            .map(|id| format!("reviewer_ids[]={id}"))
-            .collect();
-        for id_arg in &formatted {
-            args.push("-F");
-            args.push(id_arg);
-        }
-        self.run_glab(&args)?;
+        let path = format!("projects/{project}/merge_requests/{number}");
+        self.client.put(&path, &serde_json::json!({ "reviewer_ids": reviewer_ids }))?;
         Ok(())
     }
 
@@ -209,11 +163,9 @@ impl Forge for GlabCli {
         number: u64,
     ) -> Result<Vec<IssueComment>> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}/notes");
-        let output = self.run_glab(&["api", &endpoint, "--paginate"])?;
-        let notes: Vec<serde_json::Value> =
-            serde_json::from_str(&output).context("failed to parse notes response")?;
-        Ok(notes.iter().filter_map(parse_note).collect())
+        let path = format!("projects/{project}/merge_requests/{number}/notes?per_page=100");
+        let items = self.client.get_paginated(&path)?;
+        Ok(items.iter().filter_map(parse_note).collect())
     }
 
     fn create_comment(
@@ -224,20 +176,14 @@ impl Forge for GlabCli {
         body: &str,
     ) -> Result<IssueComment> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}/notes");
-        let output = self.run_glab(&[
-            "api", &endpoint,
-            "-X", "POST",
-            "-f", &format!("body={body}"),
-        ])?;
-        let note: serde_json::Value =
-            serde_json::from_str(&output).context("failed to parse created note response")?;
-        let id = note["id"]
+        let path = format!("projects/{project}/merge_requests/{number}/notes");
+        let output = self.client.post(&path, &serde_json::json!({ "body": body }))?;
+        let id = output["id"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("created note missing id"))?;
         Ok(IssueComment {
             id,
-            body: note["body"].as_str().map(|s| s.to_string()),
+            body: output["body"].as_str().map(|s| s.to_string()),
         })
     }
 
@@ -253,23 +199,23 @@ impl Forge for GlabCli {
         // but the Forge trait only passes comment_id. We scan open MRs to find
         // which one owns this note. In practice stacks are small (2-5 MRs).
         let project = Self::encode_project(owner, repo);
-        let mrs_endpoint = format!("projects/{project}/merge_requests?state=opened&per_page=100");
-        let mrs_output = self.run_glab(&["api", &mrs_endpoint])?;
-        let mrs: Vec<serde_json::Value> =
-            serde_json::from_str(&mrs_output).unwrap_or_default();
+        let mrs_path = format!("projects/{project}/merge_requests?state=opened&per_page=100");
+        let mrs: Vec<serde_json::Value> = {
+            let output = self.client.get(&mrs_path)?;
+            serde_json::from_value(output).unwrap_or_default()
+        };
 
         for mr in &mrs {
             let iid = mr["iid"].as_u64().unwrap_or(0);
             if iid == 0 {
                 continue;
             }
-            let note_endpoint =
+            let note_path =
                 format!("projects/{project}/merge_requests/{iid}/notes/{comment_id}");
-            let result = self.run_glab(&[
-                "api", &note_endpoint,
-                "-X", "PUT",
-                "-f", &format!("body={body}"),
-            ]);
+            let result = self.client.put(
+                &note_path,
+                &serde_json::json!({ "body": body }),
+            );
             if result.is_ok() {
                 return Ok(());
             }
@@ -286,12 +232,8 @@ impl Forge for GlabCli {
         body: &str,
     ) -> Result<()> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}");
-        self.run_glab(&[
-            "api", &endpoint,
-            "-X", "PUT",
-            "-f", &format!("description={body}"),
-        ])?;
+        let path = format!("projects/{project}/merge_requests/{number}");
+        self.client.put(&path, &serde_json::json!({ "description": body }))?;
         Ok(())
     }
 
@@ -302,20 +244,14 @@ impl Forge for GlabCli {
         number: u64,
     ) -> Result<()> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}");
-        self.run_glab(&[
-            "api", &endpoint,
-            "-X", "PUT",
-            "-F", "draft=false",
-        ])?;
+        let path = format!("projects/{project}/merge_requests/{number}");
+        self.client.put(&path, &serde_json::json!({ "draft": false }))?;
         Ok(())
     }
 
     fn get_authenticated_user(&self) -> Result<String> {
-        let output = self.run_glab(&["api", "user"])?;
-        let user: serde_json::Value =
-            serde_json::from_str(&output).context("failed to parse user response")?;
-        user["username"]
+        let output = self.client.get("user")?;
+        output["username"]
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| anyhow::anyhow!("user response missing username field"))
@@ -328,10 +264,10 @@ impl Forge for GlabCli {
         head: &str,
     ) -> Result<Option<PullRequest>> {
         let project = Self::encode_project(owner, repo);
-        let endpoint =
+        let path =
             format!("projects/{project}/merge_requests?source_branch={head}&state=merged");
-        let output = self.run_glab(&["api", &endpoint])?;
-        let mrs: Vec<serde_json::Value> = serde_json::from_str(&output)
+        let output = self.client.get(&path)?;
+        let mrs: Vec<serde_json::Value> = serde_json::from_value(output)
             .context("failed to parse merged MR list response")?;
         mrs.first().map(parse_mr).transpose()
     }
@@ -344,16 +280,9 @@ impl Forge for GlabCli {
         method: MergeMethod,
     ) -> Result<()> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}/merge");
-        let squash_arg = match method {
-            MergeMethod::Squash => "squash=true",
-            MergeMethod::Merge | MergeMethod::Rebase => "squash=false",
-        };
-        self.run_glab(&[
-            "api", &endpoint,
-            "-X", "PUT",
-            "-F", squash_arg,
-        ])?;
+        let path = format!("projects/{project}/merge_requests/{number}/merge");
+        let squash = matches!(method, MergeMethod::Squash);
+        self.client.put(&path, &serde_json::json!({ "squash": squash }))?;
         Ok(())
     }
 
@@ -364,11 +293,11 @@ impl Forge for GlabCli {
         head_ref: &str,
     ) -> Result<ChecksStatus> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!(
+        let path = format!(
             "projects/{project}/pipelines?ref={head_ref}&per_page=1&order_by=id&sort=desc"
         );
-        let output = self.run_glab(&["api", &endpoint])?;
-        let pipelines: Vec<serde_json::Value> = serde_json::from_str(&output)
+        let output = self.client.get(&path)?;
+        let pipelines: Vec<serde_json::Value> = serde_json::from_value(output)
             .context("failed to parse pipelines response")?;
 
         let Some(latest) = pipelines.first() else {
@@ -391,10 +320,8 @@ impl Forge for GlabCli {
         number: u64,
     ) -> Result<ReviewSummary> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}/approvals");
-        let output = self.run_glab(&["api", &endpoint])?;
-        let approvals: serde_json::Value = serde_json::from_str(&output)
-            .context("failed to parse approvals response")?;
+        let approvals_path = format!("projects/{project}/merge_requests/{number}/approvals");
+        let approvals = self.client.get(&approvals_path)?;
 
         let approved_count = approvals["approved_by"]
             .as_array()
@@ -403,10 +330,8 @@ impl Forge for GlabCli {
 
         // GitLab's "requested changes" feature is reflected in the MR's
         // detailed_merge_status. Fetch the MR to check.
-        let mr_endpoint = format!("projects/{project}/merge_requests/{number}");
-        let mr_output = self.run_glab(&["api", &mr_endpoint])?;
-        let mr: serde_json::Value = serde_json::from_str(&mr_output)
-            .context("failed to parse MR response for review status")?;
+        let mr_path = format!("projects/{project}/merge_requests/{number}");
+        let mr = self.client.get(&mr_path)?;
 
         let changes_requested = mr["detailed_merge_status"]
             .as_str()
@@ -425,10 +350,8 @@ impl Forge for GlabCli {
         number: u64,
     ) -> Result<PrMergeability> {
         let project = Self::encode_project(owner, repo);
-        let endpoint = format!("projects/{project}/merge_requests/{number}");
-        let output = self.run_glab(&["api", &endpoint])?;
-        let mr: serde_json::Value = serde_json::from_str(&output)
-            .context("failed to parse MR mergeability response")?;
+        let path = format!("projects/{project}/merge_requests/{number}");
+        let mr = self.client.get(&path)?;
 
         let detailed_status = mr["detailed_merge_status"]
             .as_str()
@@ -451,7 +374,7 @@ impl Forge for GlabCli {
 mod tests {
     use super::*;
 
-    // --- JSON fixture tests: verify parsing without any CLI ---
+    // --- JSON fixture tests: verify parsing without any HTTP ---
 
     const GITLAB_MR_RESPONSE: &str = r#"{
         "iid": 42,
@@ -624,22 +547,19 @@ mod tests {
 
     #[test]
     fn test_encode_project_simple() {
-        assert_eq!(GlabCli::encode_project("owner", "repo"), "owner%2Frepo");
+        assert_eq!(GitLabForge::encode_project("owner", "repo"), "owner%2Frepo");
     }
 
     #[test]
     fn test_encode_project_nested_groups() {
         assert_eq!(
-            GlabCli::encode_project("group/subgroup", "repo"),
+            GitLabForge::encode_project("group/subgroup", "repo"),
             "group%2Fsubgroup%2Frepo"
         );
     }
 
     #[test]
     fn test_pipeline_status_mapping() {
-        // These test the mapping logic in get_pr_checks_status by validating
-        // the match arms. Since we can't call the real CLI, we test the mapping
-        // separately.
         let cases = vec![
             ("success", ChecksStatus::Pass),
             ("failed", ChecksStatus::Fail),
