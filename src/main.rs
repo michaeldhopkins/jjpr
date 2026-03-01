@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use jjpr::config;
 use jjpr::forge::remote;
-use jjpr::forge::types::{MergeMethod, PullRequest};
+use jjpr::forge::types::{MergeMethod, PullRequest, RepoInfo};
 use jjpr::forge::{Forge, ForgejoCli, ForgeKind, GhCli, GlabCli};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
@@ -181,14 +181,22 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::Auth { command }) => {
-            let (forge_kind, host) = detect_forge_for_cwd();
             match command {
                 AuthCommands::Test => {
+                    let Some((forge_kind, host)) = detect_forge_for_cwd() else {
+                        anyhow::bail!(
+                            "could not detect forge. Run from a jj repo with a supported remote, \
+                             or set forge = \"...\" in .jj/jjpr.toml"
+                        );
+                    };
                     let forge = build_forge(forge_kind, host.as_deref(), None)?;
                     jjpr::auth::test_auth(forge.as_ref())
                 }
                 AuthCommands::Setup => {
-                    jjpr::auth::print_auth_help(forge_kind);
+                    match detect_forge_for_cwd() {
+                        Some((forge_kind, _)) => jjpr::auth::print_auth_help(forge_kind),
+                        None => jjpr::auth::print_auth_help_all(),
+                    }
                     Ok(())
                 }
             }
@@ -224,7 +232,8 @@ struct SubmitOptions<'a> {
 
 fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path)?;
+    let jj = JjRunner::new(repo_path.clone())?;
+    let cfg = config::load_config_with_repo(Some(&repo_path))?;
 
     // Infer bookmark before fetching to avoid a slow network round-trip
     // when there's nothing to submit
@@ -252,9 +261,8 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     }
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
-    let host = find_remote_host(&remotes, &remote_name);
-    let forge = build_forge(forge_kind, host, None)?;
+    let resolved = resolve_forge(&remotes, &cfg, opts.preferred_remote)?;
+    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = resolved;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -290,7 +298,8 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
 
 fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path)?;
+    let jj = JjRunner::new(repo_path.clone())?;
+    let cfg = config::load_config_with_repo(Some(&repo_path))?;
 
     if !no_fetch {
         eprintln!("Fetching remotes...");
@@ -305,7 +314,7 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     }
 
     // Try to resolve forge remote for PR info
-    let (forge_kind, pr_info) = try_load_pr_info(&jj, &graph)
+    let (forge_kind, pr_info) = try_load_pr_info(&jj, &cfg, &graph)
         .unwrap_or((ForgeKind::GitHub, HashMap::new()));
 
     let multi = graph.stacks.len() > 1;
@@ -368,12 +377,12 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
 
 fn try_load_pr_info(
     jj: &dyn Jj,
+    cfg: &config::Config,
     graph: &change_graph::ChangeGraph,
 ) -> Option<(ForgeKind, HashMap<String, PullRequest>)> {
     let remotes = jj.get_git_remotes().ok()?;
-    let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
-    let host = find_remote_host(&remotes, &remote_name);
-    let forge = build_forge(forge_kind, host, None).ok()?;
+    let resolved = resolve_forge(&remotes, cfg, None).ok()?;
+    let ResolvedForge { forge, kind, repo_info, .. } = resolved;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -381,11 +390,11 @@ fn try_load_pr_info(
             if !graph.stacks.is_empty() && forge.get_authenticated_user().is_err() {
                 eprintln!("hint: run `jjpr auth test` to check authentication for stack overview");
             }
-            return Some((forge_kind, HashMap::new()));
+            return Some((kind, HashMap::new()));
         }
     };
 
-    Some((forge_kind, jjpr::forge::build_pr_map(all_prs, &repo_info.owner)))
+    Some((kind, jjpr::forge::build_pr_map(all_prs, &repo_info.owner)))
 }
 
 struct MergeArgs<'a> {
@@ -400,8 +409,8 @@ struct MergeArgs<'a> {
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path)?;
-    let cfg = config::load_config()?;
+    let jj = JjRunner::new(repo_path.clone())?;
+    let cfg = config::load_config_with_repo(Some(&repo_path))?;
 
     // Infer bookmark before fetching to avoid a slow network round-trip
     // when there's nothing to merge
@@ -429,9 +438,8 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     let remotes = jj.get_git_remotes()?;
-    let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
-    let host = find_remote_host(&remotes, &remote_name);
-    let forge = build_forge(forge_kind, host, None)?;
+    let resolved = resolve_forge(&remotes, &cfg, args.preferred_remote)?;
+    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = resolved;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -496,6 +504,91 @@ fn cmd_config_init_repo() -> Result<()> {
     Ok(())
 }
 
+struct ResolvedForge {
+    forge: Box<dyn Forge>,
+    kind: ForgeKind,
+    remote_name: String,
+    repo_info: RepoInfo,
+}
+
+/// Resolve the forge to use from config + remotes.
+///
+/// When `config.forge` is set, it's authoritative: we use that forge kind
+/// and resolve the token from `config.forge_token_env` (or the forge's default
+/// env var). Errors reflect the config not working, not a detection failure.
+///
+/// When `config.forge` is not set, we auto-detect from remote URLs.
+fn resolve_forge(
+    remotes: &[jjpr::jj::GitRemote],
+    cfg: &config::Config,
+    preferred_remote: Option<&str>,
+) -> Result<ResolvedForge> {
+    if let Some(kind) = cfg.forge {
+        resolve_forge_from_config(remotes, kind, cfg.forge_token_env.as_deref(), preferred_remote)
+    } else {
+        resolve_forge_auto(remotes, preferred_remote)
+    }
+}
+
+fn resolve_forge_from_config(
+    remotes: &[jjpr::jj::GitRemote],
+    kind: ForgeKind,
+    token_env: Option<&str>,
+    preferred_remote: Option<&str>,
+) -> Result<ResolvedForge> {
+    let env_var = token_env.unwrap_or(kind.token_env_var());
+    let token = std::env::var(env_var).ok();
+
+    let remote = pick_remote(remotes, preferred_remote)?;
+    let host = remote::extract_host(&remote.url);
+    let repo_info = remote::parse_url_as(&remote.url, kind)
+        .ok_or_else(|| anyhow::anyhow!(
+            "could not parse owner/repo from remote '{}' URL: {}",
+            remote.name, remote.url
+        ))?;
+
+    let forge = build_forge(kind, host, token)?;
+    Ok(ResolvedForge {
+        forge,
+        kind,
+        remote_name: remote.name.clone(),
+        repo_info,
+    })
+}
+
+fn resolve_forge_auto(
+    remotes: &[jjpr::jj::GitRemote],
+    preferred_remote: Option<&str>,
+) -> Result<ResolvedForge> {
+    let (remote_name, kind, repo_info) = remote::resolve_remote(remotes, preferred_remote)?;
+    let host = find_remote_host(remotes, &remote_name);
+    let forge = build_forge(kind, host, None)?;
+    Ok(ResolvedForge {
+        forge,
+        kind,
+        remote_name,
+        repo_info,
+    })
+}
+
+fn pick_remote<'a>(
+    remotes: &'a [jjpr::jj::GitRemote],
+    preferred: Option<&str>,
+) -> Result<&'a jjpr::jj::GitRemote> {
+    if let Some(name) = preferred {
+        return remotes
+            .iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| anyhow::anyhow!("remote '{}' not found", name));
+    }
+    if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
+        return Ok(origin);
+    }
+    remotes
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no git remotes found"))
+}
+
 fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -> Option<&'a str> {
     remotes
         .iter()
@@ -515,34 +608,33 @@ fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Re
         },
         ForgeKind::Forgejo => {
             let host = host.ok_or_else(|| anyhow::anyhow!("could not determine Forgejo host from remote URL"))?;
-            let token = token.or_else(|| std::env::var("FORGEJO_TOKEN").ok())
-                .ok_or_else(|| anyhow::anyhow!(
-                    "FORGEJO_TOKEN not set. Run `jjpr auth setup` for instructions."
-                ))?;
+            let token = token.ok_or_else(|| anyhow::anyhow!(
+                "FORGEJO_TOKEN not set. Run `jjpr auth setup` for instructions."
+            ))?;
             Ok(Box::new(ForgejoCli::new(host, token)))
         }
     }
 }
 
-/// Best-effort forge detection for commands that run before we have a resolved remote
-/// (e.g. `auth test`). Falls back to GitHub if detection fails.
-fn detect_forge_for_cwd() -> (ForgeKind, Option<String>) {
-    let Ok(repo_path) = find_repo_root() else {
-        return (ForgeKind::GitHub, None);
-    };
-    let Ok(jj) = JjRunner::new(repo_path) else {
-        return (ForgeKind::GitHub, None);
-    };
-    let Ok(remotes) = jj.get_git_remotes() else {
-        return (ForgeKind::GitHub, None);
-    };
-    match remote::resolve_remote(&remotes, None) {
-        Ok((remote_name, kind, _)) => {
-            let host = find_remote_host(&remotes, &remote_name).map(|s| s.to_string());
-            (kind, host)
-        }
-        Err(_) => (ForgeKind::GitHub, None),
+/// Best-effort forge detection for auth commands.
+/// Checks repo-local config first; falls back to auto-detection from remotes.
+/// Returns `None` if detection fails (caller decides what to show).
+fn detect_forge_for_cwd() -> Option<(ForgeKind, Option<String>)> {
+    let repo_path = find_repo_root().ok()?;
+    let cfg = config::load_config_with_repo(Some(&repo_path)).ok()?;
+    let jj = JjRunner::new(repo_path).ok()?;
+    let remotes = jj.get_git_remotes().ok()?;
+
+    if let Some(kind) = cfg.forge {
+        let host = pick_remote(&remotes, None)
+            .ok()
+            .and_then(|r| remote::extract_host(&r.url).map(|s| s.to_string()));
+        return Some((kind, host));
     }
+
+    let (remote_name, kind, _) = remote::resolve_remote(&remotes, None).ok()?;
+    let host = find_remote_host(&remotes, &remote_name).map(|s| s.to_string());
+    Some((kind, host))
 }
 
 fn find_repo_root() -> Result<PathBuf> {

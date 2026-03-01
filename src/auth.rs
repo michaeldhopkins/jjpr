@@ -37,3 +37,20 @@ pub fn print_auth_help(kind: ForgeKind) {
         }
     }
 }
+
+/// Print authentication setup help for all supported forges.
+pub fn print_auth_help_all() {
+    println!("Could not detect forge from the current directory.\n");
+    println!("Supported forges:\n");
+
+    println!("--- GitHub ---");
+    print_auth_help(ForgeKind::GitHub);
+    println!();
+
+    println!("--- GitLab ---");
+    print_auth_help(ForgeKind::GitLab);
+    println!();
+
+    println!("--- Forgejo/Codeberg ---");
+    print_auth_help(ForgeKind::Forgejo);
+}
