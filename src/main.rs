@@ -124,7 +124,11 @@ enum AuthCommands {
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Create a default config file at ~/.config/jjpr/config.toml
-    Init,
+    Init {
+        /// Create repo-local config at .jj/jjpr.toml instead of global config
+        #[arg(long)]
+        repo: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -190,7 +194,13 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::Config { command }) => match command {
-            ConfigCommands::Init => cmd_config_init(),
+            ConfigCommands::Init { repo } => {
+                if repo {
+                    cmd_config_init_repo()
+                } else {
+                    cmd_config_init()
+                }
+            }
         },
         None => cmd_stack_overview(cli.no_fetch),
     }
@@ -475,6 +485,14 @@ fn cmd_config_init() -> Result<()> {
     let path = config::write_default_config()?;
     println!("Created default config at {}", path.display());
     println!("Edit it to customize merge behavior.");
+    Ok(())
+}
+
+fn cmd_config_init_repo() -> Result<()> {
+    let repo_path = find_repo_root()?;
+    let path = config::write_repo_config(&repo_path)?;
+    println!("Created repo config at {}", path.display());
+    println!("Edit it to set forge type and token configuration.");
     Ok(())
 }
 
