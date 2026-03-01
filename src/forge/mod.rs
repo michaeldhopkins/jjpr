@@ -8,7 +8,7 @@ pub mod token;
 pub mod types;
 
 pub use forgejo::ForgejoForge;
-pub use github::GhCli;
+pub use github::GitHubForge;
 pub use gitlab::GlabCli;
 pub use http::{AuthScheme, ForgeClient, PaginationStyle};
 pub use types::*;
