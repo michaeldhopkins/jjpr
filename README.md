@@ -29,6 +29,7 @@ jjpr merge --dry-run              # Preview without executing
 jjpr submit --base coworker-feat  # Override auto-detected base branch
 jjpr merge --base coworker-feat   # Override auto-detected base branch
 jjpr config init                  # Create default config file
+jjpr config init --repo           # Create repo-local config at .jj/jjpr.toml
 jjpr --no-fetch                   # Show stacks without fetching
 jjpr submit --no-fetch            # Submit without fetching first
 jjpr auth test                    # Test forge authentication
@@ -131,7 +132,7 @@ CLI flags override the config file: `--merge-method`, `--required-approvals`, `-
 
 ### Configuration
 
-jjpr uses an optional config file at `~/.config/jjpr/config.toml` (or `$XDG_CONFIG_HOME/jjpr/config.toml`). Run `jjpr config init` to create one with defaults:
+jjpr uses an optional global config at `~/.config/jjpr/config.toml` (or `$XDG_CONFIG_HOME/jjpr/config.toml`). Run `jjpr config init` to create one with defaults:
 
 ```toml
 # Merge method: "squash", "merge", or "rebase"
@@ -143,6 +144,22 @@ required_approvals = 1
 # Whether CI checks must pass before merging
 require_ci_pass = true
 ```
+
+#### Repo-local config
+
+You can also create a repo-local config at `.jj/jjpr.toml` (inside the `.jj/` directory, which is gitignored). Run `jjpr config init --repo` to create one. Repo-local settings override global settings.
+
+This is useful for setting the forge type and token for self-hosted instances:
+
+```toml
+# Forge type: "github", "gitlab", or "forgejo"
+forge = "forgejo"
+
+# Environment variable name containing the API token
+forge_token_env = "FORGEJO_TOKEN"
+```
+
+When `forge` is set in config, auto-detection is skipped and the configured forge type is used directly. The token is read from the env var named by `forge_token_env` (or the forge's default: `GITHUB_TOKEN`, `GITLAB_TOKEN`, or `FORGEJO_TOKEN`).
 
 If no config file exists, defaults are used. CLI flags always override the config file.
 
@@ -173,11 +190,17 @@ For Forgejo/Codeberg, generate an API token with `repo` scope from your instance
 export FORGEJO_TOKEN=your_token_here
 ```
 
+For self-hosted Forgejo, also set the forge type in `.jj/jjpr.toml`:
+
+```toml
+forge = "forgejo"
+```
+
 ## How it works
 
 jjpr auto-detects the forge from your remote URL and shells out to `jj` and the appropriate CLI tool for all operations. It discovers stacks by walking bookmarks toward trunk, builds an adjacency graph, and plans submissions by comparing local state with the forge.
 
-Forge detection currently recognizes `github.com`, `gitlab.com`, and `codeberg.org` (plus Enterprise subdomains for GitHub/GitLab). Self-hosted Forgejo instances are not yet auto-detected.
+Auto-detection recognizes `github.com`, `gitlab.com`, and `codeberg.org` (plus Enterprise subdomains for GitHub/GitLab). For self-hosted instances, set `forge` in `.jj/jjpr.toml` — see [Repo-local config](#repo-local-config).
 
 Merge commits in a bookmark's ancestry cause that bookmark to be excluded (jjpr only handles linear stacks).
 
