@@ -7,16 +7,26 @@ use super::Forge;
 
 /// GitHub implementation that shells out to the `gh` CLI.
 #[derive(Default)]
-pub struct GhCli;
+pub struct GhCli {
+    token: Option<String>,
+}
 
 impl GhCli {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_token(token: String) -> Self {
+        Self { token: Some(token) }
     }
 
     fn run_gh(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("gh")
-            .args(args)
+        let mut cmd = Command::new("gh");
+        cmd.args(args);
+        if let Some(token) = &self.token {
+            cmd.env("GITHUB_TOKEN", token);
+        }
+        let output = cmd
             .output()
             .context("failed to run gh. Install it: https://cli.github.com")?;
 

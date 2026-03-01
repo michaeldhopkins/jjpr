@@ -10,16 +10,26 @@ use super::Forge;
 
 /// GitLab implementation that shells out to the `glab` CLI.
 #[derive(Default)]
-pub struct GlabCli;
+pub struct GlabCli {
+    token: Option<String>,
+}
 
 impl GlabCli {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_token(token: String) -> Self {
+        Self { token: Some(token) }
     }
 
     fn run_glab(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("glab")
-            .args(args)
+        let mut cmd = Command::new("glab");
+        cmd.args(args);
+        if let Some(token) = &self.token {
+            cmd.env("GITLAB_TOKEN", token);
+        }
+        let output = cmd
             .output()
             .context("failed to run glab. Install it: https://gitlab.com/gitlab-org/cli")?;
 

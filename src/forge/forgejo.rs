@@ -18,14 +18,11 @@ pub struct ForgejoCli {
 }
 
 impl ForgejoCli {
-    pub fn new(host: &str) -> Result<Self> {
-        let token = std::env::var("FORGEJO_TOKEN").context(
-            "FORGEJO_TOKEN not set. Run `jjpr auth setup` for instructions.",
-        )?;
-        Ok(Self {
+    pub fn new(host: &str, token: String) -> Self {
+        Self {
             base_url: format!("https://{host}/api/v1"),
             token,
-        })
+        }
     }
 
     fn api_request(
@@ -639,31 +636,15 @@ mod tests {
     }
 
     #[test]
-    fn test_constructor_requires_token() {
-        // Only test when FORGEJO_TOKEN is not set (can't safely mutate env
-        // in edition 2024 without unsafe)
-        if std::env::var("FORGEJO_TOKEN").is_ok() {
-            return;
-        }
-
-        let result = ForgejoCli::new("codeberg.org");
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("FORGEJO_TOKEN"));
+    fn test_constructor_stores_fields() {
+        let cli = ForgejoCli::new("codeberg.org", "tok_abc".to_string());
+        assert_eq!(cli.base_url, "https://codeberg.org/api/v1");
+        assert_eq!(cli.token, "tok_abc");
     }
 
     #[test]
-    fn test_base_url_construction() {
-        // Test the URL construction logic without needing a real token
-        assert_eq!(
-            format!("https://{}/api/v1", "codeberg.org"),
-            "https://codeberg.org/api/v1"
-        );
-        assert_eq!(
-            format!("https://{}/api/v1", "forgejo.example.com"),
-            "https://forgejo.example.com/api/v1"
-        );
+    fn test_base_url_self_hosted() {
+        let cli = ForgejoCli::new("forgejo.example.com", "tok".to_string());
+        assert_eq!(cli.base_url, "https://forgejo.example.com/api/v1");
     }
 }
