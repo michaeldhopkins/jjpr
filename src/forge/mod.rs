@@ -13,9 +13,11 @@ pub use types::*;
 use std::collections::HashMap;
 
 use anyhow::Result;
+use serde::Deserialize;
 
 /// Which forge a remote points to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ForgeKind {
     GitHub,
     GitLab,
