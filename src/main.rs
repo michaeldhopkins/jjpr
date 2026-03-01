@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use jjpr::config;
 use jjpr::forge::remote;
 use jjpr::forge::types::{MergeMethod, PullRequest};
-use jjpr::forge::{Forge, ForgeKind, GhCli, GlabCli};
+use jjpr::forge::{Forge, ForgejoCli, ForgeKind, GhCli, GlabCli};
 use jjpr::graph::change_graph;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
@@ -177,10 +177,10 @@ fn main() -> Result<()> {
             )
         }
         Some(Commands::Auth { command }) => {
-            let forge_kind = detect_forge_kind_for_cwd();
+            let (forge_kind, host) = detect_forge_for_cwd();
             match command {
                 AuthCommands::Test => {
-                    let forge = build_forge(forge_kind);
+                    let forge = build_forge(forge_kind, host.as_deref())?;
                     jjpr::auth::test_auth(forge.as_ref())
                 }
                 AuthCommands::Setup => {
@@ -243,7 +243,8 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
 
     let remotes = jj.get_git_remotes()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
-    let forge = build_forge(forge_kind);
+    let host = find_remote_host(&remotes, &remote_name);
+    let forge = build_forge(forge_kind, host)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -360,8 +361,9 @@ fn try_load_pr_info(
     graph: &change_graph::ChangeGraph,
 ) -> Option<(ForgeKind, HashMap<String, PullRequest>)> {
     let remotes = jj.get_git_remotes().ok()?;
-    let (_remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
-    let forge = build_forge(forge_kind);
+    let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
+    let host = find_remote_host(&remotes, &remote_name);
+    let forge = build_forge(forge_kind, host).ok()?;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -418,7 +420,8 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
 
     let remotes = jj.get_git_remotes()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
-    let forge = build_forge(forge_kind);
+    let host = find_remote_host(&remotes, &remote_name);
+    let forge = build_forge(forge_kind, host)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -475,32 +478,43 @@ fn cmd_config_init() -> Result<()> {
     Ok(())
 }
 
-fn build_forge(kind: ForgeKind) -> Box<dyn Forge> {
+fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -> Option<&'a str> {
+    remotes
+        .iter()
+        .find(|r| r.name == remote_name)
+        .and_then(|r| remote::extract_host(&r.url))
+}
+
+fn build_forge(kind: ForgeKind, host: Option<&str>) -> Result<Box<dyn Forge>> {
     match kind {
-        ForgeKind::GitHub => Box::new(GhCli::new()),
-        ForgeKind::GitLab => Box::new(GlabCli::new()),
+        ForgeKind::GitHub => Ok(Box::new(GhCli::new())),
+        ForgeKind::GitLab => Ok(Box::new(GlabCli::new())),
         ForgeKind::Forgejo => {
-            eprintln!("Forgejo support is not yet implemented");
-            std::process::exit(1);
+            let host = host.ok_or_else(|| anyhow::anyhow!("could not determine Forgejo host from remote URL"))?;
+            Ok(Box::new(ForgejoCli::new(host)?))
         }
     }
 }
 
 /// Best-effort forge detection for commands that run before we have a resolved remote
 /// (e.g. `auth test`). Falls back to GitHub if detection fails.
-fn detect_forge_kind_for_cwd() -> ForgeKind {
+fn detect_forge_for_cwd() -> (ForgeKind, Option<String>) {
     let Ok(repo_path) = find_repo_root() else {
-        return ForgeKind::GitHub;
+        return (ForgeKind::GitHub, None);
     };
     let Ok(jj) = JjRunner::new(repo_path) else {
-        return ForgeKind::GitHub;
+        return (ForgeKind::GitHub, None);
     };
     let Ok(remotes) = jj.get_git_remotes() else {
-        return ForgeKind::GitHub;
+        return (ForgeKind::GitHub, None);
     };
-    remote::resolve_remote(&remotes, None)
-        .map(|(_, kind, _)| kind)
-        .unwrap_or(ForgeKind::GitHub)
+    match remote::resolve_remote(&remotes, None) {
+        Ok((remote_name, kind, _)) => {
+            let host = find_remote_host(&remotes, &remote_name).map(|s| s.to_string());
+            (kind, host)
+        }
+        Err(_) => (ForgeKind::GitHub, None),
+    }
 }
 
 fn find_repo_root() -> Result<PathBuf> {

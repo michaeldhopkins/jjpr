@@ -7,7 +7,7 @@ pub struct RepoInfo {
     pub repo: String,
 }
 
-/// A GitHub pull request.
+/// A pull request / merge request from any supported forge.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PullRequest {
     pub number: u64,
@@ -33,7 +33,7 @@ pub struct PullRequestRef {
     pub label: String,
 }
 
-/// A comment on a GitHub issue/PR.
+/// A comment on an issue or pull request.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueComment {
     pub id: u64,
@@ -83,7 +83,7 @@ pub struct ReviewSummary {
 /// Mergeability status from the single-PR endpoint.
 #[derive(Debug, Clone)]
 pub struct PrMergeability {
-    /// `None` means GitHub is still computing.
+    /// `None` means the forge is still computing.
     pub mergeable: Option<bool>,
     /// "clean", "dirty", "blocked", "behind", "unknown", etc.
     pub mergeable_state: String,
