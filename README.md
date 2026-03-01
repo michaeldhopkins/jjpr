@@ -2,7 +2,7 @@
 
 Manage stacked pull requests in [Jujutsu](https://jj-vcs.github.io/jj/) repositories.
 
-`jjpr` discovers your bookmark stacks, pushes branches, creates GitHub PRs with correct base branches, and keeps stack-awareness comments in sync across all PRs in a stack.
+`jjpr` discovers your bookmark stacks, pushes branches, creates PRs/MRs with correct base branches, and keeps stack-awareness comments in sync. Works with GitHub, GitLab, and Forgejo/Codeberg — the forge is auto-detected from your remote URL.
 
 ## Install
 
@@ -31,13 +31,13 @@ jjpr merge --base coworker-feat   # Override auto-detected base branch
 jjpr config init                  # Create default config file
 jjpr --no-fetch                   # Show stacks without fetching
 jjpr submit --no-fetch            # Submit without fetching first
-jjpr auth test                    # Test GitHub authentication
+jjpr auth test                    # Test forge authentication
 jjpr auth setup                   # Show auth setup instructions
 ```
 
 ### Stack overview
 
-Run `jjpr` with no arguments to see your current stacks and their PR status on GitHub. This is read-only — it fetches the latest state but doesn't push or modify anything.
+Run `jjpr` with no arguments to see your current stacks and their PR/MR status. This is read-only — it fetches the latest state but doesn't push or modify anything.
 
 ```
   auth (1 change, #42 open, needs push)
@@ -110,7 +110,7 @@ The PR title is not automatically updated after creation. If you change your com
 - No changes requested
 - No merge conflicts
 
-If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, rebases the remaining stack onto it with `jj rebase`, pushes all remaining bookmarks, and checks whether the next PR's base needs retargeting (GitHub sometimes does this automatically). Then it checks the next PR and continues until blocked or done.
+If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, rebases the remaining stack onto it with `jj rebase`, pushes all remaining bookmarks, and retargets the next PR's base if needed. Then it checks the next PR and continues until blocked or done.
 
 If a PR is blocked (e.g., CI pending), jjpr reports why and stops. Run `jjpr merge` again once the blocker is resolved.
 
@@ -157,12 +157,27 @@ Use `--reviewer alice,bob` to request reviewers. Reviewers are applied to all PR
 ## Requirements
 
 - [jj](https://jj-vcs.github.io/jj/) (Jujutsu VCS)
-- [gh](https://cli.github.com/) (GitHub CLI, authenticated)
-- A colocated jj/git repository with a GitHub remote
+- A colocated jj/git repository with a supported remote
+
+Plus the CLI tool for your forge:
+
+| Forge | CLI | Auth |
+|-------|-----|------|
+| GitHub | [gh](https://cli.github.com/) | `gh auth login` |
+| GitLab | [glab](https://gitlab.com/gitlab-org/cli) | `glab auth login` |
+| Forgejo/Codeberg | — (uses REST API directly) | Set `FORGEJO_TOKEN` env var |
+
+For Forgejo/Codeberg, generate an API token with `repo` scope from your instance's settings (e.g., `https://codeberg.org/user/settings/applications`) and export it:
+
+```
+export FORGEJO_TOKEN=your_token_here
+```
 
 ## How it works
 
-jjpr shells out to `jj` and `gh` for all operations. It discovers stacks by walking bookmarks toward trunk, builds an adjacency graph, and plans submissions by comparing local state with GitHub.
+jjpr auto-detects the forge from your remote URL and shells out to `jj` and the appropriate CLI tool for all operations. It discovers stacks by walking bookmarks toward trunk, builds an adjacency graph, and plans submissions by comparing local state with the forge.
+
+Forge detection currently recognizes `github.com`, `gitlab.com`, and `codeberg.org` (plus Enterprise subdomains for GitHub/GitLab). Self-hosted Forgejo instances are not yet auto-detected.
 
 Merge commits in a bookmark's ancestry cause that bookmark to be excluded (jjpr only handles linear stacks).
 
@@ -176,9 +191,9 @@ JJPR_E2E=1 cargo test  # Include E2E tests (requires gh auth + network)
 
 ### Test tiers
 
-- **Unit tests**: Fast, no I/O, use stub implementations of `Jj` and `GitHub` traits
+- **Unit tests**: Fast, no I/O, use stub implementations of `Jj` and `Forge` traits
 - **jj integration tests**: Real `jj` binary against temp repos, no network
-- **E2E tests**: Real `jj` + real GitHub against [jjpr-testing-environment](https://github.com/michaeldhopkins/jjpr-testing-environment), guarded by `JJPR_E2E` env var
+- **E2E tests**: Real `jj` + real forge against [jjpr-testing-environment](https://github.com/michaeldhopkins/jjpr-testing-environment), guarded by `JJPR_E2E` env var
 
 ## License
 
