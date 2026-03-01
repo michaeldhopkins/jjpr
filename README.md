@@ -173,7 +173,7 @@ Use `--reviewer alice,bob` to request reviewers. Reviewers are applied to all PR
 
 ## Requirements
 
-- [jj](https://jj-vcs.github.io/jj/) (Jujutsu VCS)
+- [jj](https://jj-vcs.github.io/jj/) 0.36+ (Jujutsu VCS)
 - A colocated jj/git repository with a supported remote
 
 Authentication is token-based. jjpr talks directly to forge APIs — no CLI tools required.

@@ -65,7 +65,6 @@ impl JjTestRepo {
                 "origin",
                 "--bookmark",
                 "main",
-                "--allow-new",
             ],
             repo,
         );

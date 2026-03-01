@@ -134,7 +134,6 @@ impl Jj for JjRunner {
             remote,
             "--bookmark",
             name,
-            "--allow-new",
         ])?;
         Ok(())
     }

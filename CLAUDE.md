@@ -19,6 +19,7 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 - Co-located `#[cfg(test)] mod tests` in every module
 - jj templates produce line-delimited JSON; `escape_json()` includes surrounding quotes
 - Edition 2024 with let-chains for collapsible if-let patterns
+- Requires jj 0.36+ (bookmark auto-tracking on push)
 
 ## Testing
 
