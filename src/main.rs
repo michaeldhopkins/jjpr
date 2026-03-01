@@ -184,7 +184,7 @@ fn main() -> Result<()> {
             let (forge_kind, host) = detect_forge_for_cwd();
             match command {
                 AuthCommands::Test => {
-                    let forge = build_forge(forge_kind, host.as_deref())?;
+                    let forge = build_forge(forge_kind, host.as_deref(), None)?;
                     jjpr::auth::test_auth(forge.as_ref())
                 }
                 AuthCommands::Setup => {
@@ -254,7 +254,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let remotes = jj.get_git_remotes()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, opts.preferred_remote)?;
     let host = find_remote_host(&remotes, &remote_name);
-    let forge = build_forge(forge_kind, host)?;
+    let forge = build_forge(forge_kind, host, None)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -373,7 +373,7 @@ fn try_load_pr_info(
     let remotes = jj.get_git_remotes().ok()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, None).ok()?;
     let host = find_remote_host(&remotes, &remote_name);
-    let forge = build_forge(forge_kind, host).ok()?;
+    let forge = build_forge(forge_kind, host, None).ok()?;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -431,7 +431,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     let remotes = jj.get_git_remotes()?;
     let (remote_name, forge_kind, repo_info) = remote::resolve_remote(&remotes, args.preferred_remote)?;
     let host = find_remote_host(&remotes, &remote_name);
-    let forge = build_forge(forge_kind, host)?;
+    let forge = build_forge(forge_kind, host, None)?;
 
     let default_branch = jj.get_default_branch()?;
 
@@ -503,13 +503,23 @@ fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -
         .and_then(|r| remote::extract_host(&r.url))
 }
 
-fn build_forge(kind: ForgeKind, host: Option<&str>) -> Result<Box<dyn Forge>> {
+fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>) -> Result<Box<dyn Forge>> {
     match kind {
-        ForgeKind::GitHub => Ok(Box::new(GhCli::new())),
-        ForgeKind::GitLab => Ok(Box::new(GlabCli::new())),
+        ForgeKind::GitHub => match token {
+            Some(t) => Ok(Box::new(GhCli::with_token(t))),
+            None => Ok(Box::new(GhCli::new())),
+        },
+        ForgeKind::GitLab => match token {
+            Some(t) => Ok(Box::new(GlabCli::with_token(t))),
+            None => Ok(Box::new(GlabCli::new())),
+        },
         ForgeKind::Forgejo => {
             let host = host.ok_or_else(|| anyhow::anyhow!("could not determine Forgejo host from remote URL"))?;
-            Ok(Box::new(ForgejoCli::new(host)?))
+            let token = token.or_else(|| std::env::var("FORGEJO_TOKEN").ok())
+                .ok_or_else(|| anyhow::anyhow!(
+                    "FORGEJO_TOKEN not set. Run `jjpr auth setup` for instructions."
+                ))?;
+            Ok(Box::new(ForgejoCli::new(host, token)))
         }
     }
 }
