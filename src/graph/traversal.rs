@@ -9,11 +9,6 @@ use crate::jj::Jj;
 pub struct TraversalResult {
     pub segments: Vec<BookmarkSegment>,
     pub seen_change_ids: HashSet<String>,
-    pub has_merge: bool,
-    /// When has_merge is true, the change_id of the first merge commit found.
-    pub merge_change_id: Option<String>,
-    /// When has_merge is true, the parent commit_ids of the merge commit.
-    pub merge_parent_ids: Vec<String>,
     /// If traversal stopped because it hit a fully_collected change, this is that change_id.
     /// Used to link the new segments to the existing graph.
     pub stopped_at: Option<String>,
@@ -28,7 +23,9 @@ pub struct TraversalResult {
 /// (or between trunk and a bookmarked change).
 ///
 /// Stops early when hitting a change that was already fully collected.
-/// Sets `has_merge` if any change has multiple parents.
+/// When a merge commit is encountered, follows `parents[0]` and skips other arms.
+/// Skipped entries are NOT added to `seen_change_ids` so they remain available
+/// for independent bookmark traversal.
 pub fn traverse_and_discover_segments(
     jj: &dyn Jj,
     start_commit_id: &str,
@@ -38,37 +35,62 @@ pub fn traverse_and_discover_segments(
     let mut segments: Vec<BookmarkSegment> = Vec::new();
     let mut current_segment_changes: Vec<LogEntry> = Vec::new();
     let mut current_segment_bookmarks: Vec<Bookmark> = Vec::new();
+    let mut current_segment_merge_source_names: Vec<String> = Vec::new();
     let mut seen_change_ids: HashSet<String> = HashSet::new();
-    let mut has_merge = false;
-    let mut merge_change_id: Option<String> = None;
-    let mut merge_parent_ids: Vec<String> = Vec::new();
+
+    // After a merge, tracks which commit_ids are on our followed path.
+    // None means no merge encountered yet (all entries are on path).
+    let mut on_path: Option<HashSet<String>> = None;
 
     let bookmark_change_ids: HashSet<&String> = all_bookmarks
         .values()
         .map(|b| &b.change_id)
         .collect();
 
+    // Reverse map: commit_id → bookmark name (for resolving merge parent names)
+    let commit_id_to_bookmark: HashMap<&String, &String> = all_bookmarks
+        .values()
+        .map(|b| (&b.commit_id, &b.name))
+        .collect();
+
     let entries = jj.get_changes_to_commit(start_commit_id)?;
 
     for entry in &entries {
-        if entry.parents.len() > 1 {
-            has_merge = true;
-            if merge_change_id.is_none() {
-                merge_change_id = Some(entry.change_id.clone());
-                merge_parent_ids = entry.parents.clone();
-            }
-            seen_change_ids.insert(entry.change_id.clone());
+        // If we're past a merge, skip entries not on the followed path
+        if let Some(ref path) = on_path
+            && !path.contains(&entry.commit_id)
+        {
             continue;
         }
 
-        if has_merge {
-            seen_change_ids.insert(entry.change_id.clone());
-            continue;
+        // Handle merge commits: pick first parent, skip others
+        if entry.parents.len() > 1 {
+            let followed_parent = entry.parents[0].clone();
+            let skipped_names: Vec<String> = entry.parents[1..]
+                .iter()
+                .map(|cid| {
+                    commit_id_to_bookmark
+                        .get(cid)
+                        .map(|n| (*n).clone())
+                        .unwrap_or_else(|| cid[..cid.len().min(12)].to_string())
+                })
+                .collect();
+
+            current_segment_merge_source_names.extend(skipped_names);
+
+            let path = on_path.get_or_insert_with(HashSet::new);
+            path.insert(followed_parent);
+            // Don't insert skipped parents — their entries will be skipped
+
+            // Fall through to process this merge entry normally
+        } else if let Some(ref mut path) = on_path {
+            // Linear entry after a merge — add its parents to the followed path
+            for parent in &entry.parents {
+                path.insert(parent.clone());
+            }
         }
 
         // Check for foreign remote bookmarks before adding this entry.
-        // A foreign bookmark is one pushed by someone else — its branch name
-        // is not in all_bookmarks (the user's own bookmarks).
         let foreign = entry
             .remote_bookmarks
             .iter()
@@ -81,15 +103,12 @@ pub fn traverse_and_discover_segments(
                 segments.push(BookmarkSegment {
                     bookmarks: std::mem::take(&mut current_segment_bookmarks),
                     changes: std::mem::take(&mut current_segment_changes),
-                    merge_source_names: vec![],
+                    merge_source_names: std::mem::take(&mut current_segment_merge_source_names),
                 });
             }
             return Ok(TraversalResult {
                 segments,
                 seen_change_ids,
-                has_merge,
-                merge_change_id: merge_change_id.clone(),
-                merge_parent_ids: merge_parent_ids.clone(),
                 stopped_at: None,
                 foreign_base: Some(foreign_name.to_string()),
             });
@@ -103,15 +122,12 @@ pub fn traverse_and_discover_segments(
                 segments.push(BookmarkSegment {
                     bookmarks: std::mem::take(&mut current_segment_bookmarks),
                     changes: std::mem::take(&mut current_segment_changes),
-                    merge_source_names: vec![],
+                    merge_source_names: std::mem::take(&mut current_segment_merge_source_names),
                 });
             }
             return Ok(TraversalResult {
                 segments,
                 seen_change_ids,
-                has_merge,
-                merge_change_id: merge_change_id.clone(),
-                merge_parent_ids: merge_parent_ids.clone(),
                 stopped_at: Some(entry.change_id.clone()),
                 foreign_base: None,
             });
@@ -133,7 +149,7 @@ pub fn traverse_and_discover_segments(
             segments.push(BookmarkSegment {
                 bookmarks: std::mem::take(&mut current_segment_bookmarks),
                 changes: std::mem::take(&mut current_segment_changes),
-                merge_source_names: vec![],
+                merge_source_names: std::mem::take(&mut current_segment_merge_source_names),
             });
         }
     }
@@ -143,16 +159,13 @@ pub fn traverse_and_discover_segments(
         segments.push(BookmarkSegment {
             bookmarks: current_segment_bookmarks,
             changes: current_segment_changes,
-            merge_source_names: vec![],
+            merge_source_names: current_segment_merge_source_names,
         });
     }
 
     Ok(TraversalResult {
         segments,
         seen_change_ids,
-        has_merge,
-        merge_change_id,
-        merge_parent_ids,
         stopped_at: None,
         foreign_base: None,
     })
@@ -212,6 +225,16 @@ mod tests {
         }
     }
 
+    fn make_bookmark(name: &str, commit_id: &str, change_id: &str) -> Bookmark {
+        Bookmark {
+            name: name.to_string(),
+            commit_id: commit_id.to_string(),
+            change_id: change_id.to_string(),
+            has_remote: false,
+            is_synced: false,
+        }
+    }
+
     #[test]
     fn test_empty_traversal() {
         let jj = StubJj { entries: vec![] };
@@ -223,24 +246,177 @@ mod tests {
         )
         .unwrap();
         assert!(result.segments.is_empty());
-        assert!(!result.has_merge);
     }
 
     #[test]
-    fn test_merge_commit_detected() {
+    fn test_merge_commit_followed_through() {
+        // B (merge of C and D) -> C -> trunk
+        // B should be included as a segment, C should be processed
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let c_bookmark = make_bookmark("feat-c", "cc", "chc");
+        let d_bookmark = make_bookmark("feat-d", "cd", "chd");
+        let all_bookmarks = HashMap::from([
+            ("feat-b".to_string(), b_bookmark),
+            ("feat-c".to_string(), c_bookmark),
+            ("feat-d".to_string(), d_bookmark),
+        ]);
+
         let jj = StubJj {
-            entries: vec![entry("c1", "ch1", vec!["p1", "p2"])],
+            entries: vec![
+                entry("cb", "chb", vec!["cc", "cd"]),  // merge
+                entry("cc", "chc", vec!["trunk"]),      // followed parent
+                entry("cd", "chd", vec!["trunk"]),      // skipped parent
+            ],
         };
+
         let result = traverse_and_discover_segments(
             &jj,
-            "c1",
+            "cb",
             &HashSet::new(),
-            &HashMap::new(),
+            &all_bookmarks,
         )
         .unwrap();
-        assert!(result.has_merge);
-        assert_eq!(result.merge_change_id.as_deref(), Some("ch1"));
-        assert_eq!(result.merge_parent_ids, vec!["p1", "p2"]);
+
+        assert_eq!(result.segments.len(), 2);
+        // First segment (leaf): B with merge info
+        assert_eq!(result.segments[0].bookmarks[0].name, "feat-b");
+        assert_eq!(result.segments[0].merge_source_names, vec!["feat-d"]);
+        // Second segment: C (followed parent)
+        assert_eq!(result.segments[1].bookmarks[0].name, "feat-c");
+        assert!(result.segments[1].merge_source_names.is_empty());
+    }
+
+    #[test]
+    fn test_merge_skipped_entries_not_in_seen() {
+        // Skipped arm entries should not appear in seen_change_ids
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let all_bookmarks = HashMap::from([
+            ("feat-b".to_string(), b_bookmark),
+        ]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cb", "chb", vec!["cc", "cd"]),
+                entry("cc", "chc", vec!["trunk"]),
+                entry("cd", "chd", vec!["trunk"]),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cb",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert!(result.seen_change_ids.contains("chb"));
+        assert!(result.seen_change_ids.contains("chc"));
+        assert!(!result.seen_change_ids.contains("chd"), "skipped arm should not be in seen");
+    }
+
+    #[test]
+    fn test_merge_source_names_resolved() {
+        // Skipped parents with bookmarks should resolve to bookmark names
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let d_bookmark = make_bookmark("feat-d", "cd", "chd");
+        let all_bookmarks = HashMap::from([
+            ("feat-b".to_string(), b_bookmark),
+            ("feat-d".to_string(), d_bookmark),
+        ]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cb", "chb", vec!["cc", "cd"]),
+                entry("cc", "chc", vec!["trunk"]),
+                entry("cd", "chd", vec!["trunk"]),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cb",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert_eq!(result.segments[0].merge_source_names, vec!["feat-d"]);
+    }
+
+    #[test]
+    fn test_merge_source_names_fallback_to_commit_id() {
+        // Skipped parent without bookmark falls back to short commit_id
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let all_bookmarks = HashMap::from([
+            ("feat-b".to_string(), b_bookmark),
+        ]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cb", "chb", vec!["cc", "cd_long_commit_id"]),
+                entry("cc", "chc", vec!["trunk"]),
+                entry("cd_long_commit_id", "chd", vec!["trunk"]),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cb",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert_eq!(result.segments[0].merge_source_names, vec!["cd_long_comm"]);
+    }
+
+    #[test]
+    fn test_nested_merge() {
+        // A -> B (merge C,D) -> C (merge E,F) -> E -> trunk
+        // Both merges followed through first parent
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let c_bookmark = make_bookmark("feat-c", "cc", "chc");
+        let e_bookmark = make_bookmark("feat-e", "ce", "che");
+        let d_bookmark = make_bookmark("feat-d", "cd", "chd");
+        let f_bookmark = make_bookmark("feat-f", "cf", "chf");
+        let all_bookmarks = HashMap::from([
+            ("feat-b".to_string(), b_bookmark),
+            ("feat-c".to_string(), c_bookmark),
+            ("feat-d".to_string(), d_bookmark),
+            ("feat-e".to_string(), e_bookmark),
+            ("feat-f".to_string(), f_bookmark),
+        ]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cb", "chb", vec!["cc", "cd"]),  // B merges C,D
+                entry("cc", "chc", vec!["ce", "cf"]),   // C merges E,F
+                entry("ce", "che", vec!["trunk"]),       // followed
+                entry("cf", "chf", vec!["trunk"]),       // skipped (by C)
+                entry("cd", "chd", vec!["trunk"]),       // skipped (by B)
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cb",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert_eq!(result.segments.len(), 3);
+        assert_eq!(result.segments[0].bookmarks[0].name, "feat-b");
+        assert_eq!(result.segments[0].merge_source_names, vec!["feat-d"]);
+        assert_eq!(result.segments[1].bookmarks[0].name, "feat-c");
+        assert_eq!(result.segments[1].merge_source_names, vec!["feat-f"]);
+        assert_eq!(result.segments[2].bookmarks[0].name, "feat-e");
+        assert!(result.segments[2].merge_source_names.is_empty());
+
+        // D and F should NOT be in seen
+        assert!(!result.seen_change_ids.contains("chd"));
+        assert!(!result.seen_change_ids.contains("chf"));
     }
 
     #[test]
@@ -271,6 +447,7 @@ mod tests {
         assert_eq!(result.segments[0].bookmarks.len(), 1);
         assert_eq!(result.segments[0].bookmarks[0].name, "feat");
         assert_eq!(result.segments[0].changes.len(), 1);
+        assert!(result.segments[0].merge_source_names.is_empty());
     }
 
     #[test]
@@ -292,7 +469,6 @@ mod tests {
         )
         .unwrap();
 
-        // Should have collected c2 but stopped at c1
         assert!(result.seen_change_ids.contains("ch2"));
         assert!(result.seen_change_ids.contains("ch1"));
     }
@@ -310,7 +486,6 @@ mod tests {
 
     #[test]
     fn test_foreign_remote_bookmark_stops_traversal() {
-        // Two entries: user's change on top, coworker's commit at bottom
         let jj = StubJj {
             entries: vec![
                 entry("c2", "ch2", vec!["c1"]),
@@ -365,14 +540,12 @@ mod tests {
         .unwrap();
 
         assert!(result.foreign_base.is_none());
-        // Both entries should be collected
         assert!(result.seen_change_ids.contains("ch1"));
         assert!(result.seen_change_ids.contains("ch2"));
     }
 
     #[test]
     fn test_git_remote_ignored() {
-        // @git is jj's internal tracking, not a real foreign remote
         let jj = StubJj {
             entries: vec![
                 entry_with_remote_bookmarks(
@@ -396,8 +569,6 @@ mod tests {
 
     #[test]
     fn test_foreign_base_flushes_pending_segment() {
-        // user change (unbookmarked) -> coworker's commit with remote bookmark
-        // The user's change should be flushed as a segment
         let bookmark = Bookmark {
             name: "my-feat".to_string(),
             commit_id: "c3".to_string(),
@@ -427,12 +598,119 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.foreign_base, Some("coworker-base".to_string()));
-        // c3 is bookmarked, so it forms its own segment; c2 is unbookmarked,
-        // flushed as a tail segment when we hit the foreign base
         assert_eq!(result.segments.len(), 2);
-        // First segment: my-feat (c3)
         assert_eq!(result.segments[0].bookmarks[0].name, "my-feat");
-        // Second segment: unbookmarked tail (c2)
         assert_eq!(result.segments[1].changes[0].change_id, "ch2");
+    }
+
+    #[test]
+    fn test_merge_with_three_parents() {
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let c_bookmark = make_bookmark("feat-c", "cc", "chc");
+        let d_bookmark = make_bookmark("feat-d", "cd", "chd");
+        let e_bookmark = make_bookmark("feat-e", "ce", "che");
+        let all_bookmarks = HashMap::from([
+            ("feat-b".to_string(), b_bookmark),
+            ("feat-c".to_string(), c_bookmark),
+            ("feat-d".to_string(), d_bookmark),
+            ("feat-e".to_string(), e_bookmark),
+        ]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cb", "chb", vec!["cc", "cd", "ce"]),  // 3-parent merge
+                entry("cc", "chc", vec!["trunk"]),
+                entry("cd", "chd", vec!["trunk"]),
+                entry("ce", "che", vec!["trunk"]),
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cb",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        assert_eq!(result.segments[0].merge_source_names, vec!["feat-d", "feat-e"]);
+        assert!(!result.seen_change_ids.contains("chd"));
+        assert!(!result.seen_change_ids.contains("che"));
+    }
+
+    #[test]
+    fn test_unbookmarked_merge_before_bookmarked() {
+        // Leaf(bookmarked) → Merge(unbookmarked, parents: p1, p2) → trunk
+        // Merge info lands on the unbookmarked tail, not the bookmarked segment.
+        let leaf = make_bookmark("leaf", "cl", "chl");
+        let all_bookmarks = HashMap::from([("leaf".to_string(), leaf)]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cl", "chl", vec!["cm"]),            // bookmarked leaf
+                entry("cm", "chm", vec!["cp1", "cp2"]),    // unbookmarked merge
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cl",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        // Leaf's segment should have no merge info (it's not a merge)
+        assert_eq!(result.segments[0].bookmarks[0].name, "leaf");
+        assert!(
+            result.segments[0].merge_source_names.is_empty(),
+            "bookmark above merge should not carry merge note"
+        );
+        // The merge info is on the unbookmarked tail segment
+        assert_eq!(result.segments.len(), 2);
+        assert!(!result.segments[1].merge_source_names.is_empty());
+    }
+
+    #[test]
+    fn test_consecutive_unbookmarked_merges_accumulate() {
+        // Leaf(bookmarked) → M1(unbookmarked, merge of X,Y) → M2(unbookmarked, merge of Z,W) → Root(bookmarked)
+        // Both merges' source names should accumulate, not overwrite.
+        let leaf = make_bookmark("leaf", "cl", "chl");
+        let root = make_bookmark("root", "cr", "chr");
+        let all_bookmarks = HashMap::from([
+            ("leaf".to_string(), leaf),
+            ("root".to_string(), root),
+        ]);
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cl", "chl", vec!["cm1"]),             // bookmarked leaf
+                entry("cm1", "chm1", vec!["cm2", "cy"]),     // unbookmarked merge 1
+                entry("cm2", "chm2", vec!["cr", "cw"]),      // unbookmarked merge 2 (on followed path)
+                entry("cr", "chr", vec!["trunk"]),            // bookmarked root
+                entry("cy", "chy", vec!["trunk"]),            // skipped by M1
+                entry("cw", "chw", vec!["trunk"]),            // skipped by M2
+            ],
+        };
+
+        let result = traverse_and_discover_segments(
+            &jj,
+            "cl",
+            &HashSet::new(),
+            &all_bookmarks,
+        )
+        .unwrap();
+
+        // Leaf gets its own segment (no merge info)
+        assert_eq!(result.segments[0].bookmarks[0].name, "leaf");
+        assert!(result.segments[0].merge_source_names.is_empty());
+
+        // Root's segment contains M1 and M2 (unbookmarked) plus Root.
+        // Both merges' source names should be accumulated.
+        assert_eq!(result.segments[1].bookmarks[0].name, "root");
+        assert_eq!(result.segments[1].merge_source_names.len(), 2);
+        // cy (short commit_id fallback) from M1, cw from M2
+        assert!(result.segments[1].merge_source_names.contains(&"cy".to_string()));
+        assert!(result.segments[1].merge_source_names.contains(&"cw".to_string()));
     }
 }

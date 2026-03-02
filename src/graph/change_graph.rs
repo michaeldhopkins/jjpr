@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::jj::types::{Bookmark, BookmarkSegment, BranchStack, ExcludedBookmark, LogEntry};
+use crate::jj::types::{Bookmark, BookmarkSegment, BranchStack, LogEntry};
 use crate::jj::Jj;
 
 use super::traversal;
@@ -19,7 +19,6 @@ pub struct ChangeGraph {
     pub stack_leafs: HashSet<String>,
     pub stack_roots: HashSet<String>,
     pub stacks: Vec<BranchStack>,
-    pub excluded_bookmarks: Vec<ExcludedBookmark>,
 }
 
 /// Build the change graph from the current jj repo state.
@@ -31,9 +30,10 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
     let mut adjacency_list: HashMap<String, String> = HashMap::new();
     let mut change_id_to_segment: HashMap<String, Vec<LogEntry>> = HashMap::new();
     let mut fully_collected: HashSet<String> = HashSet::new();
-    let mut excluded: Vec<ExcludedBookmark> = Vec::new();
     // Maps root change_id → foreign branch name for stacks based on non-trunk branches
     let mut foreign_bases: HashMap<String, String> = HashMap::new();
+    // Maps segment change_id → merge source names for segments containing merge commits
+    let mut merge_source_map: HashMap<String, Vec<String>> = HashMap::new();
 
     for bookmark in &bookmarks {
         all_bookmarks.insert(bookmark.name.clone(), bookmark.clone());
@@ -49,15 +49,6 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
             &all_bookmarks,
         )?;
 
-        if result.has_merge {
-            excluded.push(ExcludedBookmark {
-                name: bookmark.name.clone(),
-                merge_change_id: result.merge_change_id.unwrap_or_default(),
-                merge_parent_ids: result.merge_parent_ids,
-            });
-            continue;
-        }
-
         // Record segments and adjacencies.
         // Segments are ordered leaf-to-root; adjacency maps child → parent.
         let mut prev_change_id: Option<String> = None;
@@ -71,6 +62,13 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
 
                 change_id_to_segment
                     .insert(segment_change_id.clone(), segment.changes.clone());
+
+                if !segment.merge_source_names.is_empty() {
+                    merge_source_map.insert(
+                        segment_change_id.clone(),
+                        segment.merge_source_names.clone(),
+                    );
+                }
 
                 if let Some(prev) = &prev_change_id {
                     adjacency_list.insert(prev.clone(), segment_change_id.clone());
@@ -100,11 +98,6 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
     let parents: HashSet<&String> = adjacency_list.values().collect();
     let children: HashSet<&String> = adjacency_list.keys().collect();
 
-    let excluded_change_ids: HashSet<&String> = excluded
-        .iter()
-        .filter_map(|e| all_bookmarks.get(&e.name).map(|b| &b.change_id))
-        .collect();
-
     let stack_leafs: HashSet<String> = children
         .iter()
         .filter(|id| !parents.contains(*id))
@@ -113,7 +106,6 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
             // Bookmarks not in any adjacency relationship are standalone leafs
             bookmarks
                 .iter()
-                .filter(|b| !excluded_change_ids.contains(&b.change_id))
                 .filter(|b| {
                     !adjacency_list.contains_key(&b.change_id)
                         && !parents.contains(&b.change_id)
@@ -135,6 +127,7 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
         &change_id_to_segment,
         &all_bookmarks,
         &foreign_bases,
+        &merge_source_map,
     );
 
     Ok(ChangeGraph {
@@ -145,7 +138,6 @@ pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
         stack_leafs,
         stack_roots,
         stacks,
-        excluded_bookmarks: excluded,
     })
 }
 
@@ -155,6 +147,7 @@ fn build_stacks(
     change_id_to_segment: &HashMap<String, Vec<LogEntry>>,
     bookmarks: &HashMap<String, Bookmark>,
     foreign_bases: &HashMap<String, String>,
+    merge_source_map: &HashMap<String, Vec<String>>,
 ) -> Vec<BranchStack> {
     // Invert adjacency: parent -> child, so we can walk from root to leaf
     let mut parent_to_child: HashMap<&String, &String> = HashMap::new();
@@ -187,10 +180,17 @@ fn build_stacks(
                     .cloned()
                     .collect();
                 segment_bookmarks.sort_by(|a, b| a.name.cmp(&b.name));
+                // Skip unbookmarked segments (e.g. merge tails toward trunk)
+                if segment_bookmarks.is_empty() {
+                    return None;
+                }
                 Some(BookmarkSegment {
                     bookmarks: segment_bookmarks,
                     changes,
-                    merge_source_names: vec![],
+                    merge_source_names: merge_source_map
+                        .get(change_id)
+                        .cloned()
+                        .unwrap_or_default(),
                 })
             })
             .collect();
@@ -305,7 +305,6 @@ mod tests {
         let graph = build_change_graph(&jj).unwrap();
         assert_eq!(graph.bookmarks.len(), 1);
         assert!(graph.bookmarks.contains_key("feature"));
-        assert!(graph.excluded_bookmarks.is_empty());
     }
 
     #[test]
@@ -339,7 +338,6 @@ mod tests {
 
         let graph = build_change_graph(&jj).unwrap();
         assert_eq!(graph.bookmarks.len(), 2);
-        assert!(graph.excluded_bookmarks.is_empty());
         assert!(!graph.stacks.is_empty());
 
         // Verify the stack has both segments in order
@@ -350,8 +348,8 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_commit_excludes_bookmark() {
-        // A bookmark whose ancestry contains a merge commit should be excluded.
+    fn test_merge_commit_included_in_stack() {
+        // A merge bookmark should now be included in a stack, not excluded.
         let jj = StubJj {
             bookmarks: vec![make_bookmark("feature", "commit_a", "change_a")],
             log_entries: HashMap::from([(
@@ -366,10 +364,9 @@ mod tests {
         };
 
         let graph = build_change_graph(&jj).unwrap();
-        assert_eq!(graph.excluded_bookmarks.len(), 1);
-        assert_eq!(graph.excluded_bookmarks[0].name, "feature");
-        assert_eq!(graph.excluded_bookmarks[0].merge_change_id, "change_a");
-        assert!(graph.stacks.is_empty());
+        assert_eq!(graph.stacks.len(), 1);
+        assert_eq!(graph.stacks[0].segments[0].bookmarks[0].name, "feature");
+        assert_eq!(graph.stacks[0].segments[0].merge_source_names, vec!["p2"]);
     }
 
     #[test]
@@ -404,7 +401,6 @@ mod tests {
 
         let graph = build_change_graph(&jj).unwrap();
         assert_eq!(graph.bookmarks.len(), 2);
-        assert!(graph.excluded_bookmarks.is_empty());
         // Each bookmark is its own stack (no adjacency relationship)
         assert_eq!(graph.stacks.len(), 2);
     }
@@ -513,9 +509,9 @@ mod tests {
     }
 
     #[test]
-    fn test_diamond_linear_arms_survive() {
+    fn test_diamond_merge_included_in_stack() {
         // Diamond: trunk -> B, trunk -> C, B+C -> D (merge)
-        // B and C should be independent stacks; only D is excluded.
+        // D follows through B, C gets its own stack
         let jj = StubJj {
             bookmarks: vec![
                 make_bookmark("B", "commit_b", "change_b"),
@@ -543,22 +539,20 @@ mod tests {
         };
 
         let graph = build_change_graph(&jj).unwrap();
-        assert_eq!(graph.excluded_bookmarks.len(), 1);
-        assert_eq!(graph.excluded_bookmarks[0].name, "D");
-        assert_eq!(graph.stacks.len(), 2, "B and C should form independent stacks");
-        let stack_names: HashSet<String> = graph
+        // All 3 bookmarks should be in stacks
+        let all_stack_names: HashSet<String> = graph
             .stacks
             .iter()
             .flat_map(|s| s.segments.iter().flat_map(|seg| seg.bookmarks.iter().map(|b| b.name.clone())))
             .collect();
-        assert!(stack_names.contains("B"));
-        assert!(stack_names.contains("C"));
+        assert!(all_stack_names.contains("B"));
+        assert!(all_stack_names.contains("C"));
+        assert!(all_stack_names.contains("D"));
     }
 
     #[test]
-    fn test_diamond_exclusion_order_independent() {
-        // Same diamond, but bookmarks listed in reverse order (D first).
-        // B and C should still survive.
+    fn test_merge_skipped_arm_forms_own_stack() {
+        // D (merge of B and C) follows B. C should form its own independent stack.
         let jj = StubJj {
             bookmarks: vec![
                 make_bookmark("D", "commit_d", "change_d"),
@@ -567,6 +561,14 @@ mod tests {
             ],
             log_entries: HashMap::from([
                 (
+                    "commit_d".to_string(),
+                    vec![
+                        make_log_entry("commit_d", "change_d", vec!["commit_b", "commit_c"], vec!["D"]),
+                        make_log_entry("commit_b", "change_b", vec!["trunk"], vec!["B"]),
+                        make_log_entry("commit_c", "change_c", vec!["trunk"], vec!["C"]),
+                    ],
+                ),
+                (
                     "commit_b".to_string(),
                     vec![make_log_entry("commit_b", "change_b", vec!["trunk"], vec!["B"])],
                 ),
@@ -574,6 +576,27 @@ mod tests {
                     "commit_c".to_string(),
                     vec![make_log_entry("commit_c", "change_c", vec!["trunk"], vec!["C"])],
                 ),
+            ]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+        // D+B in one stack, C in another
+        let c_stack = graph.stacks.iter().find(|s|
+            s.segments.iter().any(|seg| seg.bookmarks.iter().any(|b| b.name == "C"))
+        );
+        assert!(c_stack.is_some(), "C should have its own stack");
+    }
+
+    #[test]
+    fn test_merge_source_names_on_segment() {
+        // Merge D (parents B, C) — verify segment carries merge_source_names
+        let jj = StubJj {
+            bookmarks: vec![
+                make_bookmark("D", "commit_d", "change_d"),
+                make_bookmark("B", "commit_b", "change_b"),
+                make_bookmark("C", "commit_c", "change_c"),
+            ],
+            log_entries: HashMap::from([
                 (
                     "commit_d".to_string(),
                     vec![
@@ -582,40 +605,29 @@ mod tests {
                         make_log_entry("commit_c", "change_c", vec!["trunk"], vec!["C"]),
                     ],
                 ),
+                (
+                    "commit_b".to_string(),
+                    vec![make_log_entry("commit_b", "change_b", vec!["trunk"], vec!["B"])],
+                ),
+                (
+                    "commit_c".to_string(),
+                    vec![make_log_entry("commit_c", "change_c", vec!["trunk"], vec!["C"])],
+                ),
             ]),
         };
 
         let graph = build_change_graph(&jj).unwrap();
-        assert_eq!(graph.excluded_bookmarks.len(), 1, "only D should be excluded");
-        assert_eq!(graph.excluded_bookmarks[0].name, "D");
-        assert_eq!(graph.stacks.len(), 2, "B and C should form independent stacks");
+        let d_segment = graph.stacks.iter()
+            .flat_map(|s| &s.segments)
+            .find(|seg| seg.bookmarks.iter().any(|b| b.name == "D"))
+            .expect("D should be in a stack");
+        assert_eq!(d_segment.merge_source_names, vec!["C"]);
     }
 
     #[test]
-    fn test_excluded_bookmark_has_merge_details() {
-        // Bookmark on a merge commit — verify merge_change_id and merge_parent_ids.
-        let jj = StubJj {
-            bookmarks: vec![make_bookmark("merge-feat", "commit_m", "change_m")],
-            log_entries: HashMap::from([(
-                "commit_m".to_string(),
-                vec![make_log_entry(
-                    "commit_m", "change_m", vec!["parent_1", "parent_2"], vec!["merge-feat"],
-                )],
-            )]),
-        };
-
-        let graph = build_change_graph(&jj).unwrap();
-        assert_eq!(graph.excluded_bookmarks.len(), 1);
-        let eb = &graph.excluded_bookmarks[0];
-        assert_eq!(eb.name, "merge-feat");
-        assert_eq!(eb.merge_change_id, "change_m");
-        assert_eq!(eb.merge_parent_ids, vec!["parent_1", "parent_2"]);
-    }
-
-    #[test]
-    fn test_bookmark_above_merge_excluded() {
+    fn test_bookmark_above_merge_included() {
         // trunk -> merge_change(parents: p1, p2) -> linear_change (bookmark "top")
-        // "top" should be excluded because its ancestry contains a merge.
+        // "top" should now be included, following through p1.
         let jj = StubJj {
             bookmarks: vec![make_bookmark("top", "commit_top", "change_top")],
             log_entries: HashMap::from([(
@@ -628,9 +640,8 @@ mod tests {
         };
 
         let graph = build_change_graph(&jj).unwrap();
-        assert_eq!(graph.excluded_bookmarks.len(), 1);
-        assert_eq!(graph.excluded_bookmarks[0].name, "top");
-        assert_eq!(graph.excluded_bookmarks[0].merge_change_id, "change_m");
-        assert!(graph.stacks.is_empty());
+        assert_eq!(graph.stacks.len(), 1);
+        assert_eq!(graph.stacks[0].segments.len(), 1);
+        assert_eq!(graph.stacks[0].segments[0].bookmarks[0].name, "top");
     }
 }

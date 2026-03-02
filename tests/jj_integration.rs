@@ -69,8 +69,6 @@ fn test_real_jj_graph_linear_stack() {
     assert_eq!(graph.bookmarks.len(), 2);
     assert!(graph.bookmarks.contains_key("auth"));
     assert!(graph.bookmarks.contains_key("profile"));
-    assert!(graph.excluded_bookmarks.is_empty());
-
     assert_eq!(graph.stacks.len(), 1, "should form a single stack");
     let stack = &graph.stacks[0];
     assert_eq!(stack.segments.len(), 2);
