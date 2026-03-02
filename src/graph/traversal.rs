@@ -10,6 +10,10 @@ pub struct TraversalResult {
     pub segments: Vec<BookmarkSegment>,
     pub seen_change_ids: HashSet<String>,
     pub has_merge: bool,
+    /// When has_merge is true, the change_id of the first merge commit found.
+    pub merge_change_id: Option<String>,
+    /// When has_merge is true, the parent commit_ids of the merge commit.
+    pub merge_parent_ids: Vec<String>,
     /// If traversal stopped because it hit a fully_collected change, this is that change_id.
     /// Used to link the new segments to the existing graph.
     pub stopped_at: Option<String>,
@@ -28,7 +32,6 @@ pub struct TraversalResult {
 pub fn traverse_and_discover_segments(
     jj: &dyn Jj,
     start_commit_id: &str,
-    tainted: &HashSet<String>,
     fully_collected: &HashSet<String>,
     all_bookmarks: &HashMap<String, Bookmark>,
 ) -> Result<TraversalResult> {
@@ -37,6 +40,8 @@ pub fn traverse_and_discover_segments(
     let mut current_segment_bookmarks: Vec<Bookmark> = Vec::new();
     let mut seen_change_ids: HashSet<String> = HashSet::new();
     let mut has_merge = false;
+    let mut merge_change_id: Option<String> = None;
+    let mut merge_parent_ids: Vec<String> = Vec::new();
 
     let bookmark_change_ids: HashSet<&String> = all_bookmarks
         .values()
@@ -48,17 +53,15 @@ pub fn traverse_and_discover_segments(
     for entry in &entries {
         if entry.parents.len() > 1 {
             has_merge = true;
+            if merge_change_id.is_none() {
+                merge_change_id = Some(entry.change_id.clone());
+                merge_parent_ids = entry.parents.clone();
+            }
             seen_change_ids.insert(entry.change_id.clone());
             continue;
         }
 
         if has_merge {
-            seen_change_ids.insert(entry.change_id.clone());
-            continue;
-        }
-
-        if tainted.contains(&entry.change_id) {
-            has_merge = true;
             seen_change_ids.insert(entry.change_id.clone());
             continue;
         }
@@ -84,6 +87,8 @@ pub fn traverse_and_discover_segments(
                 segments,
                 seen_change_ids,
                 has_merge,
+                merge_change_id: merge_change_id.clone(),
+                merge_parent_ids: merge_parent_ids.clone(),
                 stopped_at: None,
                 foreign_base: Some(foreign_name.to_string()),
             });
@@ -103,6 +108,8 @@ pub fn traverse_and_discover_segments(
                 segments,
                 seen_change_ids,
                 has_merge,
+                merge_change_id: merge_change_id.clone(),
+                merge_parent_ids: merge_parent_ids.clone(),
                 stopped_at: Some(entry.change_id.clone()),
                 foreign_base: None,
             });
@@ -140,6 +147,8 @@ pub fn traverse_and_discover_segments(
         segments,
         seen_change_ids,
         has_merge,
+        merge_change_id,
+        merge_parent_ids,
         stopped_at: None,
         foreign_base: None,
     })
@@ -206,7 +215,6 @@ mod tests {
             &jj,
             "commit_a",
             &HashSet::new(),
-            &HashSet::new(),
             &HashMap::new(),
         )
         .unwrap();
@@ -223,11 +231,12 @@ mod tests {
             &jj,
             "c1",
             &HashSet::new(),
-            &HashSet::new(),
             &HashMap::new(),
         )
         .unwrap();
         assert!(result.has_merge);
+        assert_eq!(result.merge_change_id.as_deref(), Some("ch1"));
+        assert_eq!(result.merge_parent_ids, vec!["p1", "p2"]);
     }
 
     #[test]
@@ -249,7 +258,6 @@ mod tests {
         let result = traverse_and_discover_segments(
             &jj,
             "c1",
-            &HashSet::new(),
             &HashSet::new(),
             &all_bookmarks,
         )
@@ -275,7 +283,6 @@ mod tests {
         let result = traverse_and_discover_segments(
             &jj,
             "c2",
-            &HashSet::new(),
             &fully_collected,
             &HashMap::new(),
         )
@@ -314,7 +321,6 @@ mod tests {
             &jj,
             "c2",
             &HashSet::new(),
-            &HashSet::new(),
             &HashMap::new(),
         )
         .unwrap();
@@ -350,7 +356,6 @@ mod tests {
             &jj,
             "c2",
             &HashSet::new(),
-            &HashSet::new(),
             &all_bookmarks,
         )
         .unwrap();
@@ -376,7 +381,6 @@ mod tests {
         let result = traverse_and_discover_segments(
             &jj,
             "c1",
-            &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
         )
@@ -413,7 +417,6 @@ mod tests {
         let result = traverse_and_discover_segments(
             &jj,
             "c3",
-            &HashSet::new(),
             &HashSet::new(),
             &all_bookmarks,
         )
