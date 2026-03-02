@@ -29,6 +29,7 @@ pub fn resolve_bookmark_selections(
             Ok(NarrowedSegment {
                 bookmark,
                 changes: segment.changes.clone(),
+                merge_source_names: vec![],
             })
         })
         .collect()
@@ -77,6 +78,7 @@ mod tests {
                 remote_bookmarks: vec![],
                 is_working_copy: false,
             }],
+            merge_source_names: vec![],
         }
     }
 
@@ -100,6 +102,7 @@ mod tests {
         let segments = vec![BookmarkSegment {
             bookmarks: vec![],
             changes: vec![],
+            merge_source_names: vec![],
         }];
         assert!(resolve_bookmark_selections(&segments, false).is_err());
     }

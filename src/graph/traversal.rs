@@ -81,6 +81,7 @@ pub fn traverse_and_discover_segments(
                 segments.push(BookmarkSegment {
                     bookmarks: std::mem::take(&mut current_segment_bookmarks),
                     changes: std::mem::take(&mut current_segment_changes),
+                    merge_source_names: vec![],
                 });
             }
             return Ok(TraversalResult {
@@ -102,6 +103,7 @@ pub fn traverse_and_discover_segments(
                 segments.push(BookmarkSegment {
                     bookmarks: std::mem::take(&mut current_segment_bookmarks),
                     changes: std::mem::take(&mut current_segment_changes),
+                    merge_source_names: vec![],
                 });
             }
             return Ok(TraversalResult {
@@ -131,6 +133,7 @@ pub fn traverse_and_discover_segments(
             segments.push(BookmarkSegment {
                 bookmarks: std::mem::take(&mut current_segment_bookmarks),
                 changes: std::mem::take(&mut current_segment_changes),
+                merge_source_names: vec![],
             });
         }
     }
@@ -140,6 +143,7 @@ pub fn traverse_and_discover_segments(
         segments.push(BookmarkSegment {
             bookmarks: current_segment_bookmarks,
             changes: current_segment_changes,
+            merge_source_names: vec![],
         });
     }
 
