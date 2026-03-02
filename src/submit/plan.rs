@@ -93,16 +93,46 @@ const DESCRIPTION_END: &str = "<!-- /jjpr:description -->";
 fn derive_pr_title_body(segment: &NarrowedSegment) -> (String, String) {
     if let Some(change) = segment.changes.first() {
         let title = change.description_first_line.clone();
-        let body = change
+        let mut body = change
             .description
             .strip_prefix(&title)
             .unwrap_or("")
             .trim()
             .to_string();
+
+        if !segment.merge_source_names.is_empty() {
+            let note = generate_merge_note(&segment.merge_source_names);
+            if !body.is_empty() {
+                body.push_str("\n\n");
+            }
+            body.push_str(&note);
+        }
+
         (title, body)
     } else {
         (segment.bookmark.name.clone(), String::new())
     }
+}
+
+fn generate_merge_note(source_names: &[String]) -> String {
+    let formatted: Vec<String> = source_names.iter().map(|n| format!("`{n}`")).collect();
+    let sources_text = match formatted.len() {
+        1 => formatted[0].clone(),
+        2 => format!("{} and {}", formatted[0], formatted[1]),
+        _ => {
+            let (last, rest) = formatted.split_last().unwrap();
+            format!("{}, and {last}", rest.join(", "))
+        }
+    };
+    let plural = if source_names.len() == 1 {
+        "that PR is"
+    } else {
+        "those PRs are"
+    };
+    format!(
+        "**Merge note:** This change also merges {sources_text} in jj. \
+         The diff may include changes from {sources_text} until {plural} merged."
+    )
 }
 
 /// Wrap commit body text in sentinel markers for the initial PR body.
@@ -956,6 +986,60 @@ mod tests {
         ).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "coworker-feat");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
+    }
+
+    #[test]
+    fn test_plan_merge_note_in_pr_body() {
+        let gh = StubGitHub {
+            prs: HashMap::new(),
+        };
+        let mut segment = make_segment("merge-feat", false);
+        segment.merge_source_names = vec!["feat-d".to_string()];
+        let segments = vec![segment];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", false, false, &[], None).unwrap();
+        let body = &plan.bookmarks_needing_pr[0].body;
+        assert!(body.contains("**Merge note:**"), "body should contain merge note: {body}");
+        assert!(body.contains("`feat-d`"), "body should reference the merge source: {body}");
+    }
+
+    #[test]
+    fn test_plan_no_merge_note_for_linear() {
+        let gh = StubGitHub {
+            prs: HashMap::new(),
+        };
+        let segments = vec![make_segment("feature", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", false, false, &[], None).unwrap();
+        let body = &plan.bookmarks_needing_pr[0].body;
+        assert!(!body.contains("Merge note"), "linear segment should have no merge note: {body}");
+    }
+
+    #[test]
+    fn test_plan_merge_note_three_parents() {
+        let note = generate_merge_note(&[
+            "feat-b".to_string(),
+            "feat-c".to_string(),
+            "feat-d".to_string(),
+        ]);
+        assert!(note.contains("`feat-b`, `feat-c`, and `feat-d`"), "should format 3 sources: {note}");
+        assert!(note.contains("those PRs are"), "should use plural: {note}");
+    }
+
+    #[test]
+    fn test_generate_merge_note_single() {
+        let note = generate_merge_note(&["feat-x".to_string()]);
+        assert!(note.contains("`feat-x`"));
+        assert!(note.contains("that PR is"));
+    }
+
+    #[test]
+    fn test_generate_merge_note_two() {
+        let note = generate_merge_note(&["feat-a".to_string(), "feat-b".to_string()]);
+        assert!(note.contains("`feat-a` and `feat-b`"));
+        assert!(note.contains("those PRs are"));
     }
 
     #[test]

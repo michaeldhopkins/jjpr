@@ -356,11 +356,18 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
                 })
                 .unwrap_or_default();
 
+            let merge_label = if segment.merge_source_names.is_empty() {
+                String::new()
+            } else {
+                format!(", merge of {}", segment.merge_source_names.join(" + "))
+            };
+
             println!(
-                "  {} ({} change{}{}, {})",
+                "  {} ({} change{}{}{}, {})",
                 name,
                 change_count,
                 if change_count == 1 { "" } else { "s" },
+                merge_label,
                 pr_label,
                 sync_status
             );
