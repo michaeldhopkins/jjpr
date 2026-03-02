@@ -204,7 +204,7 @@ jjpr auto-detects the forge from your remote URL and talks directly to forge API
 
 Auto-detection recognizes `github.com`, `gitlab.com`, and `codeberg.org` (plus Enterprise subdomains for GitHub/GitLab). For self-hosted instances, set `forge` in `.jj/jjpr.toml` — see [Repo-local config](#repo-local-config).
 
-Merge commits in a bookmark's ancestry cause that bookmark to be excluded (jjpr only handles linear stacks).
+Merge commits (`jj new A B`) are supported: jjpr follows the first parent through the merge and lets the other parent(s) form independent stacks. PRs for merge bookmarks include a note explaining which branches were merged and that the diff may include their changes until those PRs land.
 
 ## Development
 

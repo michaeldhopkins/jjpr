@@ -29,7 +29,7 @@ pub fn resolve_bookmark_selections(
             Ok(NarrowedSegment {
                 bookmark,
                 changes: segment.changes.clone(),
-                merge_source_names: vec![],
+                merge_source_names: segment.merge_source_names.clone(),
             })
         })
         .collect()
@@ -95,6 +95,19 @@ mod tests {
         let segments = vec![segment(vec![bookmark("a"), bookmark("b")])];
         let result = resolve_bookmark_selections(&segments, false).unwrap();
         assert_eq!(result[0].bookmark.name, "a");
+    }
+
+    #[test]
+    fn test_merge_source_names_propagated() {
+        let mut seg = segment(vec![bookmark("merge-feat")]);
+        seg.merge_source_names = vec!["feat-d".to_string()];
+        let segments = vec![seg];
+        let result = resolve_bookmark_selections(&segments, false).unwrap();
+        assert_eq!(
+            result[0].merge_source_names,
+            vec!["feat-d"],
+            "merge_source_names should propagate from BookmarkSegment to NarrowedSegment"
+        );
     }
 
     #[test]
