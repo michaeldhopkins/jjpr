@@ -370,18 +370,6 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
         }
     }
 
-    if !graph.excluded_bookmarks.is_empty() {
-        println!("\nExcluded (merge commits in ancestry):");
-        for eb in &graph.excluded_bookmarks {
-            let short_id = &eb.merge_change_id[..eb.merge_change_id.len().min(12)];
-            println!("  {} (merge at change {})", eb.name, short_id);
-            println!(
-                "    hint: linearize with `jj rebase -s {} -d <parent>`",
-                short_id
-            );
-        }
-    }
-
     Ok(())
 }
 

@@ -21,17 +21,6 @@ pub fn analyze_submission_graph(
     graph: &ChangeGraph,
     target_bookmark: &str,
 ) -> Result<SubmissionAnalysis> {
-    if let Some(eb) = graph.excluded_bookmarks.iter().find(|e| e.name == target_bookmark) {
-        let short_id = &eb.merge_change_id[..eb.merge_change_id.len().min(12)];
-        anyhow::bail!(
-            "bookmark '{}' was excluded because change {} is a merge commit. \
-             Linearize with:\n  jj rebase -s {} -d <parent>",
-            target_bookmark,
-            short_id,
-            short_id,
-        );
-    }
-
     let target_change_id = graph
         .bookmark_to_change_id
         .get(target_bookmark)
@@ -93,7 +82,7 @@ pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jj::types::{Bookmark, BranchStack, ExcludedBookmark, GitRemote, LogEntry};
+    use crate::jj::types::{Bookmark, BranchStack, GitRemote, LogEntry};
     use std::collections::HashMap;
 
     fn make_segment(bookmark_name: &str, change_id: &str) -> BookmarkSegment {
@@ -142,7 +131,6 @@ mod tests {
                 segments: segments.clone(),
                 base_branch: None,
             }],
-            excluded_bookmarks: Vec::new(),
         }
     }
 
@@ -189,21 +177,6 @@ mod tests {
         let graph = make_graph(vec![make_segment("feature", "ch1")]);
         let err = analyze_submission_graph(&graph, "nonexistent").unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
-    }
-
-    #[test]
-    fn test_analyze_excluded_bookmark_gives_specific_error() {
-        let mut graph = make_graph(vec![make_segment("feature", "ch1")]);
-        graph.excluded_bookmarks.push(ExcludedBookmark {
-            name: "broken".to_string(),
-            merge_change_id: "merge_change_abc".to_string(),
-            merge_parent_ids: vec!["p1".to_string(), "p2".to_string()],
-        });
-        let err = analyze_submission_graph(&graph, "broken").unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("merge commit"), "should mention merge commit: {msg}");
-        assert!(msg.contains("broken"), "should mention bookmark name: {msg}");
-        assert!(msg.contains("merge_change"), "should mention merge change_id: {msg}");
     }
 
     struct StubJj {
@@ -298,7 +271,6 @@ mod tests {
             stack_leafs: HashSet::new(),
             stack_roots: HashSet::new(),
             stacks: vec![],
-            excluded_bookmarks: Vec::new(),
         };
         let jj = StubJj {
             wc_commit_id: "commit_wc".to_string(),

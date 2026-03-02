@@ -57,13 +57,3 @@ pub struct GitRemote {
     pub name: String,
     pub url: String,
 }
-
-/// A bookmark excluded from the graph, with details about why.
-#[derive(Debug, Clone)]
-pub struct ExcludedBookmark {
-    pub name: String,
-    /// The change_id of the merge commit that caused exclusion.
-    pub merge_change_id: String,
-    /// The parent commit_ids of the merge commit.
-    pub merge_parent_ids: Vec<String>,
-}
