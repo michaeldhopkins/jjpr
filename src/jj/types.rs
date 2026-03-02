@@ -30,6 +30,9 @@ pub struct Bookmark {
 pub struct BookmarkSegment {
     pub bookmarks: Vec<Bookmark>,
     pub changes: Vec<LogEntry>,
+    /// For merge commits: bookmark names of parents NOT followed in the linear path.
+    /// Empty for non-merge segments.
+    pub merge_source_names: Vec<String>,
 }
 
 /// A segment where the user has selected exactly one bookmark.
@@ -37,6 +40,7 @@ pub struct BookmarkSegment {
 pub struct NarrowedSegment {
     pub bookmark: Bookmark,
     pub changes: Vec<LogEntry>,
+    pub merge_source_names: Vec<String>,
 }
 
 /// A linear stack of segments from trunk to a leaf bookmark.

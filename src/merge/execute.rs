@@ -312,6 +312,7 @@ mod tests {
                 remote_bookmarks: vec![],
                 is_working_copy: false,
             }],
+            merge_source_names: vec![],
         }
     }
 

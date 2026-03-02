@@ -190,6 +190,7 @@ fn build_stacks(
                 Some(BookmarkSegment {
                     bookmarks: segment_bookmarks,
                     changes,
+                    merge_source_names: vec![],
                 })
             })
             .collect();
