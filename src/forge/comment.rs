@@ -63,9 +63,9 @@ pub fn generate_comment_body(entries: &[StackEntry], default_branch: &str) -> St
     body.push_str(&format!("1. `{default_branch}`\n"));
     for entry in entries {
         if entry.is_current {
-            body.push_str(&format!("1. **{} <-- this PR**\n", entry.bookmark_name));
+            body.push_str(&format!("1. **`{}` <-- this PR**\n", entry.bookmark_name));
         } else if let Some(url) = &entry.pr_url {
-            body.push_str(&format!("1. [{}]({})\n", entry.bookmark_name, url));
+            body.push_str(&format!("1. [`{}`]({})\n", entry.bookmark_name, url));
         } else {
             body.push_str(&format!("1. `{}`\n", entry.bookmark_name));
         }
@@ -145,13 +145,13 @@ mod tests {
     #[test]
     fn test_generate_comment_body_marks_current_pr() {
         let body = generate_comment_body(&sample_entries(), "main");
-        assert!(body.contains("**profile <-- this PR**"));
+        assert!(body.contains("**`profile` <-- this PR**"));
     }
 
     #[test]
     fn test_generate_comment_body_links_other_prs() {
         let body = generate_comment_body(&sample_entries(), "main");
-        assert!(body.contains("[auth](https://github.com/o/r/pull/1)"));
+        assert!(body.contains("[`auth`](https://github.com/o/r/pull/1)"));
     }
 
     #[test]
@@ -217,6 +217,21 @@ mod tests {
             body: Some("nothing relevant".to_string()),
         }];
         assert!(find_stack_comment(&comments).is_none());
+    }
+
+    #[test]
+    fn test_bookmark_name_with_markdown_chars() {
+        let entries = vec![StackEntry {
+            bookmark_name: "[evil](https://evil.com)".to_string(),
+            pr_url: Some("https://github.com/o/r/pull/1".to_string()),
+            pr_number: Some(1),
+            is_current: false,
+        }];
+        let body = generate_comment_body(&entries, "main");
+        // The name is wrapped in backticks, so markdown chars are neutralized
+        assert!(body.contains("[`[evil](https://evil.com)`]"));
+        // The injected URL does NOT become a clickable link
+        assert!(!body.contains("](https://evil.com)]\n"));
     }
 
     #[test]
