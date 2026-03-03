@@ -94,7 +94,7 @@ impl ForgeClient {
         if status >= 400 {
             let body = resp.body_mut().read_to_string()
                 .unwrap_or_else(|_| String::from("<unreadable>"));
-            anyhow::bail!("GET {path} failed (HTTP {status}): {body}");
+            anyhow::bail!("GET {path} failed (HTTP {status}): {}", truncate_body(&body, 500));
         }
 
         resp.body_mut().read_json()
@@ -143,7 +143,7 @@ impl ForgeClient {
         if status >= 400 {
             let resp_body = resp.body_mut().read_to_string()
                 .unwrap_or_else(|_| String::from("<unreadable>"));
-            anyhow::bail!("{method} {path} failed (HTTP {status}): {resp_body}");
+            anyhow::bail!("{method} {path} failed (HTTP {status}): {}", truncate_body(&resp_body, 500));
         }
 
         // Some endpoints return 204 No Content
@@ -182,7 +182,7 @@ impl ForgeClient {
             if status >= 400 {
                 let body = resp.body_mut().read_to_string()
                     .unwrap_or_else(|_| String::from("<unreadable>"));
-                anyhow::bail!("GET {path} failed (HTTP {status}): {body}");
+                anyhow::bail!("GET {path} failed (HTTP {status}): {}", truncate_body(&body, 500));
             }
 
             let next = extract_next_link(&resp);
@@ -237,6 +237,20 @@ impl ForgeClient {
             "variables": variables,
         });
         self.post(endpoint, &body)
+    }
+}
+
+/// Truncate a string to a maximum byte length, appending "…" if truncated.
+fn truncate_body(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        // Walk backwards from max to find a char boundary
+        let mut boundary = max;
+        while boundary > 0 && !s.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        format!("{}…", &s[..boundary])
     }
 }
 
@@ -388,6 +402,20 @@ mod tests {
     #[test]
     fn test_url_encode_space() {
         assert_eq!(url_encode("my feature"), "my%20feature");
+    }
+
+    #[test]
+    fn test_truncate_body_short() {
+        assert_eq!(truncate_body("hello", 500), "hello");
+    }
+
+    #[test]
+    fn test_truncate_body_long() {
+        let long = "x".repeat(600);
+        let result = truncate_body(&long, 500);
+        assert!(result.len() < 510);
+        assert!(result.ends_with('…'));
+        assert!(result.starts_with("xxx"));
     }
 
     #[test]
