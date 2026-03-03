@@ -195,14 +195,14 @@ fn print_title_drift_warnings(
     forge_kind: crate::forge::ForgeKind,
 ) {
     for drift in drifts {
-        let escaped_title = drift.expected_title.replace('"', r#"\""#);
+        let escaped_title = drift.expected_title.replace('\'', "'\\''");
         let fix_hint = match forge_kind {
             crate::forge::ForgeKind::GitHub | crate::forge::ForgeKind::Forgejo => format!(
-                "gh pr edit {} --repo {}/{} --title \"{}\"",
+                "gh pr edit {} --repo {}/{} --title '{}'",
                 drift.pr_number, repo_info.owner, repo_info.repo, escaped_title,
             ),
             crate::forge::ForgeKind::GitLab => format!(
-                "glab mr update {} --title \"{}\"",
+                "glab mr update {} --title '{}'",
                 drift.pr_number, escaped_title,
             ),
         };
@@ -1049,10 +1049,22 @@ mod tests {
     }
 
     #[test]
-    fn test_title_drift_escapes_quotes() {
-        let title = r#"Fix "login" bug"#;
-        let escaped = title.replace('"', r#"\""#);
-        assert_eq!(escaped, r#"Fix \"login\" bug"#);
+    fn test_title_drift_escapes_single_quotes() {
+        let title = "Fix the user's login";
+        let escaped = title.replace('\'', "'\\''");
+        assert_eq!(escaped, "Fix the user'\\''s login");
+    }
+
+    #[test]
+    fn test_title_drift_shell_metacharacters() {
+        // Single quotes neutralize all shell metacharacters
+        let title = "Fix $(echo pwned) `rm -rf` $HOME";
+        let escaped = title.replace('\'', "'\\''");
+        // No single quotes in input, so it passes through unchanged
+        assert_eq!(escaped, title);
+        // When wrapped in single quotes, shell will not interpret the metacharacters
+        let hint = format!("gh pr edit 42 --title '{escaped}'");
+        assert!(hint.contains("'Fix $(echo pwned) `rm -rf` $HOME'"));
     }
 
     #[test]
