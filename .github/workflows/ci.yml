@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Check, Test, Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --locked
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo clippy
+        run: cargo clippy --locked --tests -- -D warnings
+
+      - uses: taiki-e/install-action@cargo-deny
+
+      - name: cargo deny check licenses
+        run: cargo deny check licenses

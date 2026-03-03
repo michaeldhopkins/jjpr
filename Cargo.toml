@@ -29,6 +29,8 @@ tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 insta = "1"
+clap_complete = "4"
+clap_mangen = "0.2"
 
 [lints.clippy]
 # Enforce enums over boolean state flags
