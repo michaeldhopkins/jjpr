@@ -234,4 +234,4 @@ JJPR_E2E=1 cargo test  # Include E2E tests (requires gh auth + network)
 
 ## License
 
-MIT
+MIT or Apache-2.0
