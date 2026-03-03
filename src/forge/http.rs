@@ -64,17 +64,25 @@ impl ForgeClient {
         }
     }
 
-    fn full_url(&self, path: &str) -> String {
+    fn full_url(&self, path: &str) -> Result<String, String> {
         if path.starts_with("https://") || path.starts_with("http://") {
-            path.to_string()
+            if same_origin(&self.base_url, path) {
+                Ok(path.to_string())
+            } else {
+                Err(format!(
+                    "refusing to follow cross-origin URL: {path} (expected host from {})",
+                    self.base_url
+                ))
+            }
         } else {
-            format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+            Ok(format!("{}/{}", self.base_url, path.trim_start_matches('/')))
         }
     }
 
     /// GET a single JSON response.
     pub fn get(&self, path: &str) -> Result<serde_json::Value> {
-        let url = self.full_url(path);
+        let url = self.full_url(path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
         let mut resp = self.agent.get(&url)
             .header(header, &value)
@@ -114,7 +122,8 @@ impl ForgeClient {
         path: &str,
         body: &impl Serialize,
     ) -> Result<serde_json::Value> {
-        let url = self.full_url(path);
+        let url = self.full_url(path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
 
         let request = match method {
@@ -155,11 +164,14 @@ impl ForgeClient {
     }
 
     fn get_paginated_link(&self, path: &str) -> Result<Vec<serde_json::Value>> {
-        let mut url = self.full_url(path);
+        const MAX_PAGES: usize = 100;
+
+        let mut url = self.full_url(path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
         let mut all_items = Vec::new();
 
-        loop {
+        for _ in 0..MAX_PAGES {
             let mut resp = self.agent.get(&url)
                 .header(header, &value)
                 .header("Accept", "application/json")
@@ -180,11 +192,15 @@ impl ForgeClient {
             all_items.extend(items);
 
             match next {
-                Some(next_url) => url = next_url,
-                None => break,
+                Some(next_url) => {
+                    url = self.full_url(&next_url)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                None => return Ok(all_items),
             }
         }
 
+        eprintln!("warning: pagination capped at {MAX_PAGES} pages for {path}");
         Ok(all_items)
     }
 
@@ -221,6 +237,20 @@ impl ForgeClient {
             "variables": variables,
         });
         self.post(endpoint, &body)
+    }
+}
+
+/// Check whether two URLs share the same scheme + host + port.
+fn same_origin(base: &str, candidate: &str) -> bool {
+    let extract = |url: &str| -> Option<(String, String)> {
+        let after_scheme = url.split("://").nth(1)?;
+        let scheme = url.split("://").next()?;
+        let host_port = after_scheme.split('/').next()?;
+        Some((scheme.to_lowercase(), host_port.to_lowercase()))
+    };
+    match (extract(base), extract(candidate)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -282,12 +312,12 @@ mod tests {
             AuthScheme::Bearer,
             PaginationStyle::LinkHeader,
         );
-        assert_eq!(client.full_url("repos/o/r"), "https://api.github.com/repos/o/r");
-        assert_eq!(client.full_url("/repos/o/r"), "https://api.github.com/repos/o/r");
+        assert_eq!(client.full_url("repos/o/r").unwrap(), "https://api.github.com/repos/o/r");
+        assert_eq!(client.full_url("/repos/o/r").unwrap(), "https://api.github.com/repos/o/r");
     }
 
     #[test]
-    fn test_full_url_absolute() {
+    fn test_full_url_absolute_same_origin() {
         let client = ForgeClient::new(
             "https://api.github.com",
             "tok".to_string(),
@@ -295,9 +325,44 @@ mod tests {
             PaginationStyle::LinkHeader,
         );
         assert_eq!(
-            client.full_url("https://api.github.com/repos?page=2"),
+            client.full_url("https://api.github.com/repos?page=2").unwrap(),
             "https://api.github.com/repos?page=2"
         );
+    }
+
+    #[test]
+    fn test_full_url_rejects_cross_origin() {
+        let client = ForgeClient::new(
+            "https://api.github.com",
+            "tok".to_string(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
+        let result = client.full_url("https://evil.example.com/steal");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cross-origin"));
+    }
+
+    #[test]
+    fn test_same_origin_matching() {
+        assert!(same_origin("https://api.github.com/v3", "https://api.github.com/repos?page=2"));
+        assert!(same_origin("https://gitlab.com/api/v4", "https://gitlab.com/other"));
+    }
+
+    #[test]
+    fn test_same_origin_different_host() {
+        assert!(!same_origin("https://api.github.com", "https://evil.com/steal"));
+    }
+
+    #[test]
+    fn test_same_origin_different_scheme() {
+        assert!(!same_origin("https://api.github.com", "http://api.github.com/repos"));
+    }
+
+    #[test]
+    fn test_same_origin_with_port() {
+        assert!(same_origin("https://gitlab.local:8443/api", "https://gitlab.local:8443/v2"));
+        assert!(!same_origin("https://gitlab.local:8443/api", "https://gitlab.local:9999/v2"));
     }
 
     #[test]
