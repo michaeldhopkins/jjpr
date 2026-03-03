@@ -1,14 +1,25 @@
 # jjpr
 
-Manage stacked pull requests in [Jujutsu](https://jj-vcs.github.io/jj/) repositories.
+Multi-forge stacked pull requests for [Jujutsu](https://jj-vcs.github.io/jj/). Push, create, merge, and sync stacked PRs/MRs on GitHub, GitLab, and Forgejo from one tool.
 
-`jjpr` discovers your bookmark stacks, pushes branches, creates PRs/MRs with correct base branches, and keeps stack-awareness comments in sync. Works with GitHub, GitLab, and Forgejo/Codeberg — the forge is auto-detected from your remote URL.
+## Why jjpr?
+
+- **Multi-forge** — GitHub, GitLab, and Forgejo/Codeberg in one binary, auto-detected from your remote URL
+- **Stack merging** — `jjpr merge` merges from the bottom up with live re-evaluation: merge a PR, rebase the rest, retarget bases, check the next one, repeat
+- **Merge commits** — `jj new A B` handled naturally; jjpr follows the first parent and lets other parents form independent stacks
+- **Pure HTTP** — talks directly to forge APIs via `ureq`; no `gh` or `glab` CLI required (though existing credentials are picked up automatically)
+- **Idempotent** — run `jjpr submit` repeatedly as you work; it converges to the correct state, pushing only what changed
+- **Stack-awareness comments** — every PR gets a navigation comment showing its position in the stack
+- **Foreign base detection** — automatically targets PRs at a coworker's branch when your stack builds on one
 
 ## Install
 
 ```
-cargo install --path .
+git clone https://github.com/michaeldhopkins/jjpr
+cargo install --path jjpr
 ```
+
+Requires Rust 1.88+.
 
 ## Usage
 
@@ -173,6 +184,7 @@ Use `--reviewer alice,bob` to request reviewers. Reviewers are applied to all PR
 
 ## Requirements
 
+- Rust 1.88+ (for building from source)
 - [jj](https://jj-vcs.github.io/jj/) 0.36+ (Jujutsu VCS)
 - A colocated jj/git repository with a supported remote
 
