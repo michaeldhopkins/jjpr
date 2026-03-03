@@ -14,6 +14,14 @@ Multi-forge stacked pull requests for [Jujutsu](https://jj-vcs.github.io/jj/). P
 
 ## Install
 
+### Homebrew (macOS/Linux)
+
+```
+brew install michaeldhopkins/tap/jjpr
+```
+
+### From source
+
 ```
 git clone https://github.com/michaeldhopkins/jjpr
 cargo install --path jjpr
