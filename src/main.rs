@@ -579,10 +579,26 @@ fn find_repo_root() -> Result<PathBuf> {
         }
         match path.parent() {
             Some(parent) => path = parent,
-            None => anyhow::bail!(
-                "not a jj repository (or any parent up to /). \
-                 Run `jj git init` to create one."
-            ),
+            None => {
+                // Check if there's a git repo that could be colocated
+                let mut check = cwd.as_path();
+                loop {
+                    if check.join(".git").exists() {
+                        anyhow::bail!(
+                            "found a git repository but no jj repository. \
+                             Run `jj git init --colocate` to set up jj alongside git."
+                        );
+                    }
+                    match check.parent() {
+                        Some(parent) => check = parent,
+                        None => break,
+                    }
+                }
+                anyhow::bail!(
+                    "not a jj repository (or any parent up to /). \
+                     Run `jj git init` to create one."
+                );
+            }
         }
     }
 }
