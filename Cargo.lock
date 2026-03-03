@@ -567,6 +567,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "insta",
+ "percent-encoding",
  "predicates",
  "serde",
  "serde_json",

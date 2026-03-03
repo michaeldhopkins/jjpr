@@ -230,8 +230,9 @@ impl Forge for GitHubForge {
         repo: &str,
         head: &str,
     ) -> Result<Option<PullRequest>> {
+        let encoded_head = super::http::url_encode(head);
         let path = format!(
-            "repos/{owner}/{repo}/pulls?head={owner}:{head}&state=closed"
+            "repos/{owner}/{repo}/pulls?head={owner}:{encoded_head}&state=closed"
         );
         let output = self.client.get(&path)?;
         let prs: Vec<PullRequest> = serde_json::from_value(output)
@@ -265,12 +266,13 @@ impl Forge for GitHubForge {
         repo: &str,
         head_ref: &str,
     ) -> Result<ChecksStatus> {
+        let encoded_ref = super::http::url_encode(head_ref);
         let check_runs_path =
-            format!("repos/{owner}/{repo}/commits/{head_ref}/check-runs");
+            format!("repos/{owner}/{repo}/commits/{encoded_ref}/check-runs");
         let check_runs = self.client.get(&check_runs_path)?;
 
         let status_path =
-            format!("repos/{owner}/{repo}/commits/{head_ref}/status");
+            format!("repos/{owner}/{repo}/commits/{encoded_ref}/status");
         let status = self.client.get(&status_path)?;
 
         Ok(parse_checks_status(&check_runs, &status))

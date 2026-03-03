@@ -276,7 +276,8 @@ impl Forge for ForgejoForge {
         repo: &str,
         head_ref: &str,
     ) -> Result<ChecksStatus> {
-        let path = format!("repos/{owner}/{repo}/commits/{head_ref}/status");
+        let encoded_ref = super::http::url_encode(head_ref);
+        let path = format!("repos/{owner}/{repo}/commits/{encoded_ref}/status");
         let output = self.client.get(&path)?;
         Ok(parse_combined_status(&output))
     }

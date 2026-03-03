@@ -240,6 +240,11 @@ impl ForgeClient {
     }
 }
 
+/// Percent-encode a string for safe use in URL path segments or query values.
+pub fn url_encode(s: &str) -> String {
+    percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
 /// Check whether two URLs share the same scheme + host + port.
 fn same_origin(base: &str, candidate: &str) -> bool {
     let extract = |url: &str| -> Option<(String, String)> {
@@ -363,6 +368,26 @@ mod tests {
     fn test_same_origin_with_port() {
         assert!(same_origin("https://gitlab.local:8443/api", "https://gitlab.local:8443/v2"));
         assert!(!same_origin("https://gitlab.local:8443/api", "https://gitlab.local:9999/v2"));
+    }
+
+    #[test]
+    fn test_url_encode_slash() {
+        assert_eq!(url_encode("feature/login"), "feature%2Flogin");
+    }
+
+    #[test]
+    fn test_url_encode_hash() {
+        assert_eq!(url_encode("fix#123"), "fix%23123");
+    }
+
+    #[test]
+    fn test_url_encode_plain() {
+        assert_eq!(url_encode("auth"), "auth");
+    }
+
+    #[test]
+    fn test_url_encode_space() {
+        assert_eq!(url_encode("my feature"), "my%20feature");
     }
 
     #[test]

@@ -171,7 +171,8 @@ impl Forge for GitLabForge {
         let mut reviewer_ids = Vec::new();
         for username in reviewers {
             let users: Vec<serde_json::Value> = {
-                let output = self.client.get(&format!("users?username={username}"))?;
+                let encoded_user = super::http::url_encode(username);
+                let output = self.client.get(&format!("users?username={encoded_user}"))?;
                 serde_json::from_value(output)
                     .context("failed to parse user lookup response")?
             };
@@ -296,8 +297,9 @@ impl Forge for GitLabForge {
         head: &str,
     ) -> Result<Option<PullRequest>> {
         let project = Self::encode_project(owner, repo);
+        let encoded_head = super::http::url_encode(head);
         let path =
-            format!("projects/{project}/merge_requests?source_branch={head}&state=merged");
+            format!("projects/{project}/merge_requests?source_branch={encoded_head}&state=merged");
         let output = self.client.get(&path)?;
         let mrs: Vec<serde_json::Value> = serde_json::from_value(output)
             .context("failed to parse merged MR list response")?;
