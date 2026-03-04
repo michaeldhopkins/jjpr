@@ -146,12 +146,17 @@ impl ForgeClient {
             anyhow::bail!("{method} {path} failed (HTTP {status}): {}", truncate_body(&resp_body, 500));
         }
 
-        // Some endpoints return 204 No Content
+        // Some endpoints return 204 No Content or empty body on success
         if status == 204 {
             return Ok(serde_json::Value::Null);
         }
 
-        resp.body_mut().read_json()
+        let text = resp.body_mut().read_to_string()
+            .with_context(|| format!("failed to read response from {method} {path}"))?;
+        if text.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text)
             .with_context(|| format!("failed to parse JSON from {method} {path}"))
     }
 
@@ -215,10 +220,15 @@ impl ForgeClient {
                 .and_then(|v| serde_json::from_value(v)
                     .context("failed to parse paginated response"))?;
 
-            if items.is_empty() {
+            let count = items.len();
+            if count == 0 {
                 break;
             }
             all_items.extend(items);
+            // A partial page means we've reached the end
+            if (count as u32) < limit {
+                break;
+            }
             page += 1;
         }
 
