@@ -82,10 +82,19 @@ impl ForgeKind {
 }
 
 /// Build a map of branch name → PR, filtering out PRs from forks.
+///
+/// Fork detection: GitHub/Forgejo use "owner:branch" labels for fork PRs.
+/// Same-repo PRs have either "owner:branch" (matching our owner), just the branch
+/// name (Codeberg), or an empty label (GitLab). We filter out only PRs whose label
+/// contains ":" with a *different* owner prefix.
 pub fn build_pr_map(prs: Vec<PullRequest>, owner: &str) -> HashMap<String, PullRequest> {
     let owner_prefix = format!("{owner}:");
     prs.into_iter()
-        .filter(|pr| pr.head.label.starts_with(&owner_prefix) || pr.head.label.is_empty())
+        .filter(|pr| {
+            pr.head.label.is_empty()
+                || !pr.head.label.contains(':')
+                || pr.head.label.starts_with(&owner_prefix)
+        })
         .map(|pr| (pr.head.ref_name.clone(), pr))
         .collect()
 }
@@ -234,6 +243,14 @@ mod tests {
     #[test]
     fn test_build_pr_map_accepts_empty_label() {
         let prs = vec![make_pr("feature", "")];
+        let map = build_pr_map(prs, "owner");
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_build_pr_map_accepts_label_without_owner_prefix() {
+        // Codeberg/Forgejo returns just the branch name as label
+        let prs = vec![make_pr("feature", "feature")];
         let map = build_pr_map(prs, "owner");
         assert_eq!(map.len(), 1);
     }
