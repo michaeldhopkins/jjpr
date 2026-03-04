@@ -88,7 +88,7 @@ fn gh_auth_token() -> Option<String> {
 }
 
 /// Run `glab auth status -t` and parse the token from stderr output.
-/// glab prints "Token: glpat-xxx" to stderr.
+/// Newer glab versions print "✓ Token found: <token>"; older ones print "Token: <token>".
 fn glab_auth_token() -> Option<String> {
     let output = Command::new("glab")
         .args(["auth", "status", "-t"])
@@ -98,8 +98,12 @@ fn glab_auth_token() -> Option<String> {
     // glab writes token info to stderr
     let stderr = String::from_utf8_lossy(&output.stderr);
     for line in stderr.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("Token:") {
+        let trimmed = line.trim().trim_start_matches('✓').trim();
+        // Match both "Token: xxx" and "Token found: xxx"
+        let rest = trimmed
+            .strip_prefix("Token found:")
+            .or_else(|| trimmed.strip_prefix("Token:"));
+        if let Some(rest) = rest {
             let token = rest.trim().to_string();
             if !token.is_empty() {
                 return Some(token);

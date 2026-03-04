@@ -32,7 +32,7 @@ pub struct StackEntry {
 }
 
 /// Generate the body for a stack navigation comment.
-pub fn generate_comment_body(entries: &[StackEntry], default_branch: &str) -> String {
+pub fn generate_comment_body(entries: &[StackEntry]) -> String {
     let data = StackCommentData {
         version: 0,
         stack: entries
@@ -55,12 +55,8 @@ pub fn generate_comment_body(entries: &[StackEntry], default_branch: &str) -> St
     body.push('\n');
     body.push_str(&format!("<!--- JJPR_DATA: {encoded} --->"));
     body.push('\n');
-    body.push_str(&format!(
-        "This PR is part of a stack of {} bookmarks:\n\n",
-        entries.len()
-    ));
+    body.push_str("This PR is part of a stack:\n\n");
 
-    body.push_str(&format!("1. `{default_branch}`\n"));
     for entry in entries {
         if entry.is_current {
             body.push_str(&format!("1. **`{}` <-- this PR**\n", entry.bookmark_name));
@@ -132,43 +128,44 @@ mod tests {
 
     #[test]
     fn test_generate_comment_body_contains_sentinel() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         assert!(body.contains(SENTINEL));
     }
 
     #[test]
     fn test_generate_comment_body_contains_footer() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         assert!(body.contains(FOOTER));
     }
 
     #[test]
     fn test_generate_comment_body_marks_current_pr() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         assert!(body.contains("**`profile` <-- this PR**"));
     }
 
     #[test]
     fn test_generate_comment_body_links_other_prs() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         assert!(body.contains("[`auth`](https://github.com/o/r/pull/1)"));
     }
 
     #[test]
     fn test_generate_comment_body_shows_unlinked_bookmarks() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         assert!(body.contains("`settings`"));
     }
 
     #[test]
-    fn test_generate_comment_body_shows_default_branch() {
-        let body = generate_comment_body(&sample_entries(), "main");
-        assert!(body.contains("`main`"));
+    fn test_generate_comment_body_excludes_default_branch() {
+        let body = generate_comment_body(&sample_entries());
+        // Trunk is the target, not part of the stack
+        assert!(!body.contains("1. `main`"));
     }
 
     #[test]
     fn test_roundtrip_comment_data() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         let data = parse_comment_data(&body).expect("should parse embedded data");
         assert_eq!(data.version, 0);
         assert_eq!(data.stack.len(), 2);
@@ -227,7 +224,7 @@ mod tests {
             pr_number: Some(1),
             is_current: false,
         }];
-        let body = generate_comment_body(&entries, "main");
+        let body = generate_comment_body(&entries);
         // The name is wrapped in backticks, so markdown chars are neutralized
         assert!(body.contains("[`[evil](https://evil.com)`]"));
         // The injected URL does NOT become a clickable link
@@ -236,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_new_comments_use_jjpr_data_prefix() {
-        let body = generate_comment_body(&sample_entries(), "main");
+        let body = generate_comment_body(&sample_entries());
         assert!(body.contains("JJPR_DATA"), "should use JJPR_DATA prefix");
         assert!(
             !body.contains("STACKER_DATA"),

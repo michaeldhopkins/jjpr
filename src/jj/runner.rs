@@ -97,7 +97,18 @@ impl Jj for JjRunner {
     }
 
     fn get_default_branch(&self) -> Result<String> {
-        // Look at remote bookmarks on trunk() to find the default branch name
+        // Try parsing the trunk() alias — if it's a simple "name@remote" form, extract the name
+        if let Ok(alias) = self.run_jj(&["config", "get", r#"revset-aliases."trunk()""#]) {
+            let alias = alias.trim();
+            if let Some((name, _remote)) = alias.split_once('@')
+                && !name.is_empty()
+                && !name.contains(|c: char| c.is_whitespace() || c == '(' || c == '|')
+            {
+                return Ok(name.to_string());
+            }
+        }
+
+        // Fall back to querying remote bookmarks on trunk()
         let template = r#"remote_bookmarks.map(|b| b.name()).join(",")"#;
         let output = self.run_jj(&[
             "log",
@@ -111,14 +122,6 @@ impl Jj for JjRunner {
         ])?;
 
         let bookmarks: Vec<&str> = output.trim().split(',').collect();
-        const DEFAULT_BRANCH_CANDIDATES: &[&str] = &["main", "master", "trunk"];
-        for candidate in DEFAULT_BRANCH_CANDIDATES {
-            if bookmarks.iter().any(|b| b.trim() == *candidate) {
-                return Ok(candidate.to_string());
-            }
-        }
-
-        // Fall back to the first bookmark found, or "main"
         bookmarks
             .first()
             .filter(|b| !b.trim().is_empty())

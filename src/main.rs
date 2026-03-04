@@ -507,7 +507,7 @@ fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>, token
         ForgeKind::GitLab => {
             let gitlab_host = host.unwrap_or("gitlab.com");
             let base_url = format!("https://{gitlab_host}/api/v4");
-            let client = ForgeClient::new(&base_url, token, AuthScheme::PrivateToken, PaginationStyle::LinkHeader);
+            let client = ForgeClient::new(&base_url, token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
             Ok(Box::new(GitLabForge::new(client)))
         }
         ForgeKind::Forgejo => {

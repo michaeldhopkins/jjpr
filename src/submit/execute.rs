@@ -266,7 +266,7 @@ fn update_stack_comments(
             })
             .collect();
 
-        let body = comment::generate_comment_body(&entries, &plan.default_branch);
+        let body = comment::generate_comment_body(&entries);
 
         // Find existing stack comment
         let comments = github.list_comments(owner, repo, pr.number)?;
