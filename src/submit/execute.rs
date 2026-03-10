@@ -241,6 +241,7 @@ fn update_stack_comments(
     let entries_base: Vec<(String, Option<String>, Option<u64>)> = plan
         .all_bookmarks
         .iter()
+        .filter(|b| b.name != plan.default_branch)
         .map(|b| {
             let pr = bookmark_to_pr.get(&b.name);
             (
@@ -251,7 +252,7 @@ fn update_stack_comments(
         })
         .collect();
 
-    for bookmark in &plan.all_bookmarks {
+    for bookmark in plan.all_bookmarks.iter().filter(|b| b.name != plan.default_branch) {
         let Some(pr) = bookmark_to_pr.get(&bookmark.name) else {
             continue;
         };
@@ -1046,6 +1047,88 @@ mod tests {
             draft: false,
         };
         assert!(plan.has_actions());
+    }
+
+    #[test]
+    fn test_stack_comment_excludes_default_branch() {
+        let jj = RecordingJj::new();
+
+        struct CapturingGitHub {
+            calls: Mutex<Vec<String>>,
+            comment_bodies: Mutex<Vec<String>>,
+        }
+
+        impl Forge for CapturingGitHub {
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
+            fn create_pr(
+                &self, _o: &str, _r: &str, _t: &str, _b: &str,
+                _h: &str, _ba: &str, _draft: bool,
+            ) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
+            fn create_comment(&self, _o: &str, _r: &str, number: u64, body: &str) -> Result<IssueComment> {
+                self.calls.lock().expect("poisoned").push(format!("create_comment:#{number}"));
+                self.comment_bodies.lock().expect("poisoned").push(body.to_string());
+                Ok(IssueComment { id: 100, body: Some(body.to_string()) })
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { Ok(()) }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { Ok(()) }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { Ok(()) }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("testuser".to_string()) }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        }
+
+        let github = CapturingGitHub {
+            calls: Mutex::new(Vec::new()),
+            comment_bodies: Mutex::new(Vec::new()),
+        };
+
+        let auth_pr = PullRequest {
+            number: 1,
+            html_url: "https://github.com/o/r/pull/1".to_string(),
+            title: "auth".to_string(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+        };
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::from([("auth".to_string(), auth_pr)]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
+            // main is in all_bookmarks (the bug scenario)
+            all_bookmarks: vec![make_bookmark("main"), make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+
+        // Should only create a comment for "auth", not for "main"
+        let calls = github.calls.lock().expect("poisoned");
+        assert_eq!(calls.len(), 1, "should create exactly one comment: {calls:?}");
+        assert_eq!(calls[0], "create_comment:#1");
+
+        // The comment body should not mention "main"
+        let bodies = github.comment_bodies.lock().expect("poisoned");
+        assert!(!bodies[0].contains("`main`"), "comment should not contain main: {}", bodies[0]);
     }
 
     #[test]
