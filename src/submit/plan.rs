@@ -256,8 +256,9 @@ pub fn create_submission_plan(
                 });
             }
 
-            // Check for title drift
-            if pr.title != expected_title {
+            // Check for title drift (only for single-commit segments — multi-commit
+            // segments likely have manually curated PR titles)
+            if segment.changes.len() == 1 && pr.title != expected_title {
                 bookmarks_with_title_drift.push(TitleDrift {
                     bookmark: bookmark.clone(),
                     pr_number: pr.number,
@@ -829,6 +830,37 @@ mod tests {
 
         let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", false, false, &[], None).unwrap();
         assert!(plan.bookmarks_with_title_drift.is_empty());
+    }
+
+    #[test]
+    fn test_plan_no_title_drift_for_multi_commit_segment() {
+        let mut pr = make_pr("feature", "main");
+        pr.title = "Manually curated title".to_string();
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let mut segment = make_segment("feature", true);
+        segment.changes.push(LogEntry {
+            commit_id: "c_extra".to_string(),
+            change_id: "ch_extra".to_string(),
+            author_name: "Test".to_string(),
+            author_email: "test@test.com".to_string(),
+            description: "Earlier commit".to_string(),
+            description_first_line: "Earlier commit".to_string(),
+            parents: vec![],
+            local_bookmarks: vec![],
+            remote_bookmarks: vec![],
+            is_working_copy: false,
+        });
+        let segments = vec![segment];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", false, false, &[], None).unwrap();
+        assert!(
+            plan.bookmarks_with_title_drift.is_empty(),
+            "multi-commit segments should not report title drift"
+        );
     }
 
     #[test]
