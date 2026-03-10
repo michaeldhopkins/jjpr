@@ -61,7 +61,7 @@ pub fn generate_comment_body(entries: &[StackEntry]) -> String {
         if entry.is_current {
             body.push_str(&format!("1. **`{}` <-- this PR**\n", entry.bookmark_name));
         } else if let Some(url) = &entry.pr_url {
-            body.push_str(&format!("1. [`{}`]({})\n", entry.bookmark_name, url));
+            body.push_str(&format!("1. {url}\n"));
         } else {
             body.push_str(&format!("1. `{}`\n", entry.bookmark_name));
         }
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn test_generate_comment_body_links_other_prs() {
         let body = generate_comment_body(&sample_entries());
-        assert!(body.contains("[`auth`](https://github.com/o/r/pull/1)"));
+        assert!(body.contains("1. https://github.com/o/r/pull/1\n"));
     }
 
     #[test]
@@ -225,10 +225,10 @@ mod tests {
             is_current: false,
         }];
         let body = generate_comment_body(&entries);
-        // The name is wrapped in backticks, so markdown chars are neutralized
-        assert!(body.contains("[`[evil](https://evil.com)`]"));
-        // The injected URL does NOT become a clickable link
-        assert!(!body.contains("](https://evil.com)]\n"));
+        // Linked entries use the raw PR URL, so the bookmark name isn't rendered
+        assert!(body.contains("1. https://github.com/o/r/pull/1\n"));
+        // The injected URL does NOT appear in the output
+        assert!(!body.contains("https://evil.com"));
     }
 
     #[test]
