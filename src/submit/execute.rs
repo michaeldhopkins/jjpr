@@ -172,17 +172,29 @@ pub fn execute_submission_plan(
     }
 
     // Phase 7: Update/create stack comments on all PRs
-    if !dry_run
-        && let Err(e) = update_stack_comments(github, plan, &bookmark_to_pr)
-    {
-        eprintln!("  Warning: failed to update stack comments: {e}");
-        eprintln!("  (run `jjpr submit` again to retry)");
-    }
+    let comments_updated = if dry_run {
+        println!("  Would update stack comments");
+        0
+    } else {
+        match update_stack_comments(github, plan, &bookmark_to_pr) {
+            Ok(n) => {
+                if n > 0 {
+                    println!("  Updated stack comments on {n} {}.", if n == 1 { "PR" } else { "PRs" });
+                }
+                n
+            }
+            Err(e) => {
+                eprintln!("  Warning: failed to update stack comments: {e}");
+                eprintln!("  (run `jjpr submit` again to retry)");
+                0
+            }
+        }
+    };
 
     // Report title drift
     print_title_drift_warnings(&plan.bookmarks_with_title_drift, &plan.repo_info, fk);
 
-    if !plan.has_actions() && plan.bookmarks_already_merged.is_empty() {
+    if !plan.has_actions() && plan.bookmarks_already_merged.is_empty() && comments_updated == 0 {
         println!("  Stack is up to date.");
     }
 
@@ -233,9 +245,10 @@ fn update_stack_comments(
     github: &dyn Forge,
     plan: &SubmissionPlan,
     bookmark_to_pr: &HashMap<String, PullRequest>,
-) -> Result<()> {
+) -> Result<usize> {
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
+    let mut updated = 0;
 
     // Build the stack entries list (same for every PR, just with different "is_current")
     let entries_base: Vec<(String, Option<String>, Option<u64>)> = plan
@@ -274,13 +287,17 @@ fn update_stack_comments(
         let existing = comment::find_stack_comment(&comments);
 
         if let Some(existing_comment) = existing {
-            github.update_comment(owner, repo, existing_comment.id, &body)?;
+            if existing_comment.body.as_deref() != Some(&body) {
+                github.update_comment(owner, repo, existing_comment.id, &body)?;
+                updated += 1;
+            }
         } else {
             github.create_comment(owner, repo, pr.number, &body)?;
+            updated += 1;
         }
     }
 
-    Ok(())
+    Ok(updated)
 }
 
 #[cfg(test)]
