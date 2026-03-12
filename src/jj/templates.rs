@@ -75,9 +75,9 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
                     // Try to extract the name for a helpful message
                     let name = extract_name_from_malformed_json(line);
                     if let Some(name) = name {
-                        eprintln!("  Warning: skipping conflicted bookmark '{name}'");
-                        eprintln!("    To remove: jj bookmark forget {name} && jj git push --deleted");
-                        eprintln!("    To re-point: jj bookmark set {name} -r <commit>");
+                        eprintln!("  Warning: skipping '{name}' (already merged and removed on the forge, but the local bookmark is stale)");
+                        eprintln!("    To clean up the stale local bookmark:");
+                        eprintln!("      jj bookmark forget {name} && jj git push --deleted");
                     } else {
                         eprintln!("  Warning: skipping unparseable bookmark entry");
                     }
