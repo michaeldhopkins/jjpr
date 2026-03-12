@@ -241,6 +241,69 @@ fn report_partial_failure(completed: &[String]) {
 }
 
 /// Visible for testing only — not part of the public API.
+/// A stack entry with its merged status, used as intermediate representation.
+struct EntryData {
+    name: String,
+    url: Option<String>,
+    number: Option<u64>,
+    is_merged: bool,
+}
+
+/// Merge current entries with previous comment data so links are never lost.
+///
+/// Strategy: iterate previous items in order, replacing with current data when
+/// the bookmark still exists. Items not in current are preserved as merged.
+/// New current items not in previous are appended at the end.
+fn merge_with_previous_entries(
+    current: &[EntryData],
+    previous: &[comment::StackCommentItem],
+) -> Vec<EntryData> {
+    use std::collections::HashSet;
+
+    let current_by_name: HashMap<&str, &EntryData> = current
+        .iter()
+        .map(|e| (e.name.as_str(), e))
+        .collect();
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut result = Vec::new();
+
+    // Previous items in their original order
+    for prev in previous {
+        seen.insert(&prev.bookmark_name);
+        if let Some(cur) = current_by_name.get(prev.bookmark_name.as_str()) {
+            result.push(EntryData {
+                name: cur.name.clone(),
+                url: cur.url.clone(),
+                number: cur.number,
+                is_merged: cur.is_merged,
+            });
+        } else {
+            // Not in current segments — preserve as merged
+            result.push(EntryData {
+                name: prev.bookmark_name.clone(),
+                url: Some(prev.pr_url.clone()),
+                number: Some(prev.pr_number),
+                is_merged: true,
+            });
+        }
+    }
+
+    // Append new entries not in previous
+    for cur in current {
+        if !seen.contains(cur.name.as_str()) {
+            result.push(EntryData {
+                name: cur.name.clone(),
+                url: cur.url.clone(),
+                number: cur.number,
+                is_merged: cur.is_merged,
+            });
+        }
+    }
+
+    result
+}
+
 fn update_stack_comments(
     github: &dyn Forge,
     plan: &SubmissionPlan,
@@ -257,18 +320,33 @@ fn update_stack_comments(
         .map(|m| (m.bookmark.name.as_str(), m))
         .collect();
 
-    // Build the stack entries list (same for every PR, just with different "is_current")
-    let entries_base: Vec<(String, Option<String>, Option<u64>)> = plan
+    // Current entries from this submission's segments
+    let current_entries: Vec<EntryData> = plan
         .all_bookmarks
         .iter()
         .filter(|b| b.name != plan.default_branch)
         .map(|b| {
             if let Some(pr) = bookmark_to_pr.get(&b.name) {
-                (b.name.clone(), Some(pr.html_url.clone()), Some(pr.number))
+                EntryData {
+                    name: b.name.clone(),
+                    url: Some(pr.html_url.clone()),
+                    number: Some(pr.number),
+                    is_merged: false,
+                }
             } else if let Some(merged) = merged_prs.get(b.name.as_str()) {
-                (b.name.clone(), Some(merged.html_url.clone()), Some(merged.pr_number))
+                EntryData {
+                    name: b.name.clone(),
+                    url: Some(merged.html_url.clone()),
+                    number: Some(merged.pr_number),
+                    is_merged: true,
+                }
             } else {
-                (b.name.clone(), None, None)
+                EntryData {
+                    name: b.name.clone(),
+                    url: None,
+                    number: None,
+                    is_merged: false,
+                }
             }
         })
         .collect();
@@ -278,21 +356,30 @@ fn update_stack_comments(
             continue;
         };
 
-        let entries: Vec<StackEntry> = entries_base
+        // Fetch existing comment first so we can merge previous data
+        let comments = github.list_comments(owner, repo, pr.number)?;
+        let existing = comment::find_stack_comment(&comments);
+
+        let previous_items: Vec<comment::StackCommentItem> = existing
+            .and_then(|c| c.body.as_deref())
+            .and_then(comment::parse_comment_data)
+            .map(|d| d.stack)
+            .unwrap_or_default();
+
+        let merged = merge_with_previous_entries(&current_entries, &previous_items);
+
+        let entries: Vec<StackEntry> = merged
             .iter()
-            .map(|(name, url, number)| StackEntry {
-                bookmark_name: name.clone(),
-                pr_url: url.clone(),
-                pr_number: *number,
-                is_current: name == &bookmark.name,
+            .map(|e| StackEntry {
+                bookmark_name: e.name.clone(),
+                pr_url: e.url.clone(),
+                pr_number: e.number,
+                is_current: e.name == bookmark.name,
+                is_merged: e.is_merged,
             })
             .collect();
 
         let body = comment::generate_comment_body(&entries);
-
-        // Find existing stack comment
-        let comments = github.list_comments(owner, repo, pr.number)?;
-        let existing = comment::find_stack_comment(&comments);
 
         if let Some(existing_comment) = existing {
             if existing_comment.body.as_deref() != Some(&body) {
@@ -1376,5 +1463,103 @@ mod tests {
         // Comment creation fails, but submission should still succeed
         let result = execute_submission_plan(&jj, &CommentFailsGitHub, &plan, &[], false);
         assert!(result.is_ok(), "comment failure should not abort: {result:?}");
+    }
+
+    #[test]
+    fn test_merge_previous_entries_preserves_removed() {
+        // Previous: [A, B, C], Current: [B, C] → [A(merged), B, C]
+        let current = vec![
+            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
+            EntryData { name: "C".into(), url: Some("url_c".into()), number: Some(3), is_merged: false },
+        ];
+        let previous = vec![
+            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
+            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "url_b".into(), pr_number: 2, is_merged: false },
+            comment::StackCommentItem { bookmark_name: "C".into(), pr_url: "url_c".into(), pr_number: 3, is_merged: false },
+        ];
+
+        let result = merge_with_previous_entries(&current, &previous);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].name, "A");
+        assert!(result[0].is_merged, "A should be marked merged");
+        assert_eq!(result[1].name, "B");
+        assert!(!result[1].is_merged);
+        assert_eq!(result[2].name, "C");
+        assert!(!result[2].is_merged);
+    }
+
+    #[test]
+    fn test_merge_previous_entries_appends_new() {
+        // Previous: [A, B], Current: [B, C] → [A(merged), B, C]
+        let current = vec![
+            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
+            EntryData { name: "C".into(), url: Some("url_c".into()), number: Some(3), is_merged: false },
+        ];
+        let previous = vec![
+            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
+            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "url_b".into(), pr_number: 2, is_merged: false },
+        ];
+
+        let result = merge_with_previous_entries(&current, &previous);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].name, "A");
+        assert!(result[0].is_merged);
+        assert_eq!(result[1].name, "B");
+        assert!(!result[1].is_merged);
+        assert_eq!(result[2].name, "C");
+        assert!(!result[2].is_merged);
+    }
+
+    #[test]
+    fn test_merge_previous_entries_empty_previous() {
+        // Previous: [], Current: [A, B] → [A, B]
+        let current = vec![
+            EntryData { name: "A".into(), url: Some("url_a".into()), number: Some(1), is_merged: false },
+            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
+        ];
+
+        let result = merge_with_previous_entries(&current, &[]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "A");
+        assert_eq!(result[1].name, "B");
+    }
+
+    #[test]
+    fn test_merge_previous_entries_current_takes_precedence() {
+        // Current has updated URL for B
+        let current = vec![
+            EntryData { name: "B".into(), url: Some("new_url_b".into()), number: Some(22), is_merged: false },
+        ];
+        let previous = vec![
+            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
+            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "old_url_b".into(), pr_number: 2, is_merged: false },
+        ];
+
+        let result = merge_with_previous_entries(&current, &previous);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "A");
+        assert!(result[0].is_merged);
+        assert_eq!(result[1].name, "B");
+        assert_eq!(result[1].url.as_deref(), Some("new_url_b"));
+        assert_eq!(result[1].number, Some(22));
+        assert!(!result[1].is_merged);
+    }
+
+    #[test]
+    fn test_merge_previous_entries_no_change() {
+        // Previous: [A, B], Current: [A, B] → [A, B] (unchanged)
+        let current = vec![
+            EntryData { name: "A".into(), url: Some("url_a".into()), number: Some(1), is_merged: false },
+            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
+        ];
+        let previous = vec![
+            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
+            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "url_b".into(), pr_number: 2, is_merged: false },
+        ];
+
+        let result = merge_with_previous_entries(&current, &previous);
+        assert_eq!(result.len(), 2);
+        assert!(!result[0].is_merged);
+        assert!(!result[1].is_merged);
     }
 }
