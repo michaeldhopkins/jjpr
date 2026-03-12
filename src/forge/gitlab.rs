@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 
 use super::http::ForgeClient;
 use super::types::{
-    ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, PullRequestRef,
-    ReviewSummary,
+    ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest,
+    PullRequestRef, ReviewSummary,
 };
 use super::Forge;
 
@@ -364,6 +364,21 @@ impl Forge for GitLabForge {
         Ok(ReviewSummary {
             approved_count,
             changes_requested,
+        })
+    }
+
+    fn get_pr_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PrState> {
+        let project = Self::encode_project(owner, repo);
+        let path = format!("projects/{project}/merge_requests/{number}");
+        let mr = self.client.get(&path)?;
+        Ok(PrState {
+            merged: mr["state"].as_str() == Some("merged"),
+            state: mr["state"].as_str().unwrap_or("unknown").to_string(),
         })
     }
 

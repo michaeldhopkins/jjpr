@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use super::http::ForgeClient;
 use super::types::{
-    ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, ReviewSummary,
+    ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest, ReviewSummary,
 };
 use super::Forge;
 
@@ -291,6 +291,20 @@ impl Forge for ForgejoForge {
         let path = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
         let items = self.client.get_paginated(&path)?;
         Ok(parse_reviews(&items))
+    }
+
+    fn get_pr_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PrState> {
+        let path = format!("repos/{owner}/{repo}/pulls/{number}");
+        let pr = self.client.get(&path)?;
+        Ok(PrState {
+            merged: pr["merged"].as_bool().unwrap_or(false),
+            state: pr["state"].as_str().unwrap_or("unknown").to_string(),
+        })
     }
 
     fn get_pr_mergeability(

@@ -33,7 +33,8 @@ Requires Rust 1.88+.
 ## Usage
 
 ```
-jjpr                              # Show stack overview
+jjpr                              # Show stacks with CI/review/mergeability status
+jjpr status                       # Same as above (alias for discoverability)
 jjpr submit                       # Submit stack (inferred from working copy)
 jjpr submit <bookmark>            # Submit stack up to bookmark
 jjpr submit --dry-run             # Preview without executing
@@ -43,6 +44,7 @@ jjpr submit --draft               # Create new PRs as drafts
 jjpr submit --ready               # Mark existing draft PRs as ready
 jjpr merge                        # Merge stack from the bottom up
 jjpr merge <bookmark>             # Merge stack up to bookmark
+jjpr merge --watch                # Wait for pending CI and auto-continue
 jjpr merge --merge-method rebase  # Use rebase merge method
 jjpr merge --no-ci-check          # Merge even if CI hasn't passed
 jjpr merge --dry-run              # Preview without executing
@@ -58,11 +60,22 @@ jjpr auth setup                   # Show auth setup instructions
 
 ### Stack overview
 
-Run `jjpr` with no arguments to see your current stacks and their PR/MR status. This is read-only — it fetches the latest state but doesn't push or modify anything.
+Run `jjpr` (or `jjpr status`) with no arguments to see your current stacks and their PR/MR status. This is read-only — it fetches the latest state but doesn't push or modify anything.
+
+Each PR shows its mergeability, CI status, and review state:
 
 ```
-  auth (1 change, #42 open, needs push)
-  profile (2 changes, #41 draft, synced)
+  auth (1 change, #42 open, synced)
+    ✓ mergeable  ✓ CI passing  ✓ 1 approval
+  profile (2 changes, #43 open, needs push)
+    ✗ CI failing  ✗ 0/1 approvals  ⚠ changes requested
+```
+
+Draft PRs show a simplified status:
+
+```
+  payments (1 change, #44 draft, synced)
+    — draft
 ```
 
 When you have multiple independent stacks, they're labeled:
@@ -70,11 +83,15 @@ When you have multiple independent stacks, they're labeled:
 ```
 Stack 1:
   auth (1 change, #42 open, synced)
+    ✓ mergeable  ✓ CI passing  ✓ 1 approval
   profile (2 changes, #43 open, synced)
+    ✓ mergeable  ✓ CI passing  ✓ 1 approval
 
 Stack 2:
   payments (1 change, #44 draft, needs push)
+    — draft
   checkout (3 changes, #45 open, synced)
+    ✗ CI pending  ✗ 0/1 approvals
 ```
 
 ### Submitting a stack
@@ -133,7 +150,7 @@ The PR title is not automatically updated after creation. If you change your com
 
 If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, rebases the remaining stack onto it with `jj rebase`, pushes all remaining bookmarks, and retargets the next PR's base if needed. Then it checks the next PR and continues until blocked or done.
 
-If a PR is blocked (e.g., CI pending), jjpr reports why and stops. Run `jjpr merge` again once the blocker is resolved.
+If a PR is blocked (e.g., CI pending), jjpr reports why and stops:
 
 ```
   Skipping 'auth' — PR #42 already merged
@@ -145,7 +162,44 @@ If a PR is blocked (e.g., CI pending), jjpr reports why and stops. Run `jjpr mer
   Updating PR #44 base to 'main'...
   Blocked at 'settings' (PR #44):
     - CI checks are pending
-  Run `jjpr merge` again once the issue is resolved.
+
+Run `jjpr merge --watch` to wait for CI and auto-continue.
+```
+
+#### Watching for CI
+
+Use `--watch` to wait for transient blockers (pending CI, unknown mergeability) instead of stopping. jjpr polls every 30 seconds for up to 30 minutes. When the blocker clears, it continues merging automatically:
+
+```
+  Blocked at 'settings' (PR #44):
+    - CI checks are pending
+
+  Watching... (polling every 30s, timeout 30m)
+  ....  Ready — continuing merge.
+
+  Merging 'settings' (PR #44, squash)...
+```
+
+If a permanent blocker appears during watching (e.g., CI fails, changes requested), jjpr stops immediately.
+
+#### Retry on transient errors
+
+Merge API calls are retried automatically on transient HTTP errors (502, 503). If GitHub returns a 405 "merge already in progress", jjpr polls the PR state for up to 30 seconds to confirm the merge completed. No action needed — this is transparent.
+
+#### Divergent change IDs
+
+If a change ID is divergent (multiple commits share the same ID, typically from editing sessions), jjpr detects this before attempting the rebase and provides actionable recovery steps:
+
+```
+Error: change 'wvwowxty' is divergent (2 commits share this change ID).
+
+The merge succeeded on the forge, but the local rebase can't
+proceed because jj doesn't know which commit to rebase.
+
+To fix:
+  jj log -r 'all:wvwowxtyvsku'   # see the divergent commits
+  jj abandon <stale_commit_id>    # remove the stale one
+  jjpr merge                      # re-run to continue
 ```
 
 CLI flags override the config file: `--merge-method`, `--required-approvals`, `--no-ci-check`.

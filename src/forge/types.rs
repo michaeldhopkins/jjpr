@@ -80,6 +80,13 @@ pub struct ReviewSummary {
     pub changes_requested: bool,
 }
 
+/// Lightweight PR state for verifying merge outcomes.
+#[derive(Debug, Clone)]
+pub struct PrState {
+    pub merged: bool,
+    pub state: String,
+}
+
 /// Mergeability status from the single-PR endpoint.
 #[derive(Debug, Clone)]
 pub struct PrMergeability {

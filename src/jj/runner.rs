@@ -157,6 +157,18 @@ impl Jj for JjRunner {
         self.run_jj(&["rebase", "-s", source, "-d", destination])?;
         Ok(())
     }
+
+    fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
+        let revset = format!("all:{change_id}");
+        let output = self.run_jj(&[
+            "log", "-r", &revset, "--no-graph", "-T", r#"commit_id ++ "\n""#,
+        ])?;
+        Ok(output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect())
+    }
 }
 
 #[cfg(test)]

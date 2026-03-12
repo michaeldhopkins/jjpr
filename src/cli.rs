@@ -99,6 +99,20 @@ Examples:
         #[arg(long)]
         base: Option<String>,
     },
+    /// Show stack status with CI, review, and mergeability details
+    #[command(long_about = "\
+Show your stacks with detailed CI, review, and mergeability status.
+
+This is the same output as running `jjpr` with no arguments. The `status` \
+subcommand exists for discoverability — both forms are identical.
+
+Example output:
+    $ jjpr status
+      auth (1 change, #42 open, synced)
+        ✓ mergeable  ✓ CI passing  ✓ 1 approval
+      profile (2 changes, #43 open, needs push)
+        ✗ CI pending  ✗ 0/1 approvals")]
+    Status {},
     /// Merge a stack of PRs from the bottom up
     #[command(long_about = "\
 Merge a stack of PRs from the bottom up.
@@ -148,6 +162,13 @@ Examples:
         /// Use this flag to override (e.g., when the branch isn't pushed yet).
         #[arg(long)]
         base: Option<String>,
+
+        /// Watch for transient blockers (pending CI) and auto-continue
+        ///
+        /// When merge is blocked by pending CI checks or computing mergeability,
+        /// polls every 30 seconds and continues when ready. Times out after 30 minutes.
+        #[arg(long)]
+        watch: bool,
     },
     /// Manage forge authentication
     #[command(long_about = "\

@@ -19,6 +19,13 @@ pub enum BlockReason {
     MergeabilityUnknown,
 }
 
+impl BlockReason {
+    /// Transient reasons that may resolve without user action (worth watching).
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::ChecksPending | Self::MergeabilityUnknown)
+    }
+}
+
 /// Merge status for a single segment in the stack.
 #[derive(Debug, Clone)]
 pub enum PrMergeStatus {
@@ -197,7 +204,7 @@ pub fn create_merge_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::types::{IssueComment, PrMergeability, PullRequestRef, ReviewSummary};
+    use crate::forge::types::{IssueComment, PrMergeability, PrState, PullRequestRef, ReviewSummary};
     use crate::jj::types::{Bookmark, LogEntry};
     use std::collections::HashMap;
 
@@ -330,6 +337,9 @@ mod tests {
         fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
         fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
         fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+        fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+            Ok(PrState { merged: false, state: "open".to_string() })
+        }
     }
 
     #[test]
@@ -667,6 +677,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let segments = vec![make_segment("auth")];

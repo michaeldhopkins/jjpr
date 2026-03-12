@@ -315,7 +315,7 @@ pub fn create_submission_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, ReviewSummary};
+    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef, ReviewSummary};
     use crate::jj::types::LogEntry;
 
     struct StubGitHub {
@@ -373,6 +373,9 @@ mod tests {
         fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
         fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
         fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+            Ok(PrState { merged: false, state: "open".to_string() })
+        }
     }
 
     fn make_segment(name: &str, synced: bool) -> NarrowedSegment {
@@ -705,6 +708,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let segments = vec![
@@ -750,6 +756,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let segments = vec![make_segment("feature", false)];
@@ -802,6 +811,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         // auth is not synced but already merged — should NOT be pushed
@@ -954,6 +966,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let segments = vec![make_segment("feature", false)];
@@ -988,6 +1003,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let segments = vec![make_segment("feature", false)];
