@@ -40,8 +40,10 @@ pub const LOG_TEMPLATE: &str = concat!(
 fn extract_name_from_malformed_json(line: &str) -> Option<String> {
     // Format is always {"name":"<value>",...} — find the quoted value after "name":
     let after_key = line.split(r#""name":"#).nth(1)?;
-    let end = after_key.find('"')?;
-    Some(after_key[..end].to_string())
+    // after_key starts with `"value",...` — strip the opening quote, then find the closing one
+    let after_quote = after_key.strip_prefix('"')?;
+    let end = after_quote.find('"')?;
+    Some(after_quote[..end].to_string())
 }
 
 /// Raw bookmark JSON as returned by jj's bookmark template.
@@ -245,6 +247,17 @@ mod tests {
         let bookmarks = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1, "should skip unparseable bookmark");
         assert_eq!(bookmarks[0].name, "feat/good");
+    }
+
+    #[test]
+    fn test_extract_name_from_malformed_json() {
+        let line = r#"{"name":"feat/stale","commitId":<Error: No Commit available>}"#;
+        assert_eq!(
+            extract_name_from_malformed_json(line),
+            Some("feat/stale".to_string())
+        );
+
+        assert_eq!(extract_name_from_malformed_json("garbage"), None);
     }
 
     #[test]
