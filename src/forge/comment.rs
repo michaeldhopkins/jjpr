@@ -21,6 +21,8 @@ pub struct StackCommentItem {
     pub bookmark_name: String,
     pub pr_url: String,
     pub pr_number: u64,
+    #[serde(default)]
+    pub is_merged: bool,
 }
 
 /// Entry for rendering the stack comment.
@@ -29,12 +31,13 @@ pub struct StackEntry {
     pub pr_url: Option<String>,
     pub pr_number: Option<u64>,
     pub is_current: bool,
+    pub is_merged: bool,
 }
 
 /// Generate the body for a stack navigation comment.
 pub fn generate_comment_body(entries: &[StackEntry]) -> String {
     let data = StackCommentData {
-        version: 0,
+        version: 1,
         stack: entries
             .iter()
             .filter_map(|e| {
@@ -42,6 +45,7 @@ pub fn generate_comment_body(entries: &[StackEntry]) -> String {
                     bookmark_name: e.bookmark_name.clone(),
                     pr_url: e.pr_url.clone()?,
                     pr_number: e.pr_number?,
+                    is_merged: e.is_merged,
                 })
             })
             .collect(),
@@ -60,6 +64,18 @@ pub fn generate_comment_body(entries: &[StackEntry]) -> String {
     for entry in entries {
         if entry.is_current {
             body.push_str(&format!("1. **`{}` <-- this PR**\n", entry.bookmark_name));
+        } else if entry.is_merged {
+            if let Some(url) = &entry.pr_url {
+                body.push_str(&format!(
+                    "1. ~~[`{}`]({url})~~ :white_check_mark:\n",
+                    entry.bookmark_name
+                ));
+            } else {
+                body.push_str(&format!(
+                    "1. ~~`{}`~~ :white_check_mark:\n",
+                    entry.bookmark_name
+                ));
+            }
         } else if let Some(url) = &entry.pr_url {
             body.push_str(&format!("1. [`{}`]({url})\n", entry.bookmark_name));
         } else {
@@ -110,18 +126,21 @@ mod tests {
                 pr_url: Some("https://github.com/o/r/pull/1".to_string()),
                 pr_number: Some(1),
                 is_current: false,
+                is_merged: false,
             },
             StackEntry {
                 bookmark_name: "profile".to_string(),
                 pr_url: Some("https://github.com/o/r/pull/2".to_string()),
                 pr_number: Some(2),
                 is_current: true,
+                is_merged: false,
             },
             StackEntry {
                 bookmark_name: "settings".to_string(),
                 pr_url: None,
                 pr_number: None,
                 is_current: false,
+                is_merged: false,
             },
         ]
     }
@@ -167,10 +186,11 @@ mod tests {
     fn test_roundtrip_comment_data() {
         let body = generate_comment_body(&sample_entries());
         let data = parse_comment_data(&body).expect("should parse embedded data");
-        assert_eq!(data.version, 0);
+        assert_eq!(data.version, 1);
         assert_eq!(data.stack.len(), 2);
         assert_eq!(data.stack[0].bookmark_name, "auth");
         assert_eq!(data.stack[0].pr_number, 1);
+        assert!(!data.stack[0].is_merged);
         assert_eq!(data.stack[1].bookmark_name, "profile");
     }
 
@@ -223,6 +243,7 @@ mod tests {
             pr_url: Some("https://github.com/o/r/pull/1".to_string()),
             pr_number: Some(1),
             is_current: false,
+            is_merged: false,
         }];
         let body = generate_comment_body(&entries);
         // Bookmark name is wrapped in backticks inside the link, neutralizing markdown injection
@@ -250,6 +271,7 @@ mod tests {
                 bookmark_name: "old-bookmark".to_string(),
                 pr_url: "https://github.com/o/r/pull/1".to_string(),
                 pr_number: 1,
+                is_merged: false,
             }],
         };
         let json = serde_json::to_string(&data).unwrap();
@@ -258,5 +280,56 @@ mod tests {
 
         let parsed = parse_comment_data(&old_body).expect("should parse legacy format");
         assert_eq!(parsed.stack[0].bookmark_name, "old-bookmark");
+    }
+
+    #[test]
+    fn test_backward_compat_missing_is_merged() {
+        // Old blobs won't have is_merged — should default to false
+        let json = r#"{"version":0,"stack":[{"bookmark_name":"feat","pr_url":"https://github.com/o/r/pull/1","pr_number":1}]}"#;
+        let encoded = BASE64.encode(json.as_bytes());
+        let body = format!("<!--- JJPR_DATA: {encoded} --->");
+
+        let parsed = parse_comment_data(&body).expect("should parse old format");
+        assert!(!parsed.stack[0].is_merged, "missing is_merged should default to false");
+    }
+
+    #[test]
+    fn test_is_merged_roundtrips() {
+        let entries = vec![
+            StackEntry {
+                bookmark_name: "auth".to_string(),
+                pr_url: Some("https://github.com/o/r/pull/1".to_string()),
+                pr_number: Some(1),
+                is_current: false,
+                is_merged: true,
+            },
+            StackEntry {
+                bookmark_name: "profile".to_string(),
+                pr_url: Some("https://github.com/o/r/pull/2".to_string()),
+                pr_number: Some(2),
+                is_current: false,
+                is_merged: false,
+            },
+        ];
+        let body = generate_comment_body(&entries);
+        let data = parse_comment_data(&body).unwrap();
+        assert!(data.stack[0].is_merged);
+        assert!(!data.stack[1].is_merged);
+    }
+
+    #[test]
+    fn test_merged_entry_renders_strikethrough() {
+        let entries = vec![StackEntry {
+            bookmark_name: "auth".to_string(),
+            pr_url: Some("https://github.com/o/r/pull/1".to_string()),
+            pr_number: Some(1),
+            is_current: false,
+            is_merged: true,
+        }];
+        let body = generate_comment_body(&entries);
+        assert!(
+            body.contains("~~[`auth`](https://github.com/o/r/pull/1)~~ :white_check_mark:"),
+            "merged entry should have strikethrough and checkmark: {body}"
+        );
     }
 }
