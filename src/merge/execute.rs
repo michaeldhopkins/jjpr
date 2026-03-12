@@ -145,9 +145,12 @@ pub fn execute_merge_plan(
     let mut blocked_at = None;
     let mut skipped_merged = Vec::new();
 
-    // Before any merge, trust the upfront plan.
-    // After a merge, re-evaluate remaining segments against live GitHub state.
-    let mut pr_map: Option<HashMap<String, PullRequest>> = None;
+    // Always evaluate segments just-in-time against fresh forge state.
+    // The upfront plan.actions are only used for dry_run display.
+    let fresh_prs = github.list_open_prs(owner, repo)?;
+    let mut pr_map: Option<HashMap<String, PullRequest>> = Some(
+        crate::forge::build_pr_map(fresh_prs, owner),
+    );
 
     for (seg_idx, segment) in segments.iter().enumerate() {
         let status = if let Some(ref map) = pr_map {
@@ -765,7 +768,7 @@ mod tests {
     #[test]
     fn test_single_merge() {
         let jj = RecordingJj::new();
-        let gh = RecordingGitHub::new();
+        let gh = RecordingGitHub::new().with_evaluatable_pr("auth", 1);
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
@@ -783,10 +786,12 @@ mod tests {
         let jj = RecordingJj::new();
         // After merging auth, profile will be re-evaluated against fresh GitHub state.
         // Set up profile as open with pending CI so it blocks.
-        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
         gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
         // Profile's base points at auth (needs retargeting)
-        gh.open_prs.lock().expect("poisoned")[0]
+        gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
 
@@ -796,7 +801,6 @@ mod tests {
                     bookmark_name: "auth".to_string(),
                     pr: make_pr("auth", 1),
                 },
-                // Second action is not used after merge — re-evaluation takes over
                 PrMergeStatus::Blocked {
                     bookmark_name: "profile".to_string(),
                     pr: Some(make_pr("profile", 2)),
@@ -830,7 +834,9 @@ mod tests {
     fn test_no_retarget_when_base_already_correct() {
         let jj = RecordingJj::new();
         // Profile PR's base is already "main" (the default from make_pr)
-        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
         gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
@@ -867,7 +873,9 @@ mod tests {
     #[test]
     fn test_push_uses_plan_remote_name() {
         let jj = RecordingJj::new();
-        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
         gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
@@ -903,7 +911,8 @@ mod tests {
     #[test]
     fn test_already_merged_skipped() {
         let jj = RecordingJj::new();
-        let gh = RecordingGitHub::new();
+        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        gh.merged_prs.insert("auth".to_string(), make_pr("auth", 1));
 
         let plan = MergePlan {
             actions: vec![
@@ -936,7 +945,10 @@ mod tests {
     #[test]
     fn test_blocked_stops_execution() {
         let jj = RecordingJj::new();
-        let gh = RecordingGitHub::new();
+        let mut gh = RecordingGitHub::new().with_evaluatable_pr("auth", 1);
+        // Make auth a draft with failing CI so it blocks
+        gh.open_prs.lock().expect("poisoned")[0].draft = true;
+        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
 
         let plan = MergePlan {
             actions: vec![PrMergeStatus::Blocked {
@@ -970,7 +982,9 @@ mod tests {
             fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
                 anyhow::bail!("merge conflict detected")
             }
-            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![make_pr("auth", 1)])
+            }
             fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
             fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
@@ -981,9 +995,13 @@ mod tests {
             fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
             fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { Ok(ChecksStatus::Pass) }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                Ok(ReviewSummary { approved_count: 1, changes_requested: false })
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                Ok(PrMergeability { mergeable: Some(true), mergeable_state: "clean".to_string() })
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
                 Ok(PrState { merged: false, state: "open".to_string() })
             }
@@ -1213,7 +1231,9 @@ mod tests {
     #[test]
     fn test_merge_with_stack_base_retargets_to_base() {
         let jj = RecordingJj::new();
-        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
         gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
         // Profile's base still points at auth (needs retarget to coworker-feat, not main)
         gh.open_prs.lock().expect("poisoned")[0]
@@ -1464,6 +1484,45 @@ mod tests {
         assert!(!BlockReason::Conflicted.is_transient());
         assert!(
             !BlockReason::InsufficientApprovals { have: 0, need: 1 }.is_transient()
+        );
+    }
+
+    #[test]
+    fn test_stale_plan_does_not_merge_when_ci_now_failing() {
+        // The upfront plan says auth is Mergeable (captured when CI was passing).
+        // But by execution time, CI has started failing on the forge.
+        // The execution should re-evaluate and block — NOT trust the stale plan.
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new().with_evaluatable_pr("auth", 1);
+        // Simulate CI failing between plan creation and execution
+        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
+
+        let plan = make_plan_single_mergeable("auth", 1);
+        let segments = vec![make_segment("auth")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+
+        // Should NOT have merged — CI is failing
+        assert!(
+            result.merged.is_empty(),
+            "should not merge when CI is now failing: {:?}",
+            gh.calls()
+        );
+        assert!(
+            result.blocked_at.is_some(),
+            "should be blocked by failing CI"
+        );
+        let blocked = result.blocked_at.unwrap();
+        assert!(
+            blocked.reasons.contains(&BlockReason::ChecksFailing),
+            "block reason should be ChecksFailing, got: {:?}",
+            blocked.reasons
+        );
+        // merge_pr should never have been called
+        assert!(
+            !gh.calls().iter().any(|c| c.starts_with("merge_pr")),
+            "merge_pr should not be called when CI is failing: {:?}",
+            gh.calls()
         );
     }
 }
