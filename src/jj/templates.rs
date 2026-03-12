@@ -33,6 +33,17 @@ pub const LOG_TEMPLATE: &str = concat!(
     r#" ++ '}' ++ "\n""#,
 );
 
+/// Best-effort name extraction from malformed bookmark JSON.
+///
+/// The `"name"` field is always a valid quoted string (it's the bookmark name,
+/// not commit-dependent), so we can extract it even when the rest is broken.
+fn extract_name_from_malformed_json(line: &str) -> Option<String> {
+    // Format is always {"name":"<value>",...} — find the quoted value after "name":
+    let after_key = line.split(r#""name":"#).nth(1)?;
+    let end = after_key.find('"')?;
+    Some(after_key[..end].to_string())
+}
+
 /// Raw bookmark JSON as returned by jj's bookmark template.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +72,15 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
             let raw: RawBookmark = match serde_json::from_str(line) {
                 Ok(r) => r,
                 Err(_) => {
-                    eprintln!("  Warning: skipping unparseable bookmark: {line}");
+                    // Try to extract the name for a helpful message
+                    let name = extract_name_from_malformed_json(line);
+                    if let Some(name) = name {
+                        eprintln!("  Warning: skipping conflicted bookmark '{name}'");
+                        eprintln!("    To remove: jj bookmark forget {name} && jj git push --deleted");
+                        eprintln!("    To re-point: jj bookmark set {name} -r <commit>");
+                    } else {
+                        eprintln!("  Warning: skipping unparseable bookmark entry");
+                    }
                     return None;
                 }
             };
