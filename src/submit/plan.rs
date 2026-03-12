@@ -52,6 +52,7 @@ pub struct TitleDrift {
 pub struct MergedBookmark {
     pub bookmark: Bookmark,
     pub pr_number: u64,
+    pub html_url: String,
 }
 
 /// The full submission plan.
@@ -214,6 +215,7 @@ pub fn create_submission_plan(
                     bookmarks_already_merged.push(MergedBookmark {
                         bookmark: bookmark.clone(),
                         pr_number: merged_pr.number,
+                        html_url: merged_pr.html_url,
                     });
                     continue;
                 }
