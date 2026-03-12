@@ -105,6 +105,7 @@ mod tests {
                 local_bookmarks: vec![bookmark_name.to_string()],
                 remote_bookmarks: vec![],
                 is_working_copy: false,
+                conflict: false,
             }],
             merge_source_names: vec![],
         }
@@ -214,6 +215,7 @@ mod tests {
             local_bookmarks: vec![],
             remote_bookmarks: vec![],
             is_working_copy: false,
+            conflict: false,
         }
     }
 

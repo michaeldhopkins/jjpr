@@ -179,6 +179,21 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     let interactive = std::io::stdout().is_terminal();
     let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
 
+    // Pre-flight: check for conflicted commits before attempting any pushes
+    let conflicted: Vec<_> = segments.iter()
+        .flat_map(|seg| seg.changes.iter().filter(|c| c.conflict)
+            .map(|c| (seg.bookmark.name.as_str(), c.change_id.as_str(), c.description_first_line.as_str())))
+        .collect();
+    if !conflicted.is_empty() {
+        eprintln!("Error: cannot push — some commits have unresolved conflicts:\n");
+        for (bookmark, change_id, desc) in &conflicted {
+            eprintln!("  {change_id} ({bookmark}): {desc}");
+        }
+        eprintln!();
+        eprintln!("To resolve: jj edit <change_id>, fix the conflicts, then re-run jjpr submit.");
+        anyhow::bail!("unresolved conflicts in stack");
+    }
+
     let stack_base = opts.base_override.or(analysis.base_branch.as_deref());
     let submission_plan = plan::create_submission_plan(
         forge.as_ref(),

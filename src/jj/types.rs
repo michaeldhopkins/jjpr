@@ -13,6 +13,7 @@ pub struct LogEntry {
     pub local_bookmarks: Vec<String>,
     pub remote_bookmarks: Vec<String>,
     pub is_working_copy: bool,
+    pub conflict: bool,
 }
 
 /// A bookmark pointing at a specific change.

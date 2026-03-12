@@ -225,6 +225,7 @@ mod tests {
             local_bookmarks: vec![],
             remote_bookmarks: vec![],
             is_working_copy: false,
+            conflict: false,
         }
     }
 

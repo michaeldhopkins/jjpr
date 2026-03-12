@@ -265,6 +265,7 @@ mod tests {
             local_bookmarks: bookmarks.into_iter().map(|s| s.to_string()).collect(),
             remote_bookmarks: vec![],
             is_working_copy: false,
+            conflict: false,
         }
     }
 

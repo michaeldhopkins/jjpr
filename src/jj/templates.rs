@@ -30,6 +30,7 @@ pub const LOG_TEMPLATE: &str = concat!(
     r#" ++ ',"localBookmarks":[' ++ local_bookmarks.map(|b| b.name().escape_json()).join(',') ++ ']'"#,
     r#" ++ ',"remoteBookmarks":[' ++ remote_bookmarks.map(|b| stringify(b.name() ++ "@" ++ b.remote()).escape_json()).join(',') ++ ']'"#,
     r#" ++ ',"isWorkingCopy":' ++ if(current_working_copy, '"true"', '"false"')"#,
+    r#" ++ ',"conflict":' ++ if(conflict, '"true"', '"false"')"#,
     r#" ++ '}' ++ "\n""#,
 );
 
@@ -77,7 +78,7 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
                     // Try to extract the name for a helpful message
                     let name = extract_name_from_malformed_json(line);
                     if let Some(name) = name {
-                        eprintln!("  Warning: skipping '{name}' (already merged and removed on the forge, but the local bookmark is stale)");
+                        eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit — typically after a squash merge on the forge)");
                         eprintln!("    To clean up the stale local bookmark:");
                         eprintln!("      jj bookmark forget {name} && jj git push --deleted");
                     } else {
@@ -131,6 +132,7 @@ struct RawLogEntry {
     local_bookmarks: Vec<String>,
     remote_bookmarks: Vec<String>,
     is_working_copy: String,
+    conflict: String,
 }
 
 /// Parse `jj log` output into `LogEntry` values.
@@ -162,6 +164,7 @@ pub fn parse_log_output(output: &str) -> Result<Vec<LogEntry>> {
                     .filter(|b| !b.is_empty())
                     .collect(),
                 is_working_copy: raw.is_working_copy == "true",
+                conflict: raw.conflict == "true",
             })
         })
         .collect()
@@ -268,18 +271,26 @@ mod tests {
 
     #[test]
     fn test_parse_log_entry() {
-        let output = r#"{"commitId":"abc123","changeId":"xyz789","authorName":"Alice","authorEmail":"alice@example.com","description":"Add feature\n\nDetailed description","descriptionFirstLine":"Add feature","parents":["def456"],"localBookmarks":["feature"],"remoteBookmarks":[],"isWorkingCopy":"false"}"#;
+        let output = r#"{"commitId":"abc123","changeId":"xyz789","authorName":"Alice","authorEmail":"alice@example.com","description":"Add feature\n\nDetailed description","descriptionFirstLine":"Add feature","parents":["def456"],"localBookmarks":["feature"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false"}"#;
         let entries = parse_log_output(output).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].commit_id, "abc123");
         assert_eq!(entries[0].description_first_line, "Add feature");
         assert_eq!(entries[0].parents, vec!["def456"]);
         assert!(!entries[0].is_working_copy);
+        assert!(!entries[0].conflict);
+    }
+
+    #[test]
+    fn test_parse_log_conflicted_commit() {
+        let output = r#"{"commitId":"abc","changeId":"xyz","authorName":"A","authorEmail":"a@b","description":"conflict","descriptionFirstLine":"conflict","parents":["p1"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"true"}"#;
+        let entries = parse_log_output(output).unwrap();
+        assert!(entries[0].conflict);
     }
 
     #[test]
     fn test_parse_log_working_copy() {
-        let output = r#"{"commitId":"abc","changeId":"xyz","authorName":"A","authorEmail":"a@b","description":"wip","descriptionFirstLine":"wip","parents":["p1"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"true"}"#;
+        let output = r#"{"commitId":"abc","changeId":"xyz","authorName":"A","authorEmail":"a@b","description":"wip","descriptionFirstLine":"wip","parents":["p1"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"true","conflict":"false"}"#;
         let entries = parse_log_output(output).unwrap();
         assert!(entries[0].is_working_copy);
         assert!(entries[0].local_bookmarks.is_empty());
@@ -287,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_parse_log_merge_commit() {
-        let output = r#"{"commitId":"abc","changeId":"xyz","authorName":"A","authorEmail":"a@b","description":"merge","descriptionFirstLine":"merge","parents":["p1","p2"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"false"}"#;
+        let output = r#"{"commitId":"abc","changeId":"xyz","authorName":"A","authorEmail":"a@b","description":"merge","descriptionFirstLine":"merge","parents":["p1","p2"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false"}"#;
         let entries = parse_log_output(output).unwrap();
         assert_eq!(entries[0].parents.len(), 2);
     }
@@ -301,9 +312,9 @@ mod tests {
     #[test]
     fn test_parse_log_multiple_entries() {
         let output = concat!(
-            r#"{"commitId":"a","changeId":"1","authorName":"A","authorEmail":"a@b","description":"first","descriptionFirstLine":"first","parents":["root"],"localBookmarks":["feat-a"],"remoteBookmarks":[],"isWorkingCopy":"false"}"#,
+            r#"{"commitId":"a","changeId":"1","authorName":"A","authorEmail":"a@b","description":"first","descriptionFirstLine":"first","parents":["root"],"localBookmarks":["feat-a"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false"}"#,
             "\n",
-            r#"{"commitId":"b","changeId":"2","authorName":"B","authorEmail":"b@c","description":"second","descriptionFirstLine":"second","parents":["a"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"true"}"#,
+            r#"{"commitId":"b","changeId":"2","authorName":"B","authorEmail":"b@c","description":"second","descriptionFirstLine":"second","parents":["a"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"true","conflict":"false"}"#,
             "\n",
         );
         let entries = parse_log_output(output).unwrap();

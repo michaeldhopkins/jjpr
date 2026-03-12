@@ -122,6 +122,18 @@ jjpr auto-detects when your stack is based on someone else's branch. If a commit
 
 Use `--base <branch>` on `submit` or `merge` to override auto-detection — for example, when the coworker hasn't pushed yet, or when you want to target a specific branch.
 
+### Conflicts
+
+Before pushing, jjpr checks for unresolved conflicts in your stack. If any commits have conflicts (e.g., from a rebase that couldn't auto-resolve), jjpr reports which commits are affected and stops:
+
+```
+Error: cannot push — some commits have unresolved conflicts:
+
+  pnnmmvmu (feat/deferment-roles): add Billings::DueDatePolicy specs
+
+To resolve: jj edit pnnmmvmu, fix the conflicts, then re-run jjpr submit.
+```
+
 ### Draft PRs
 
 Use `--draft` to create new PRs as drafts. Existing PRs are not affected.
