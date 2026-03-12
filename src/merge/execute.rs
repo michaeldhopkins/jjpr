@@ -12,47 +12,49 @@ use crate::jj::Jj;
 
 use super::plan::{evaluate_segment, BlockReason, MergePlan, PrMergeStatus};
 
-/// Post-merge reconciliation: fetch, check divergence, rebase, push, retarget.
+/// Attempt to synchronize local state after a forge merge.
 ///
-/// Called after every successful merge (both normal and watch paths) when
-/// there are remaining segments in the stack.
-fn reconcile_after_merge(
+/// Returns warnings for any local failures (fetch, divergence, rebase, push)
+/// instead of propagating errors. An empty vec means full success.
+fn reconcile_local_state(
     jj: &dyn Jj,
-    forge: &dyn Forge,
     segments: &[NarrowedSegment],
     seg_idx: usize,
-    owner: &str,
-    repo: &str,
     effective_base: &str,
     remote_name: &str,
-    fk: ForgeKind,
-) -> Result<HashMap<String, PullRequest>> {
+) -> Vec<LocalDivergenceWarning> {
+    let mut warnings = Vec::new();
+
     println!("  Fetching remotes...");
-    jj.git_fetch().context("failed to fetch after merge")?;
+    if let Err(e) = jj.git_fetch() {
+        eprintln!("  Warning: failed to fetch: {e}");
+        warnings.push(LocalDivergenceWarning {
+            message: format!("Failed to fetch remotes: {e}"),
+        });
+        return warnings;
+    }
 
     let next_segment = &segments[seg_idx + 1];
     let next_change_id = &next_segment.bookmark.change_id;
 
-    // Check for divergent change IDs before rebasing
     match jj.resolve_change_id(next_change_id) {
         Ok(ref commit_ids) if commit_ids.len() > 1 => {
             let short_id = &next_change_id[..next_change_id.len().min(12)];
             let count = commit_ids.len();
-            anyhow::bail!(
-                "change '{short_id}' is divergent ({count} commits share this change ID).\n\n\
-                 The merge succeeded on the forge, but the local rebase can't\n\
-                 proceed because jj doesn't know which commit to rebase.\n\n\
-                 To fix:\n  \
-                   jj log -r 'all:{next_change_id}'   # see the divergent commits\n  \
-                   jj abandon <stale_commit_id>        # remove the stale one\n  \
-                   jjpr merge                          # re-run to continue",
-            );
+            warnings.push(LocalDivergenceWarning {
+                message: format!(
+                    "Change '{short_id}' is divergent ({count} commits share this change ID)"
+                ),
+            });
+            return warnings;
         }
         Ok(commit_ids) if commit_ids.is_empty() => {
-            anyhow::bail!(
-                "change ID '{next_change_id}' not found in the local repository.\n\
-                 The merge succeeded on the forge but the local state is out of sync."
-            );
+            warnings.push(LocalDivergenceWarning {
+                message: format!(
+                    "Change ID '{next_change_id}' not found locally"
+                ),
+            });
+            return warnings;
         }
         Err(e) => {
             eprintln!("  Warning: could not verify change ID: {e}");
@@ -61,20 +63,42 @@ fn reconcile_after_merge(
     }
 
     println!("  Rebasing remaining stack onto {effective_base}...");
-    jj.rebase_onto(next_change_id, effective_base)
-        .context("failed to rebase remaining stack")?;
+    if let Err(e) = jj.rebase_onto(next_change_id, effective_base) {
+        eprintln!("  Warning: rebase failed: {e}");
+        warnings.push(LocalDivergenceWarning {
+            message: format!("Failed to rebase remaining stack: {e}"),
+        });
+        return warnings;
+    }
 
     for seg in &segments[seg_idx + 1..] {
         println!("  Pushing '{}'...", seg.bookmark.name);
-        jj.push_bookmark(&seg.bookmark.name, remote_name)
-            .with_context(|| format!("failed to push '{}'", seg.bookmark.name))?;
+        if let Err(e) = jj.push_bookmark(&seg.bookmark.name, remote_name) {
+            eprintln!("  Warning: failed to push '{}': {e}", seg.bookmark.name);
+            warnings.push(LocalDivergenceWarning {
+                message: format!("Failed to push '{}': {e}", seg.bookmark.name),
+            });
+        }
     }
 
-    // Refresh PR state after merge
+    warnings
+}
+
+/// Refresh PR state from forge and retarget the next PR's base if needed.
+///
+/// Independent of local state — runs even when local reconciliation failed.
+fn reconcile_forge_state(
+    forge: &dyn Forge,
+    segments: &[NarrowedSegment],
+    seg_idx: usize,
+    owner: &str,
+    repo: &str,
+    effective_base: &str,
+    fk: ForgeKind,
+) -> Result<HashMap<String, PullRequest>> {
     let fresh_prs = forge.list_open_prs(owner, repo)?;
     let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
 
-    // Retarget next PR if its base still points at the merged branch
     let next_name = &segments[seg_idx + 1].bookmark.name;
     if let Some(next_pr) = fresh_map.get(next_name)
         && next_pr.base.ref_name != effective_base
@@ -87,6 +111,37 @@ fn reconcile_after_merge(
     }
 
     Ok(fresh_map)
+}
+
+/// Run both local and forge reconciliation after a successful merge.
+///
+/// Shared by the normal merge path and the watch-mode path to avoid duplication.
+fn reconcile_after_merge(
+    jj: &dyn Jj,
+    forge: &dyn Forge,
+    segments: &[NarrowedSegment],
+    seg_idx: usize,
+    plan: &MergePlan,
+    fk: ForgeKind,
+    local_degraded: &mut bool,
+    local_warnings: &mut Vec<LocalDivergenceWarning>,
+) -> Result<HashMap<String, PullRequest>> {
+    let owner = &plan.repo_info.owner;
+    let repo = &plan.repo_info.repo;
+    let effective_base = plan.stack_base.as_deref().unwrap_or(&plan.default_branch);
+
+    if !*local_degraded {
+        let warnings = reconcile_local_state(
+            jj, segments, seg_idx, effective_base, &plan.remote_name,
+        );
+        if !warnings.is_empty() {
+            *local_degraded = true;
+            local_warnings.extend(warnings);
+        }
+    } else {
+        println!("  Skipping local sync (local state already diverged)");
+    }
+    reconcile_forge_state(forge, segments, seg_idx, owner, repo, effective_base, fk)
 }
 
 /// A PR that was successfully merged.
@@ -112,12 +167,19 @@ pub struct SkippedMergedPr {
     pub pr_number: u64,
 }
 
+/// A warning about local state being out of sync with the forge.
+#[derive(Debug)]
+pub struct LocalDivergenceWarning {
+    pub message: String,
+}
+
 /// Result of executing a merge plan.
 #[derive(Debug)]
 pub struct MergeResult {
     pub merged: Vec<MergedPr>,
     pub blocked_at: Option<BlockedPr>,
     pub skipped_merged: Vec<SkippedMergedPr>,
+    pub local_warnings: Vec<LocalDivergenceWarning>,
 }
 
 /// Execute the merge plan: merge PRs, fetch, rebase, push, retarget bases.
@@ -138,12 +200,13 @@ pub fn execute_merge_plan(
 
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
-    let effective_base = plan.stack_base.as_deref().unwrap_or(&plan.default_branch);
     let fk = plan.forge_kind;
 
     let mut merged = Vec::new();
     let mut blocked_at = None;
     let mut skipped_merged = Vec::new();
+    let mut local_warnings: Vec<LocalDivergenceWarning> = Vec::new();
+    let mut local_degraded = false;
 
     // Always evaluate segments just-in-time against fresh forge state.
     // The upfront plan.actions are only used for dry_run display.
@@ -204,8 +267,8 @@ pub fn execute_merge_plan(
 
                 if seg_idx + 1 < segments.len() {
                     let fresh_map = reconcile_after_merge(
-                        jj, github, segments, seg_idx, owner, repo,
-                        effective_base, &plan.remote_name, fk,
+                        jj, github, segments, seg_idx, plan, fk,
+                        &mut local_degraded, &mut local_warnings,
                     )?;
                     pr_map = Some(fresh_map);
                 }
@@ -320,8 +383,8 @@ pub fn execute_merge_plan(
                         }
                         if resolved && seg_idx + 1 < segments.len() {
                             let fresh_map = reconcile_after_merge(
-                                jj, github, segments, seg_idx, owner, repo,
-                                effective_base, &plan.remote_name, fk,
+                                jj, github, segments, seg_idx, plan, fk,
+                                &mut local_degraded, &mut local_warnings,
                             )?;
                             pr_map = Some(fresh_map);
                         }
@@ -345,6 +408,7 @@ pub fn execute_merge_plan(
         merged,
         blocked_at,
         skipped_merged,
+        local_warnings,
     })
 }
 
@@ -476,6 +540,7 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
         merged,
         blocked_at,
         skipped_merged,
+        local_warnings: vec![],
     })
 }
 
@@ -728,6 +793,39 @@ mod tests {
         }
     }
 
+    /// Jj stub where push_bookmark always fails (simulates conflicted commits).
+    struct FailingPushJj {
+        calls: Mutex<Vec<String>>,
+    }
+    impl FailingPushJj {
+        fn new() -> Self {
+            Self { calls: Mutex::new(Vec::new()) }
+        }
+    }
+    impl Jj for FailingPushJj {
+        fn git_fetch(&self) -> Result<()> {
+            self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+            Ok(())
+        }
+        fn push_bookmark(&self, name: &str, _remote: &str) -> Result<()> {
+            self.calls.lock().expect("poisoned").push(format!("push:{name}"));
+            anyhow::bail!("jj git push failed: conflicted commits")
+        }
+        fn rebase_onto(&self, source: &str, dest: &str) -> Result<()> {
+            self.calls.lock().expect("poisoned").push(format!("rebase:{source}:{dest}"));
+            Ok(())
+        }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+        fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+        fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+        fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
+            self.calls.lock().expect("poisoned").push(format!("resolve:{change_id}"));
+            Ok(vec!["dummy".to_string()])
+        }
+    }
+
     fn default_options() -> MergeOptions {
         MergeOptions {
             merge_method: MergeMethod::Squash,
@@ -828,6 +926,9 @@ mod tests {
 
         // Should retarget profile PR from auth → main
         assert!(gh.calls().iter().any(|c| c == "update_base:#2:main"));
+
+        // Happy path: no local warnings
+        assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
     }
 
     #[test]
@@ -860,7 +961,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         // Should NOT call update_base since it's already "main"
         assert!(
@@ -868,6 +969,7 @@ mod tests {
             "should not retarget when base is already correct: {:?}",
             gh.calls()
         );
+        assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
     }
 
     #[test]
@@ -899,13 +1001,14 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert!(
             jj.calls().iter().any(|c| c == "push:profile:upstream"),
             "should push to the remote from the plan, not hardcoded origin: {:?}",
             jj.calls()
         );
+        assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
     }
 
     #[test]
@@ -1465,12 +1568,18 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let err = execute_merge_plan(&DivergentJj, &gh, &plan, &segments, false, false).unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(msg.contains("divergent"), "should mention divergence: {msg}");
-        assert!(msg.contains("2 commits"), "should mention count: {msg}");
-        // The merge of auth should have succeeded (merge_pr was called)
+        let result = execute_merge_plan(&DivergentJj, &gh, &plan, &segments, false, false).unwrap();
+
+        // Both PRs should merge on the forge despite local divergence
+        assert_eq!(result.merged.len(), 2, "both PRs should merge: {:?}", result.merged);
         assert!(gh.calls().iter().any(|c| c == "merge_pr:#1:squash"));
+        assert!(gh.calls().iter().any(|c| c == "merge_pr:#2:squash"));
+
+        // Should report divergence as a local warning, not an error
+        assert!(
+            result.local_warnings.iter().any(|w| w.message.contains("divergent")),
+            "should warn about divergence: {:?}", result.local_warnings
+        );
     }
 
     #[test]
@@ -1524,5 +1633,206 @@ mod tests {
             "merge_pr should not be called when CI is failing: {:?}",
             gh.calls()
         );
+    }
+
+    #[test]
+    fn test_push_failure_continues_merging() {
+        // When push_bookmark fails (e.g., conflicted commits from local divergence),
+        // jjpr should continue merging remaining PRs on the forge and report
+        // local warnings instead of hard-failing.
+        let jj = FailingPushJj::new();
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2)
+            .with_evaluatable_pr("settings", 3);
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "settings".to_string(),
+                    pr: make_pr("settings", 3),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![
+            make_segment("auth"),
+            make_segment("profile"),
+            make_segment("settings"),
+        ];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+
+        // All 3 PRs should have been merged on the forge
+        assert_eq!(
+            result.merged.len(), 3,
+            "all PRs should merge despite push failure: merged={:?}, blocked={:?}",
+            result.merged, result.blocked_at
+        );
+        assert!(gh.calls().iter().any(|c| c == "merge_pr:#1:squash"));
+        assert!(gh.calls().iter().any(|c| c == "merge_pr:#2:squash"));
+        assert!(gh.calls().iter().any(|c| c == "merge_pr:#3:squash"));
+
+        // Should have local warnings about push failures
+        assert!(
+            !result.local_warnings.is_empty(),
+            "should report local warnings for push failures"
+        );
+    }
+
+    #[test]
+    fn test_rebase_failure_continues_merging() {
+        struct FailingRebaseJj;
+        impl Jj for FailingRebaseJj {
+            fn git_fetch(&self) -> Result<()> { Ok(()) }
+            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+                anyhow::bail!("rebase failed: conflict")
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+                Ok(vec!["dummy".to_string()])
+            }
+        }
+
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&FailingRebaseJj, &gh, &plan, &segments, false, false).unwrap();
+
+        assert_eq!(result.merged.len(), 2);
+        assert!(result.local_warnings.iter().any(|w| w.message.contains("rebase")));
+    }
+
+    #[test]
+    fn test_degraded_skips_subsequent_local_ops() {
+        // After first reconciliation fails, subsequent ones should skip local ops.
+        let jj = FailingPushJj::new();
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2)
+            .with_evaluatable_pr("settings", 3);
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "settings".to_string(),
+                    pr: make_pr("settings", 3),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![
+            make_segment("auth"),
+            make_segment("profile"),
+            make_segment("settings"),
+        ];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        assert_eq!(result.merged.len(), 3);
+
+        // Should only have attempted fetch+rebase+push once (for the first reconciliation).
+        // The second reconciliation should be skipped entirely.
+        let jj_calls = jj.calls.lock().expect("poisoned");
+        let fetch_count = jj_calls.iter().filter(|c| *c == "git_fetch").count();
+        assert_eq!(fetch_count, 1, "should only fetch once, not twice: {jj_calls:?}");
+    }
+
+    #[test]
+    fn test_forge_retarget_still_runs_when_degraded() {
+        let jj = FailingPushJj::new();
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        // Profile's base points at auth (needs retargeting to main after auth merges)
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+
+        // Both should merge despite push failure
+        assert_eq!(result.merged.len(), 2);
+
+        // Forge retarget should still happen
+        assert!(
+            gh.calls().iter().any(|c| c == "update_base:#2:main"),
+            "should retarget profile PR even when local is degraded: {:?}",
+            gh.calls()
+        );
+
+        // Should have local warnings
+        assert!(!result.local_warnings.is_empty());
     }
 }

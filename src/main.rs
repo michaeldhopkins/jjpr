@@ -511,6 +511,40 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
     }
 
+    if !result.local_warnings.is_empty() {
+        println!();
+        println!("Note: local state is out of sync with the forge:");
+        for w in &result.local_warnings {
+            println!("  {}", w.message);
+        }
+
+        // Collect unmerged bookmarks for concrete recovery instructions
+        let merged_names: std::collections::HashSet<&str> = result.merged.iter()
+            .map(|m| m.bookmark_name.as_str())
+            .chain(result.skipped_merged.iter().map(|s| s.bookmark_name.as_str()))
+            .collect();
+        let unmerged: Vec<_> = segments.iter()
+            .filter(|s| !merged_names.contains(s.bookmark.name.as_str()))
+            .collect();
+
+        println!();
+        println!("To accept the forge state (discard local divergence):");
+        println!("  jj git fetch");
+        for seg in &unmerged {
+            println!("  jj bookmark set {} -r {}@origin", seg.bookmark.name, seg.bookmark.name);
+        }
+
+        if let Some(first_unmerged) = unmerged.first() {
+            println!();
+            println!("Or to fix local state and push it to the forge:");
+            let base = stack_base.unwrap_or(&default_branch);
+            println!("  jj git fetch && jj rebase -s {} -d {base}",
+                first_unmerged.bookmark.change_id);
+            println!("  # resolve any conflicts, then:");
+            println!("  jjpr submit");
+        }
+    }
+
     Ok(())
 }
 

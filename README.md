@@ -186,21 +186,35 @@ If a permanent blocker appears during watching (e.g., CI fails, changes requeste
 
 Merge API calls are retried automatically on transient HTTP errors (502, 503). If GitHub returns a 405 "merge already in progress", jjpr polls the PR state for up to 30 seconds to confirm the merge completed. No action needed — this is transparent.
 
-#### Divergent change IDs
+#### Local divergence
 
-If a change ID is divergent (multiple commits share the same ID, typically from editing sessions), jjpr detects this before attempting the rebase and provides actionable recovery steps:
+If your local commits have diverged from the remote (e.g., after a local `jj rebase`), jjpr continues merging PRs on the forge and reports local issues at the end:
 
 ```
-Error: change 'wvwowxty' is divergent (2 commits share this change ID).
+  Merging 'auth' (#42, squash)...
+  Fetching remotes...
+  Rebasing remaining stack onto main...
+  Pushing 'profile'...
+  Warning: failed to push 'profile': conflicted commits
+  Skipping local sync (local state already diverged)
+  Merging 'profile' (#43, squash)...
 
-The merge succeeded on the forge, but the local rebase can't
-proceed because jj doesn't know which commit to rebase.
+Done — 2 PRs merged.
 
-To fix:
-  jj log -r 'all:wvwowxtyvsku'   # see the divergent commits
-  jj abandon <stale_commit_id>    # remove the stale one
-  jjpr merge                      # re-run to continue
+Note: local state is out of sync with the forge:
+  Failed to push 'profile': conflicted commits
+
+To accept the forge state (discard local divergence):
+  jj git fetch
+  jj bookmark set profile -r profile@origin
+
+Or to fix local state and push it to the forge:
+  jj git fetch && jj rebase -s kpqxywzy -d main
+  # resolve any conflicts, then:
+  jjpr submit
 ```
+
+Divergent change IDs (multiple commits sharing the same ID, typically from editing sessions) are also handled as local warnings rather than fatal errors. jjpr merges on the forge and reports the divergence for you to resolve locally.
 
 CLI flags override the config file: `--merge-method`, `--required-approvals`, `--no-ci-check`.
 
