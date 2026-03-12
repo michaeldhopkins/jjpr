@@ -62,8 +62,17 @@ fn reconcile_local_state(
         _ => {}
     }
 
+    // Rebase from the oldest commit in the next segment — not the bookmark tip.
+    // changes is ordered newest-first, so .last() is the oldest (closest to the
+    // just-merged bookmark). Using the tip would orphan intermediate commits.
+    let rebase_root = next_segment
+        .changes
+        .last()
+        .map(|c| c.change_id.as_str())
+        .unwrap_or(next_change_id);
+
     println!("  Rebasing remaining stack onto {effective_base}...");
-    if let Err(e) = jj.rebase_onto(next_change_id, effective_base) {
+    if let Err(e) = jj.rebase_onto(rebase_root, effective_base) {
         eprintln!("  Warning: rebase failed: {e}");
         warnings.push(LocalDivergenceWarning {
             message: format!("Failed to rebase remaining stack: {e}"),
@@ -930,6 +939,111 @@ mod tests {
 
         // Happy path: no local warnings
         assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+    }
+
+    #[test]
+    fn test_rebase_uses_oldest_commit_in_segment() {
+        // When a segment has multiple commits (e.g., 3 commits between two bookmarks),
+        // the rebase must start from the oldest commit (closest to the merged bookmark),
+        // not the bookmark tip. Otherwise intermediate commits are orphaned.
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+
+        // Profile segment has 3 commits: tip (bookmark) + 2 intermediate.
+        // changes is newest-first, so: [tip, middle, oldest]
+        let profile_segment = NarrowedSegment {
+            bookmark: Bookmark {
+                name: "profile".to_string(),
+                commit_id: "c_profile".to_string(),
+                change_id: "ch_profile".to_string(),
+                has_remote: true,
+                is_synced: true,
+            },
+            changes: vec![
+                LogEntry {
+                    commit_id: "c_profile".to_string(),
+                    change_id: "ch_profile".to_string(),
+                    author_name: "Test".to_string(),
+                    author_email: "test@test.com".to_string(),
+                    description: "Add profile UI".to_string(),
+                    description_first_line: "Add profile UI".to_string(),
+                    parents: vec!["c_middle".to_string()],
+                    local_bookmarks: vec!["profile".to_string()],
+                    remote_bookmarks: vec![],
+                    is_working_copy: false,
+                    conflict: false,
+                },
+                LogEntry {
+                    commit_id: "c_middle".to_string(),
+                    change_id: "ch_middle".to_string(),
+                    author_name: "Test".to_string(),
+                    author_email: "test@test.com".to_string(),
+                    description: "Add profile helpers".to_string(),
+                    description_first_line: "Add profile helpers".to_string(),
+                    parents: vec!["c_oldest".to_string()],
+                    local_bookmarks: vec![],
+                    remote_bookmarks: vec![],
+                    is_working_copy: false,
+                    conflict: false,
+                },
+                LogEntry {
+                    commit_id: "c_oldest".to_string(),
+                    change_id: "ch_oldest".to_string(),
+                    author_name: "Test".to_string(),
+                    author_email: "test@test.com".to_string(),
+                    description: "Add profile model".to_string(),
+                    description_first_line: "Add profile model".to_string(),
+                    parents: vec!["c_auth".to_string()],
+                    local_bookmarks: vec![],
+                    remote_bookmarks: vec![],
+                    is_working_copy: false,
+                    conflict: false,
+                },
+            ],
+            merge_source_names: vec![],
+        };
+        let segments = vec![make_segment("auth"), profile_segment];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        assert_eq!(result.merged.len(), 1);
+
+        // Must rebase from ch_oldest (the first commit after auth), NOT ch_profile (the tip).
+        // Rebasing from the tip would orphan c_middle and c_oldest.
+        let jj_calls = jj.calls();
+        assert!(
+            jj_calls.iter().any(|c| c == "rebase:ch_oldest:main"),
+            "should rebase from oldest commit in segment, got: {jj_calls:?}"
+        );
+        assert!(
+            !jj_calls.iter().any(|c| c == "rebase:ch_profile:main"),
+            "should NOT rebase from bookmark tip: {jj_calls:?}"
+        );
     }
 
     #[test]
