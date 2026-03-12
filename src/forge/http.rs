@@ -1,8 +1,33 @@
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
 use ureq::http;
+
+/// Structured HTTP error preserving status code for caller matching.
+#[derive(Debug)]
+pub struct HttpError {
+    pub status: u16,
+    pub method: String,
+    pub path: String,
+    pub body: String,
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} {} failed (HTTP {}): {}",
+            self.method,
+            self.path,
+            self.status,
+            truncate_body(&self.body, 500)
+        )
+    }
+}
+
+impl std::error::Error for HttpError {}
 
 /// How pagination works for a given forge.
 #[derive(Debug, Clone, Copy)]
@@ -94,7 +119,12 @@ impl ForgeClient {
         if status >= 400 {
             let body = resp.body_mut().read_to_string()
                 .unwrap_or_else(|_| String::from("<unreadable>"));
-            anyhow::bail!("GET {path} failed (HTTP {status}): {}", truncate_body(&body, 500));
+            return Err(HttpError {
+                status,
+                method: "GET".to_string(),
+                path: path.to_string(),
+                body,
+            }.into());
         }
 
         resp.body_mut().read_json()
@@ -143,7 +173,12 @@ impl ForgeClient {
         if status >= 400 {
             let resp_body = resp.body_mut().read_to_string()
                 .unwrap_or_else(|_| String::from("<unreadable>"));
-            anyhow::bail!("{method} {path} failed (HTTP {status}): {}", truncate_body(&resp_body, 500));
+            return Err(HttpError {
+                status,
+                method: method.to_string(),
+                path: path.to_string(),
+                body: resp_body,
+            }.into());
         }
 
         // Some endpoints return 204 No Content or empty body on success
@@ -187,7 +222,12 @@ impl ForgeClient {
             if status >= 400 {
                 let body = resp.body_mut().read_to_string()
                     .unwrap_or_else(|_| String::from("<unreadable>"));
-                anyhow::bail!("GET {path} failed (HTTP {status}): {}", truncate_body(&body, 500));
+                return Err(HttpError {
+                    status,
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    body,
+                }.into());
             }
 
             let next = extract_next_link(&resp);

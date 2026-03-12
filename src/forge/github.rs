@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 
 use super::http::ForgeClient;
-use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, ReviewSummary};
+use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest, ReviewSummary};
 use super::Forge;
 
 /// GitHub implementation using direct HTTP via `ForgeClient`.
@@ -287,6 +287,20 @@ impl Forge for GitHubForge {
         let path = format!("repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100");
         let items = self.client.get_paginated(&path)?;
         Ok(parse_review_summary(&items))
+    }
+
+    fn get_pr_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PrState> {
+        let path = format!("repos/{owner}/{repo}/pulls/{number}");
+        let pr = self.client.get(&path)?;
+        Ok(PrState {
+            merged: pr["merged_at"].is_string(),
+            state: pr["state"].as_str().unwrap_or("unknown").to_string(),
+        })
     }
 
     fn get_pr_mergeability(

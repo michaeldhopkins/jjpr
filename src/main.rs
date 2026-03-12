@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
 use jjpr::config;
 use jjpr::forge::remote;
-use jjpr::forge::types::{MergeMethod, PullRequest, RepoInfo};
+use jjpr::forge::types::{ChecksStatus, MergeMethod, PrMergeability, PullRequest, RepoInfo, ReviewSummary};
 use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
 use jjpr::forge::token as forge_token;
 use jjpr::graph::change_graph;
@@ -52,6 +52,7 @@ fn main() -> Result<()> {
                 base_override: base.as_deref(),
             })
         }
+        Some(Commands::Status { .. }) => cmd_stack_overview(cli.no_fetch),
         Some(Commands::Merge {
             bookmark,
             merge_method,
@@ -59,6 +60,7 @@ fn main() -> Result<()> {
             no_ci_check,
             remote,
             base,
+            watch,
         }) => {
             let ci_override = if no_ci_check { Some(false) } else { None };
             cmd_merge(
@@ -69,6 +71,7 @@ fn main() -> Result<()> {
                     ci_pass_override: ci_override,
                     preferred_remote: remote.as_deref(),
                     base_override: base.as_deref(),
+                    watch,
                 },
                 cli.dry_run,
                 cli.no_fetch,
@@ -217,8 +220,29 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     }
 
     // Try to resolve forge remote for PR info
-    let (forge_kind, pr_info) = try_load_pr_info(&jj, &cfg, &graph)
-        .unwrap_or((ForgeKind::GitHub, HashMap::new()));
+    let info = try_load_pr_info(&jj, &cfg, &graph).unwrap_or(PrInfoResult {
+        forge_kind: ForgeKind::GitHub,
+        pr_map: HashMap::new(),
+        forge: None,
+        repo_info: None,
+    });
+
+    // Fetch status for each PR that has forge access
+    let mut status_map: HashMap<String, SegmentDisplayStatus> = HashMap::new();
+    if let (Some(forge), Some(repo_info)) = (&info.forge, &info.repo_info) {
+        for stack in &graph.stacks {
+            for segment in &stack.segments {
+                if let Some(bookmark) = segment.bookmarks.first()
+                    && let Some(pr) = info.pr_map.get(&bookmark.name)
+                {
+                    status_map.insert(
+                        bookmark.name.clone(),
+                        fetch_segment_status(forge.as_ref(), repo_info, pr),
+                    );
+                }
+            }
+        }
+    }
 
     let multi = graph.stacks.len() > 1;
     for (i, stack) in graph.stacks.iter().enumerate() {
@@ -242,10 +266,10 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
             let pr_label = segment
                 .bookmarks
                 .first()
-                .and_then(|b| pr_info.get(&b.name))
+                .and_then(|b| info.pr_map.get(&b.name))
                 .map(|pr| {
                     let state = if pr.draft { "draft" } else { "open" };
-                    format!(", {} {state}", forge_kind.format_ref(pr.number))
+                    format!(", {} {state}", info.forge_kind.format_ref(pr.number))
                 })
                 .unwrap_or_default();
 
@@ -264,6 +288,17 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
                 pr_label,
                 sync_status
             );
+
+            // Show status details if available
+            if let Some(bookmark) = segment.bookmarks.first()
+                && let Some(pr) = info.pr_map.get(&bookmark.name)
+                && let Some(status) = status_map.get(&bookmark.name)
+            {
+                let line = format_status_line(status, pr.draft);
+                if !line.is_empty() {
+                    println!("{line}");
+                }
+            }
         }
         if let Some(base) = &stack.base_branch {
             println!("  (based on {base})");
@@ -273,11 +308,18 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     Ok(())
 }
 
+struct PrInfoResult {
+    forge_kind: ForgeKind,
+    pr_map: HashMap<String, PullRequest>,
+    forge: Option<Box<dyn Forge>>,
+    repo_info: Option<RepoInfo>,
+}
+
 fn try_load_pr_info(
     jj: &dyn Jj,
     cfg: &config::Config,
     graph: &change_graph::ChangeGraph,
-) -> Option<(ForgeKind, HashMap<String, PullRequest>)> {
+) -> Option<PrInfoResult> {
     let remotes = jj.get_git_remotes().ok()?;
     let resolved = resolve_forge(&remotes, cfg, None).ok()?;
     let ResolvedForge { forge, kind, repo_info, .. } = resolved;
@@ -288,11 +330,87 @@ fn try_load_pr_info(
             if !graph.stacks.is_empty() && forge.get_authenticated_user().is_err() {
                 eprintln!("hint: run `jjpr auth test` to check authentication for stack overview");
             }
-            return Some((kind, HashMap::new()));
+            return Some(PrInfoResult {
+                forge_kind: kind,
+                pr_map: HashMap::new(),
+                forge: None,
+                repo_info: None,
+            });
         }
     };
 
-    Some((kind, jjpr::forge::build_pr_map(all_prs, &repo_info.owner)))
+    let pr_map = jjpr::forge::build_pr_map(all_prs, &repo_info.owner);
+    Some(PrInfoResult {
+        forge_kind: kind,
+        pr_map,
+        forge: Some(forge),
+        repo_info: Some(repo_info),
+    })
+}
+
+struct SegmentDisplayStatus {
+    mergeability: Option<PrMergeability>,
+    checks: Option<ChecksStatus>,
+    reviews: Option<ReviewSummary>,
+}
+
+fn fetch_segment_status(
+    forge: &dyn Forge,
+    repo_info: &RepoInfo,
+    pr: &PullRequest,
+) -> SegmentDisplayStatus {
+    let mergeability = forge
+        .get_pr_mergeability(&repo_info.owner, &repo_info.repo, pr.number)
+        .ok();
+    let checks = forge
+        .get_pr_checks_status(&repo_info.owner, &repo_info.repo, &pr.head.ref_name)
+        .ok();
+    let reviews = forge
+        .get_pr_reviews(&repo_info.owner, &repo_info.repo, pr.number)
+        .ok();
+    SegmentDisplayStatus { mergeability, checks, reviews }
+}
+
+fn format_status_line(status: &SegmentDisplayStatus, is_draft: bool) -> String {
+    if is_draft {
+        return "    \u{2014} draft".to_string();
+    }
+
+    let mut parts = Vec::new();
+
+    if let Some(m) = &status.mergeability {
+        match m.mergeable {
+            Some(true) => parts.push("\u{2713} mergeable".to_string()),
+            Some(false) => parts.push("\u{2717} conflicts".to_string()),
+            None => parts.push("\u{2014} mergeability computing".to_string()),
+        }
+    }
+
+    if let Some(checks) = &status.checks {
+        match checks {
+            ChecksStatus::Pass => parts.push("\u{2713} CI passing".to_string()),
+            ChecksStatus::Fail => parts.push("\u{2717} CI failing".to_string()),
+            ChecksStatus::Pending => parts.push("\u{2717} CI pending".to_string()),
+            ChecksStatus::None => {}
+        }
+    }
+
+    if let Some(r) = &status.reviews {
+        if r.changes_requested {
+            parts.push("\u{26a0} changes requested".to_string());
+        }
+        parts.push(format!(
+            "{} {} approval{}",
+            if r.approved_count > 0 { "\u{2713}" } else { "\u{2717}" },
+            r.approved_count,
+            if r.approved_count == 1 { "" } else { "s" },
+        ));
+    }
+
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("    {}", parts.join("  "))
 }
 
 struct MergeArgs<'a> {
@@ -303,6 +421,7 @@ struct MergeArgs<'a> {
     ci_pass_override: Option<bool>,
     preferred_remote: Option<&'a str>,
     base_override: Option<&'a str>,
+    watch: bool,
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
@@ -371,13 +490,21 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     let result = merge::execute::execute_merge_plan(
-        &jj, forge.as_ref(), &merge_plan, &segments, dry_run,
+        &jj, forge.as_ref(), &merge_plan, &segments, dry_run, args.watch,
     )?;
 
     if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
         println!("\nNo PRs to merge in this stack.");
-    } else if result.blocked_at.is_some() {
-        println!("\nRun `jjpr merge` again once the issue is resolved.");
+    } else if let Some(ref blocked) = result.blocked_at {
+        if blocked.reasons.iter().all(|r| r.is_transient()) {
+            if args.watch {
+                println!("\nWatch timed out. Run `jjpr merge --watch` to resume waiting.");
+            } else {
+                println!("\nRun `jjpr merge --watch` to wait for CI and auto-continue.");
+            }
+        } else {
+            println!("\nRun `jjpr merge` again once the issue is resolved.");
+        }
     } else if result.merged.is_empty() && !result.skipped_merged.is_empty() {
         println!("\nAll PRs in this stack are already merged.");
     } else {

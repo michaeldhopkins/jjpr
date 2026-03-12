@@ -1,13 +1,93 @@
+use std::collections::HashMap;
+use std::thread;
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 
-use std::collections::HashMap;
-
-use crate::forge::types::PullRequest;
+use crate::forge::http::HttpError;
+use crate::forge::types::{MergeMethod, PullRequest};
 use crate::forge::{Forge, ForgeKind};
 use crate::jj::types::NarrowedSegment;
 use crate::jj::Jj;
 
 use super::plan::{evaluate_segment, BlockReason, MergePlan, PrMergeStatus};
+
+/// Post-merge reconciliation: fetch, check divergence, rebase, push, retarget.
+///
+/// Called after every successful merge (both normal and watch paths) when
+/// there are remaining segments in the stack.
+fn reconcile_after_merge(
+    jj: &dyn Jj,
+    forge: &dyn Forge,
+    segments: &[NarrowedSegment],
+    seg_idx: usize,
+    owner: &str,
+    repo: &str,
+    effective_base: &str,
+    remote_name: &str,
+    fk: ForgeKind,
+) -> Result<HashMap<String, PullRequest>> {
+    println!("  Fetching remotes...");
+    jj.git_fetch().context("failed to fetch after merge")?;
+
+    let next_segment = &segments[seg_idx + 1];
+    let next_change_id = &next_segment.bookmark.change_id;
+
+    // Check for divergent change IDs before rebasing
+    match jj.resolve_change_id(next_change_id) {
+        Ok(ref commit_ids) if commit_ids.len() > 1 => {
+            let short_id = &next_change_id[..next_change_id.len().min(12)];
+            let count = commit_ids.len();
+            anyhow::bail!(
+                "change '{short_id}' is divergent ({count} commits share this change ID).\n\n\
+                 The merge succeeded on the forge, but the local rebase can't\n\
+                 proceed because jj doesn't know which commit to rebase.\n\n\
+                 To fix:\n  \
+                   jj log -r 'all:{next_change_id}'   # see the divergent commits\n  \
+                   jj abandon <stale_commit_id>        # remove the stale one\n  \
+                   jjpr merge                          # re-run to continue",
+            );
+        }
+        Ok(commit_ids) if commit_ids.is_empty() => {
+            anyhow::bail!(
+                "change ID '{next_change_id}' not found in the local repository.\n\
+                 The merge succeeded on the forge but the local state is out of sync."
+            );
+        }
+        Err(e) => {
+            eprintln!("  Warning: could not verify change ID: {e}");
+        }
+        _ => {}
+    }
+
+    println!("  Rebasing remaining stack onto {effective_base}...");
+    jj.rebase_onto(next_change_id, effective_base)
+        .context("failed to rebase remaining stack")?;
+
+    for seg in &segments[seg_idx + 1..] {
+        println!("  Pushing '{}'...", seg.bookmark.name);
+        jj.push_bookmark(&seg.bookmark.name, remote_name)
+            .with_context(|| format!("failed to push '{}'", seg.bookmark.name))?;
+    }
+
+    // Refresh PR state after merge
+    let fresh_prs = forge.list_open_prs(owner, repo)?;
+    let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
+
+    // Retarget next PR if its base still points at the merged branch
+    let next_name = &segments[seg_idx + 1].bookmark.name;
+    if let Some(next_pr) = fresh_map.get(next_name)
+        && next_pr.base.ref_name != effective_base
+    {
+        println!(
+            "  Updating {} base to '{effective_base}'...",
+            fk.format_ref(next_pr.number)
+        );
+        forge.update_pr_base(owner, repo, next_pr.number, effective_base)?;
+    }
+
+    Ok(fresh_map)
+}
 
 /// A PR that was successfully merged.
 #[derive(Debug)]
@@ -50,6 +130,7 @@ pub fn execute_merge_plan(
     plan: &MergePlan,
     segments: &[NarrowedSegment],
     dry_run: bool,
+    watch: bool,
 ) -> Result<MergeResult> {
     if dry_run {
         return execute_dry_run(plan);
@@ -105,11 +186,12 @@ pub fn execute_merge_plan(
                 );
                 println!("    {}", pr.html_url);
 
-                github
-                    .merge_pr(owner, repo, pr.number, plan.options.merge_method)
-                    .with_context(|| {
-                        format!("failed to merge {} for '{bookmark_name}'", fk.format_ref(pr.number))
-                    })?;
+                merge_with_retry(
+                    github, owner, repo, pr.number, plan.options.merge_method, fk,
+                )
+                .with_context(|| {
+                    format!("failed to merge {} for '{bookmark_name}'", fk.format_ref(pr.number))
+                })?;
 
                 merged.push(MergedPr {
                     bookmark_name,
@@ -117,50 +199,11 @@ pub fn execute_merge_plan(
                     html_url: pr.html_url.clone(),
                 });
 
-                let has_remaining = seg_idx + 1 < segments.len();
-                if has_remaining {
-                    println!("  Fetching remotes...");
-                    jj.git_fetch().context("failed to fetch after merge")?;
-
-                    let next_segment = &segments[seg_idx + 1];
-                    println!(
-                        "  Rebasing remaining stack onto {effective_base}..."
-                    );
-                    jj.rebase_onto(
-                        &next_segment.bookmark.change_id,
-                        effective_base,
-                    )
-                    .context("failed to rebase remaining stack")?;
-
-                    for seg in &segments[seg_idx + 1..] {
-                        println!("  Pushing '{}'...", seg.bookmark.name);
-                        jj.push_bookmark(&seg.bookmark.name, &plan.remote_name)
-                            .with_context(|| {
-                                format!("failed to push '{}'", seg.bookmark.name)
-                            })?;
-                    }
-
-                    // Refresh PR state from GitHub after merge
-                    let fresh_prs = github.list_open_prs(owner, repo)?;
-                    let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
-
-                    // Retarget next PR if its base still points at the merged branch
-                    let next_name = &segments[seg_idx + 1].bookmark.name;
-                    if let Some(next_pr) = fresh_map.get(next_name)
-                        && next_pr.base.ref_name != effective_base
-                    {
-                        println!(
-                            "  Updating {} base to '{effective_base}'...",
-                            fk.format_ref(next_pr.number)
-                        );
-                        github.update_pr_base(
-                            owner,
-                            repo,
-                            next_pr.number,
-                            effective_base,
-                        )?;
-                    }
-
+                if seg_idx + 1 < segments.len() {
+                    let fresh_map = reconcile_after_merge(
+                        jj, github, segments, seg_idx, owner, repo,
+                        effective_base, &plan.remote_name, fk,
+                    )?;
                     pr_map = Some(fresh_map);
                 }
             }
@@ -179,11 +222,117 @@ pub fn execute_merge_plan(
                     println!("    - {}", format_block_reason(reason, fk));
                 }
 
-                blocked_at = Some(BlockedPr {
-                    bookmark_name,
-                    pr_number: pr.as_ref().map(|p| p.number),
-                    reasons,
-                });
+                // Watch mode: poll transient blockers until resolved or timeout
+                if watch && reasons.iter().all(|r| r.is_transient()) {
+                    // Build a fresh PR map if we don't have one yet (first segment)
+                    let watch_map = if let Some(ref map) = pr_map {
+                        map.clone()
+                    } else {
+                        let fresh_prs = github.list_open_prs(owner, repo)?;
+                        crate::forge::build_pr_map(fresh_prs, owner)
+                    };
+                    {
+                        println!("\n  Watching... (polling every 30s, timeout 30m)");
+                        let deadline = Instant::now() + Duration::from_secs(30 * 60);
+                        let mut resolved = false;
+                        while Instant::now() < deadline {
+                            thread::sleep(Duration::from_secs(30));
+                            match evaluate_segment(
+                                github,
+                                &bookmark_name,
+                                &plan.repo_info,
+                                &watch_map,
+                                &plan.options,
+                            ) {
+                                Ok(PrMergeStatus::Mergeable { bookmark_name: bm, pr: p }) => {
+                                    println!("  Ready \u{2014} continuing merge.");
+                                    // Re-inject as mergeable and let the outer loop handle it
+                                    // For simplicity, just do the merge inline here
+                                    println!(
+                                        "\n  Merging '{bm}' ({}, {})...",
+                                        fk.format_ref(p.number), plan.options.merge_method
+                                    );
+                                    println!("    {}", p.html_url);
+                                    merge_with_retry(
+                                        github, owner, repo, p.number, plan.options.merge_method, fk,
+                                    )
+                                    .with_context(|| {
+                                        format!("failed to merge {} for '{bm}'", fk.format_ref(p.number))
+                                    })?;
+                                    merged.push(MergedPr {
+                                        bookmark_name: bm,
+                                        pr_number: p.number,
+                                        html_url: p.html_url.clone(),
+                                    });
+                                    resolved = true;
+                                    break;
+                                }
+                                Ok(PrMergeStatus::Blocked { reasons: new_reasons, .. })
+                                    if new_reasons.iter().all(|r| r.is_transient()) =>
+                                {
+                                    print!(".");
+                                    use std::io::Write;
+                                    std::io::stdout().flush().ok();
+                                    continue;
+                                }
+                                Ok(PrMergeStatus::Blocked { reasons: new_reasons, pr: new_pr, bookmark_name: bm }) => {
+                                    println!("\n  Blocked at '{bm}' (no longer transient):");
+                                    for reason in &new_reasons {
+                                        println!("    - {}", format_block_reason(reason, fk));
+                                    }
+                                    blocked_at = Some(BlockedPr {
+                                        bookmark_name: bm,
+                                        pr_number: new_pr.as_ref().map(|p| p.number),
+                                        reasons: new_reasons,
+                                    });
+                                    break;
+                                }
+                                Ok(PrMergeStatus::AlreadyMerged { bookmark_name: bm, pr_number: pn }) => {
+                                    println!("\n  '{bm}' was merged externally.");
+                                    skipped_merged.push(SkippedMergedPr {
+                                        bookmark_name: bm,
+                                        pr_number: pn,
+                                    });
+                                    resolved = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("\n  Watch poll error: {e}");
+                                    blocked_at = Some(BlockedPr {
+                                        bookmark_name: bookmark_name.clone(),
+                                        pr_number: pr.as_ref().map(|p| p.number),
+                                        reasons: reasons.clone(),
+                                    });
+                                    break;
+                                }
+                            }
+                        }
+                        if !resolved && blocked_at.is_none() {
+                            println!("\n  Watch timed out after 30 minutes.");
+                            blocked_at = Some(BlockedPr {
+                                bookmark_name,
+                                pr_number: pr.as_ref().map(|p| p.number),
+                                reasons,
+                            });
+                        }
+                        if resolved && seg_idx + 1 < segments.len() {
+                            let fresh_map = reconcile_after_merge(
+                                jj, github, segments, seg_idx, owner, repo,
+                                effective_base, &plan.remote_name, fk,
+                            )?;
+                            pr_map = Some(fresh_map);
+                        }
+                        if resolved {
+                            continue;
+                        }
+                    }
+                } else {
+                    blocked_at = Some(BlockedPr {
+                        bookmark_name,
+                        pr_number: pr.as_ref().map(|p| p.number),
+                        reasons,
+                    });
+                }
                 break;
             }
         }
@@ -194,6 +343,75 @@ pub fn execute_merge_plan(
         blocked_at,
         skipped_merged,
     })
+}
+
+/// Attempt to merge a PR with retry logic for transient HTTP errors.
+///
+/// Handles:
+/// - 502/503: transient server errors — verify state, then retry
+/// - 405 "already in progress": GitHub is processing — poll until merged
+/// - Other errors: propagate immediately
+fn merge_with_retry(
+    forge: &dyn Forge,
+    owner: &str,
+    repo: &str,
+    number: u64,
+    method: MergeMethod,
+    fk: ForgeKind,
+) -> Result<()> {
+    const MAX_ATTEMPTS: u32 = 3;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match forge.merge_pr(owner, repo, number, method) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if let Some(http_err) = e.downcast_ref::<HttpError>() {
+                    match http_err.status {
+                        502 | 503 => {
+                            let wait = Duration::from_secs(2 * (attempt as u64 + 1));
+                            println!(
+                                "    Merge returned HTTP {}, verifying state...",
+                                http_err.status
+                            );
+                            thread::sleep(wait);
+                            if let Ok(state) = forge.get_pr_state(owner, repo, number)
+                                && state.merged
+                            {
+                                println!("    {} was merged despite the error.", fk.format_ref(number));
+                                return Ok(());
+                            }
+                            if attempt + 1 < MAX_ATTEMPTS {
+                                println!("    Retrying...");
+                            }
+                            continue;
+                        }
+                        405 if http_err.body.contains("already in progress") => {
+                            println!("    Merge already in progress, waiting...");
+                            for _ in 0..10 {
+                                thread::sleep(Duration::from_secs(3));
+                                if let Ok(state) = forge.get_pr_state(owner, repo, number)
+                                    && state.merged
+                                {
+                                    println!("    {} merged successfully.", fk.format_ref(number));
+                                    return Ok(());
+                                }
+                            }
+                            anyhow::bail!(
+                                "merge of {} still in progress after 30s — check the forge manually",
+                                fk.format_ref(number)
+                            );
+                        }
+                        _ => return Err(e),
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    anyhow::bail!(
+        "merge of {} failed after {MAX_ATTEMPTS} attempts",
+        fk.format_ref(number)
+    );
 }
 
 fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
@@ -285,8 +503,8 @@ mod tests {
     use super::*;
     use crate::forge::ForgeKind;
     use crate::forge::types::{
-        ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequest, PullRequestRef,
-        RepoInfo, ReviewSummary,
+        ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest,
+        PullRequestRef, RepoInfo, ReviewSummary,
     };
     use crate::jj::types::{Bookmark, GitRemote, LogEntry};
     use crate::merge::plan::MergeOptions;
@@ -461,6 +679,10 @@ mod tests {
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
         fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
         fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+        fn get_pr_state(&self, _o: &str, _r: &str, n: u64) -> Result<PrState> {
+            self.calls.lock().expect("poisoned").push(format!("get_pr_state:#{n}"));
+            Ok(PrState { merged: false, state: "open".to_string() })
+        }
     }
 
     struct RecordingJj {
@@ -497,6 +719,10 @@ mod tests {
         fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
         fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
         fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+        fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
+            self.calls.lock().expect("poisoned").push(format!("resolve_change_id:{change_id}"));
+            Ok(vec!["dummy_commit_id".to_string()])
+        }
     }
 
     fn default_options() -> MergeOptions {
@@ -529,7 +755,7 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, true).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, true, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert!(jj.calls().is_empty());
@@ -543,7 +769,7 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert_eq!(result.merged[0].pr_number, 1);
@@ -586,7 +812,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert!(result.blocked_at.is_some());
@@ -628,7 +854,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         // Should NOT call update_base since it's already "main"
         assert!(
@@ -665,7 +891,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert!(
             jj.calls().iter().any(|c| c == "push:profile:upstream"),
@@ -699,7 +925,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert_eq!(result.skipped_merged.len(), 1);
         assert_eq!(result.skipped_merged[0].pr_number, 1);
@@ -727,7 +953,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert!(result.merged.is_empty());
         assert!(result.blocked_at.is_some());
@@ -758,13 +984,16 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let jj = RecordingJj::new();
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let err = execute_merge_plan(&jj, &FailingMergeGitHub, &plan, &segments, false).unwrap_err();
+        let err = execute_merge_plan(&jj, &FailingMergeGitHub, &plan, &segments, false, false).unwrap_err();
         assert!(format!("{err:#}").contains("merge conflict detected"));
     }
 
@@ -796,7 +1025,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert_eq!(result.merged.len(), 2);
         let gh_calls = gh.calls();
@@ -840,7 +1069,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert_eq!(result.merged.len(), 3);
         assert!(result.blocked_at.is_none());
@@ -908,7 +1137,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert_eq!(result.merged[0].bookmark_name, "auth");
@@ -958,7 +1187,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         // Auth should be merged
         assert_eq!(result.merged.len(), 1);
@@ -1012,7 +1241,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         // Should rebase onto coworker-feat, not main
         assert!(
@@ -1049,5 +1278,192 @@ mod tests {
         let fk = ForgeKind::GitLab;
         assert_eq!(format_block_reason(&BlockReason::NoPr, fk), "No MR exists for this bookmark");
         assert_eq!(format_block_reason(&BlockReason::Draft, fk), "MR is still a draft");
+    }
+
+    #[test]
+    fn test_merge_retry_on_502_then_verified_merged() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct RetryGitHub {
+            attempt: AtomicU32,
+        }
+        impl Forge for RetryGitHub {
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                let n = self.attempt.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    Err(crate::forge::http::HttpError {
+                        status: 502,
+                        method: "PUT".to_string(),
+                        path: "repos/o/r/pulls/1/merge".to_string(),
+                        body: "Bad Gateway".to_string(),
+                    }.into())
+                } else {
+                    Ok(())
+                }
+            }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        }
+
+        let result = merge_with_retry(
+            &RetryGitHub { attempt: AtomicU32::new(0) },
+            "o", "r", 1, MergeMethod::Squash, ForgeKind::GitHub,
+        );
+        assert!(result.is_ok(), "should succeed after retry: {result:?}");
+    }
+
+    #[test]
+    fn test_merge_retry_on_405_already_in_progress_verified_merged() {
+        struct AlreadyInProgressGitHub;
+        impl Forge for AlreadyInProgressGitHub {
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                Err(crate::forge::http::HttpError {
+                    status: 405,
+                    method: "PUT".to_string(),
+                    path: "repos/o/r/pulls/1/merge".to_string(),
+                    body: r#"{"message":"Merge already in progress"}"#.to_string(),
+                }.into())
+            }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: true, state: "closed".to_string() })
+            }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        }
+
+        let result = merge_with_retry(
+            &AlreadyInProgressGitHub,
+            "o", "r", 1, MergeMethod::Squash, ForgeKind::GitHub,
+        );
+        assert!(result.is_ok(), "should succeed when state shows merged: {result:?}");
+    }
+
+    #[test]
+    fn test_merge_no_retry_on_400() {
+        struct BadRequestGitHub;
+        impl Forge for BadRequestGitHub {
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                Err(crate::forge::http::HttpError {
+                    status: 400,
+                    method: "PUT".to_string(),
+                    path: "repos/o/r/pulls/1/merge".to_string(),
+                    body: "Bad request".to_string(),
+                }.into())
+            }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        }
+
+        let result = merge_with_retry(
+            &BadRequestGitHub,
+            "o", "r", 1, MergeMethod::Squash, ForgeKind::GitHub,
+        );
+        assert!(result.is_err(), "should fail immediately on 400");
+    }
+
+    #[test]
+    fn test_divergent_change_id_detected() {
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+
+        // RecordingJj that returns 2 commit IDs for resolve_change_id
+        struct DivergentJj;
+        impl Jj for DivergentJj {
+            fn git_fetch(&self) -> Result<()> { Ok(()) }
+            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+                Ok(vec!["commit_a".to_string(), "commit_b".to_string()])
+            }
+        }
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let err = execute_merge_plan(&DivergentJj, &gh, &plan, &segments, false, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("divergent"), "should mention divergence: {msg}");
+        assert!(msg.contains("2 commits"), "should mention count: {msg}");
+        // The merge of auth should have succeeded (merge_pr was called)
+        assert!(gh.calls().iter().any(|c| c == "merge_pr:#1:squash"));
+    }
+
+    #[test]
+    fn test_block_reason_is_transient() {
+        assert!(BlockReason::ChecksPending.is_transient());
+        assert!(BlockReason::MergeabilityUnknown.is_transient());
+        assert!(!BlockReason::Draft.is_transient());
+        assert!(!BlockReason::NoPr.is_transient());
+        assert!(!BlockReason::ChecksFailing.is_transient());
+        assert!(!BlockReason::ChangesRequested.is_transient());
+        assert!(!BlockReason::Conflicted.is_transient());
+        assert!(
+            !BlockReason::InsufficientApprovals { have: 0, need: 1 }.is_transient()
+        );
     }
 }

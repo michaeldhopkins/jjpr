@@ -209,6 +209,13 @@ pub trait Forge: Send + Sync {
         repo: &str,
         number: u64,
     ) -> Result<PrMergeability>;
+
+    fn get_pr_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<PrState>;
 }
 
 #[cfg(test)]

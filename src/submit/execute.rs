@@ -306,7 +306,7 @@ mod tests {
 
     use super::*;
     use crate::forge::ForgeKind;
-    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PullRequestRef, RepoInfo, ReviewSummary};
+    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef, RepoInfo, ReviewSummary};
     use crate::jj::types::{Bookmark, GitRemote, LogEntry};
     use crate::jj::Jj;
 
@@ -428,6 +428,9 @@ mod tests {
         fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
         fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
         fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+            Ok(PrState { merged: false, state: "open".to_string() })
+        }
     }
 
     struct RecordingJj {
@@ -470,6 +473,9 @@ mod tests {
             Ok("wc_commit".to_string())
         }
         fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+            Ok(vec!["dummy_commit_id".to_string()])
+        }
     }
 
     fn make_bookmark(name: &str) -> Bookmark {
@@ -656,6 +662,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let github = GitHubWithExistingComment {
@@ -934,6 +943,9 @@ mod tests {
             }
             fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
             fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
+            fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+                Ok(vec!["dummy_commit_id".to_string()])
+            }
         }
 
         let github = RecordingGitHub::new();
@@ -1098,6 +1110,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let github = CapturingGitHub {
@@ -1221,6 +1236,9 @@ mod tests {
             fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
         }
 
         let existing_pr = PullRequest {
