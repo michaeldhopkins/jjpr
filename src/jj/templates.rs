@@ -54,10 +54,17 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
     output
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let raw: RawBookmark =
-                serde_json::from_str(line)
-                    .with_context(|| format!("failed to parse bookmark JSON: {line}"))?;
+        .filter_map(|line| {
+            // Conflicted or stale bookmarks produce unparseable JSON
+            // (e.g., `<Error: No Commit available>` for missing commits).
+            // Skip them — they're not relevant to current stack operations.
+            let raw: RawBookmark = match serde_json::from_str(line) {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("  Warning: skipping unparseable bookmark: {line}");
+                    return None;
+                }
+            };
 
             let non_git_remotes: Vec<&String> = raw
                 .remote_bookmarks
@@ -73,18 +80,18 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
                 .iter()
                 .any(|rb| rb.starts_with(&format!("{}@", raw.name)));
 
-            Ok((raw.local_bookmarks.is_empty(), Bookmark {
+            // Skip remote-only entries
+            if raw.local_bookmarks.is_empty() {
+                return None;
+            }
+
+            Some(Ok(Bookmark {
                 name: raw.name,
                 commit_id: raw.commit_id,
                 change_id: raw.change_id,
                 has_remote,
                 is_synced,
             }))
-        })
-        .filter_map(|result| match result {
-            Ok((true, _)) => None, // Skip remote-only entries
-            Ok((false, bookmark)) => Some(Ok(bookmark)),
-            Err(e) => Some(Err(e)),
         })
         .collect()
 }
@@ -203,6 +210,22 @@ mod tests {
         assert_eq!(bookmarks[0].commit_id, "new111", "should keep local target");
         assert!(!bookmarks[0].is_synced, "divergent bookmark is not synced");
         assert!(!bookmarks[0].has_remote, "local entry lacks @origin");
+    }
+
+    #[test]
+    fn test_parse_bookmark_conflicted_skipped() {
+        // When a bookmark points to a missing commit (e.g., after squash merge),
+        // jj outputs <Error: No Commit available> which isn't valid JSON values.
+        // These should be skipped, not cause a hard error.
+        let output = concat!(
+            r#"{"name":"feat/stale","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":[<Error: No Commit available>],"remoteBookmarks":[<Error: No Commit available>]}"#,
+            "\n",
+            r#"{"name":"feat/good","commitId":"abc123","changeId":"xyz789","localBookmarks":["feat/good"],"remoteBookmarks":["feat/good@origin"]}"#,
+            "\n",
+        );
+        let bookmarks = parse_bookmark_output(output).unwrap();
+        assert_eq!(bookmarks.len(), 1, "should skip unparseable bookmark");
+        assert_eq!(bookmarks[0].name, "feat/good");
     }
 
     #[test]
