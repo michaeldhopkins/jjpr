@@ -20,6 +20,9 @@ pub trait Jj: Send + Sync {
     /// Rebase the subtree rooted at `source` onto `destination`.
     /// Runs `jj rebase -s <source> -d <destination>`.
     fn rebase_onto(&self, source: &str, destination: &str) -> Result<()>;
+    /// Create a merge commit combining `bookmark` and `dest`, then move the
+    /// bookmark to it. Used for merge-based reconciliation (avoids force pushes).
+    fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()>;
     /// Resolve a change ID to its commit IDs. Returns >1 if divergent.
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>>;
 }

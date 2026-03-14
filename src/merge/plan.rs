@@ -50,6 +50,7 @@ pub struct MergeOptions {
     pub merge_method: MergeMethod,
     pub required_approvals: u32,
     pub require_ci_pass: bool,
+    pub reconcile_strategy: crate::config::ReconcileStrategy,
 }
 
 /// The full merge plan for a stack.
@@ -259,6 +260,7 @@ mod tests {
             merge_method: MergeMethod::Squash,
             required_approvals: 1,
             require_ci_pass: true,
+            reconcile_strategy: crate::config::ReconcileStrategy::Rebase,
         }
     }
 

@@ -158,6 +158,19 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
+        // Create a merge commit with both the bookmark and dest as parents,
+        // without moving the working copy. A description is required or jj
+        // will refuse to push the commit.
+        let msg = format!("Merge {dest} into {bookmark}");
+        self.run_jj(&["new", "--no-edit", "-m", &msg, bookmark, dest])?;
+        // Move the bookmark to the new merge commit. The revset uniquely
+        // identifies it as the child of both parents.
+        let revset = format!("children({bookmark}) & children({dest})");
+        self.run_jj(&["bookmark", "set", bookmark, "-r", &revset])?;
+        Ok(())
+    }
+
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
         let revset = format!("all:{change_id}");
         let output = self.run_jj(&[

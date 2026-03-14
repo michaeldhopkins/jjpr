@@ -6,6 +6,17 @@ use serde::Deserialize;
 use crate::forge::ForgeKind;
 use crate::forge::types::MergeMethod;
 
+/// How to reconcile the remaining stack after merging a PR.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ReconcileStrategy {
+    /// Create merge commits incorporating the new base (no force pushes).
+    #[default]
+    Merge,
+    /// Rebase downstream commits onto the new base (causes force pushes).
+    Rebase,
+}
+
 /// User configuration for jjpr.
 ///
 /// Loaded from `~/.config/jjpr/config.toml` (global) and optionally merged
@@ -23,6 +34,11 @@ pub struct Config {
     /// Name of the environment variable holding the forge API token.
     /// Falls back to the forge's default (GITHUB_TOKEN, GITLAB_TOKEN, FORGEJO_TOKEN).
     pub forge_token_env: Option<String>,
+
+    /// How to sync the remaining stack after merging a PR.
+    /// "merge" (default): create merge commits — no force pushes.
+    /// "rebase": rebase onto new base — causes force pushes.
+    pub reconcile_strategy: ReconcileStrategy,
 }
 
 impl Default for Config {
@@ -33,6 +49,7 @@ impl Default for Config {
             require_ci_pass: true,
             forge: None,
             forge_token_env: None,
+            reconcile_strategy: ReconcileStrategy::Merge,
         }
     }
 }
@@ -158,6 +175,11 @@ required_approvals = 1
 
 # Whether CI checks must pass before merging
 require_ci_pass = true
+
+# How to sync the remaining stack after merging a PR.
+# "merge" (default): creates merge commits on downstream branches — no force pushes.
+# "rebase": rebases downstream commits — causes force pushes on GitHub.
+reconcile_strategy = "merge"
 "#;
 
 const DEFAULT_REPO_CONFIG: &str = r#"# jjpr repo-local configuration
@@ -186,6 +208,7 @@ mod tests {
         assert!(config.require_ci_pass);
         assert!(config.forge.is_none());
         assert!(config.forge_token_env.is_none());
+        assert_eq!(config.reconcile_strategy, ReconcileStrategy::Merge);
     }
 
     #[test]
@@ -256,6 +279,24 @@ merge_method = "merge"
     #[test]
     fn test_parse_invalid_forge() {
         let result: Result<Config, _> = toml::from_str(r#"forge = "bitbucket""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_reconcile_strategy_merge() {
+        let config: Config = toml::from_str(r#"reconcile_strategy = "merge""#).unwrap();
+        assert_eq!(config.reconcile_strategy, ReconcileStrategy::Merge);
+    }
+
+    #[test]
+    fn test_parse_reconcile_strategy_rebase() {
+        let config: Config = toml::from_str(r#"reconcile_strategy = "rebase""#).unwrap();
+        assert_eq!(config.reconcile_strategy, ReconcileStrategy::Rebase);
+    }
+
+    #[test]
+    fn test_parse_invalid_reconcile_strategy() {
+        let result: Result<Config, _> = toml::from_str(r#"reconcile_strategy = "yolo""#);
         assert!(result.is_err());
     }
 

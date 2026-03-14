@@ -22,6 +22,7 @@ fn reconcile_local_state(
     seg_idx: usize,
     effective_base: &str,
     remote_name: &str,
+    strategy: crate::config::ReconcileStrategy,
 ) -> Vec<LocalDivergenceWarning> {
     let mut warnings = Vec::new();
 
@@ -34,58 +35,82 @@ fn reconcile_local_state(
         return warnings;
     }
 
-    let next_segment = &segments[seg_idx + 1];
-    let next_change_id = &next_segment.bookmark.change_id;
-
-    match jj.resolve_change_id(next_change_id) {
-        Ok(ref commit_ids) if commit_ids.len() > 1 => {
-            let short_id = &next_change_id[..next_change_id.len().min(12)];
-            let count = commit_ids.len();
-            warnings.push(LocalDivergenceWarning {
-                message: format!(
-                    "Change '{short_id}' is divergent ({count} commits share this change ID)"
-                ),
-            });
-            return warnings;
+    // Track which bookmarks to push. With merge strategy, only push bookmarks
+    // whose merge_into succeeded (to avoid pushing stale state).
+    let bookmarks_to_push: Vec<&str> = match strategy {
+        crate::config::ReconcileStrategy::Merge => {
+            // Merge-based sync: create merge commits incorporating the new base.
+            // This is append-only — pushes are fast-forward (no force push).
+            println!("  Syncing remaining stack with {effective_base}...");
+            let mut succeeded = Vec::new();
+            for seg in &segments[seg_idx + 1..] {
+                if let Err(e) = jj.merge_into(&seg.bookmark.name, effective_base) {
+                    eprintln!("  Warning: merge sync failed for '{}': {e}", seg.bookmark.name);
+                    warnings.push(LocalDivergenceWarning {
+                        message: format!("Failed to merge-sync '{}': {e}", seg.bookmark.name),
+                    });
+                } else {
+                    succeeded.push(seg.bookmark.name.as_str());
+                }
+            }
+            succeeded
         }
-        Ok(commit_ids) if commit_ids.is_empty() => {
-            warnings.push(LocalDivergenceWarning {
-                message: format!(
-                    "Change ID '{next_change_id}' not found locally"
-                ),
-            });
-            return warnings;
+        crate::config::ReconcileStrategy::Rebase => {
+            let next_segment = &segments[seg_idx + 1];
+            let next_change_id = &next_segment.bookmark.change_id;
+
+            match jj.resolve_change_id(next_change_id) {
+                Ok(ref commit_ids) if commit_ids.len() > 1 => {
+                    let short_id = &next_change_id[..next_change_id.len().min(12)];
+                    let count = commit_ids.len();
+                    warnings.push(LocalDivergenceWarning {
+                        message: format!(
+                            "Change '{short_id}' is divergent ({count} commits share this change ID)"
+                        ),
+                    });
+                    return warnings;
+                }
+                Ok(commit_ids) if commit_ids.is_empty() => {
+                    warnings.push(LocalDivergenceWarning {
+                        message: format!(
+                            "Change ID '{next_change_id}' not found locally"
+                        ),
+                    });
+                    return warnings;
+                }
+                Err(e) => {
+                    eprintln!("  Warning: could not verify change ID: {e}");
+                }
+                _ => {}
+            }
+
+            // Rebase from the oldest commit in the next segment — not the bookmark tip.
+            let rebase_root = next_segment
+                .changes
+                .last()
+                .map(|c| c.change_id.as_str())
+                .unwrap_or(next_change_id);
+
+            println!("  Rebasing remaining stack onto {effective_base}...");
+            if let Err(e) = jj.rebase_onto(rebase_root, effective_base) {
+                eprintln!("  Warning: rebase failed: {e}");
+                warnings.push(LocalDivergenceWarning {
+                    message: format!("Failed to rebase remaining stack: {e}"),
+                });
+                return warnings;
+            }
+
+            // Rebase succeeded — push all remaining bookmarks
+            segments[seg_idx + 1..].iter().map(|s| s.bookmark.name.as_str()).collect()
         }
-        Err(e) => {
-            eprintln!("  Warning: could not verify change ID: {e}");
-        }
-        _ => {}
-    }
+    };
 
-    // Rebase from the oldest commit in the next segment — not the bookmark tip.
-    // changes is ordered newest-first, so .last() is the oldest (closest to the
-    // just-merged bookmark). Using the tip would orphan intermediate commits.
-    let rebase_root = next_segment
-        .changes
-        .last()
-        .map(|c| c.change_id.as_str())
-        .unwrap_or(next_change_id);
-
-    println!("  Rebasing remaining stack onto {effective_base}...");
-    if let Err(e) = jj.rebase_onto(rebase_root, effective_base) {
-        eprintln!("  Warning: rebase failed: {e}");
-        warnings.push(LocalDivergenceWarning {
-            message: format!("Failed to rebase remaining stack: {e}"),
-        });
-        return warnings;
-    }
-
-    for seg in &segments[seg_idx + 1..] {
-        println!("  Pushing '{}'...", seg.bookmark.name);
-        if let Err(e) = jj.push_bookmark(&seg.bookmark.name, remote_name) {
-            eprintln!("  Warning: failed to push '{}': {e}", seg.bookmark.name);
+    for name in &bookmarks_to_push {
+        println!("  Pushing '{name}'...");
+        if let Err(e) = jj.push_bookmark(name, remote_name) {
+            eprintln!("  Warning: failed to push '{name}': {e}");
             warnings.push(LocalDivergenceWarning {
-                message: format!("Failed to push '{}': {e}", seg.bookmark.name),
+                message: format!("Failed to push '{name}': {e}"),
             });
         }
     }
@@ -142,6 +167,7 @@ fn reconcile_after_merge(
     if !*local_degraded {
         let warnings = reconcile_local_state(
             jj, segments, seg_idx, effective_base, &plan.remote_name,
+            plan.options.reconcile_strategy,
         );
         if !warnings.is_empty() {
             *local_degraded = true;
@@ -801,6 +827,10 @@ mod tests {
             self.calls.lock().expect("poisoned").push(format!("resolve_change_id:{change_id}"));
             Ok(vec!["dummy_commit_id".to_string()])
         }
+        fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
+            self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
+            Ok(())
+        }
     }
 
     /// Jj stub where push_bookmark always fails (simulates conflicted commits).
@@ -834,6 +864,7 @@ mod tests {
             self.calls.lock().expect("poisoned").push(format!("resolve:{change_id}"));
             Ok(vec!["dummy".to_string()])
         }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
     }
 
     fn default_options() -> MergeOptions {
@@ -841,6 +872,7 @@ mod tests {
             merge_method: MergeMethod::Squash,
             required_approvals: 1,
             require_ci_pass: true,
+            reconcile_strategy: crate::config::ReconcileStrategy::Rebase,
         }
     }
 
@@ -1044,6 +1076,273 @@ mod tests {
             !jj_calls.iter().any(|c| c == "rebase:ch_profile:main"),
             "should NOT rebase from bookmark tip: {jj_calls:?}"
         );
+    }
+
+    #[test]
+    fn test_merge_strategy_calls_merge_into() {
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+
+        let mut opts = default_options();
+        opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: opts,
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        assert_eq!(result.merged.len(), 1);
+
+        let jj_calls = jj.calls();
+        // Should call merge_into instead of rebase_onto
+        assert!(
+            jj_calls.iter().any(|c| c == "merge_into:profile:main"),
+            "merge strategy should call merge_into, got: {jj_calls:?}"
+        );
+        assert!(
+            !jj_calls.iter().any(|c| c.starts_with("rebase:")),
+            "merge strategy should NOT call rebase_onto: {jj_calls:?}"
+        );
+        // Should still push
+        assert!(jj_calls.iter().any(|c| c == "push:profile:origin"));
+    }
+
+    #[test]
+    fn test_rebase_strategy_does_not_call_merge_into() {
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(), // Rebase is default in tests
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        assert_eq!(result.merged.len(), 1);
+
+        let jj_calls = jj.calls();
+        assert!(
+            jj_calls.iter().any(|c| c.starts_with("rebase:")),
+            "rebase strategy should call rebase_onto: {jj_calls:?}"
+        );
+        assert!(
+            !jj_calls.iter().any(|c| c.starts_with("merge_into:")),
+            "rebase strategy should NOT call merge_into: {jj_calls:?}"
+        );
+    }
+
+    #[test]
+    fn test_merge_strategy_syncs_all_remaining_segments() {
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2)
+            .with_evaluatable_pr("settings", 3);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("settings".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[2]
+            .base
+            .ref_name = "profile".to_string();
+
+        let mut opts = default_options();
+        opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "settings".to_string(),
+                    pr: Some(make_pr("settings", 3)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: opts,
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![
+            make_segment("auth"),
+            make_segment("profile"),
+            make_segment("settings"),
+        ];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        assert_eq!(result.merged.len(), 1);
+
+        let jj_calls = jj.calls();
+        // Both remaining bookmarks should get merge_into
+        assert!(
+            jj_calls.iter().any(|c| c == "merge_into:profile:main"),
+            "should merge_into profile: {jj_calls:?}"
+        );
+        assert!(
+            jj_calls.iter().any(|c| c == "merge_into:settings:main"),
+            "should merge_into settings: {jj_calls:?}"
+        );
+        // Both should be pushed
+        assert!(jj_calls.iter().any(|c| c == "push:profile:origin"));
+        assert!(jj_calls.iter().any(|c| c == "push:settings:origin"));
+    }
+
+    #[test]
+    fn test_merge_failure_skips_push_for_failed_bookmark() {
+        struct FailingMergeJj {
+            calls: Mutex<Vec<String>>,
+        }
+        impl FailingMergeJj {
+            fn new() -> Self { Self { calls: Mutex::new(Vec::new()) } }
+            fn calls(&self) -> Vec<String> { self.calls.lock().expect("poisoned").clone() }
+        }
+        impl Jj for FailingMergeJj {
+            fn git_fetch(&self) -> Result<()> {
+                self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+                Ok(())
+            }
+            fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
+                self.calls.lock().expect("poisoned").push(format!("push:{name}:{remote}"));
+                Ok(())
+            }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn merge_into(&self, bookmark: &str, _dest: &str) -> Result<()> {
+                self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}"));
+                if bookmark == "profile" {
+                    anyhow::bail!("merge conflict in profile")
+                }
+                Ok(())
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+                Ok(vec!["dummy".to_string()])
+            }
+        }
+
+        let jj = FailingMergeJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2)
+            .with_evaluatable_pr("settings", 3);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("settings".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[2]
+            .base
+            .ref_name = "profile".to_string();
+
+        let mut opts = default_options();
+        opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "settings".to_string(),
+                    pr: Some(make_pr("settings", 3)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: opts,
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![
+            make_segment("auth"),
+            make_segment("profile"),
+            make_segment("settings"),
+        ];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+
+        let jj_calls = jj.calls();
+        // merge_into attempted for both
+        assert!(jj_calls.iter().any(|c| c == "merge_into:profile"));
+        assert!(jj_calls.iter().any(|c| c == "merge_into:settings"));
+        // profile failed → should NOT be pushed; settings succeeded → should be pushed
+        assert!(
+            !jj_calls.iter().any(|c| c == "push:profile:origin"),
+            "should NOT push bookmark whose merge_into failed: {jj_calls:?}"
+        );
+        assert!(
+            jj_calls.iter().any(|c| c == "push:settings:origin"),
+            "should push bookmark whose merge_into succeeded: {jj_calls:?}"
+        );
+        // Should have warnings about the failure
+        assert!(!result.local_warnings.is_empty());
     }
 
     #[test]
@@ -1661,6 +1960,7 @@ mod tests {
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["commit_a".to_string(), "commit_b".to_string()])
             }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
         }
 
         let plan = MergePlan {
@@ -1825,6 +2125,7 @@ mod tests {
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["dummy".to_string()])
             }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
         }
 
         let gh = RecordingGitHub::new()

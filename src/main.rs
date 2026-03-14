@@ -60,6 +60,7 @@ fn main() -> Result<()> {
             no_ci_check,
             remote,
             base,
+            reconcile_strategy,
             watch,
         }) => {
             let ci_override = if no_ci_check { Some(false) } else { None };
@@ -71,6 +72,7 @@ fn main() -> Result<()> {
                     ci_pass_override: ci_override,
                     preferred_remote: remote.as_deref(),
                     base_override: base.as_deref(),
+                    reconcile_strategy,
                     watch,
                 },
                 cli.dry_run,
@@ -436,6 +438,7 @@ struct MergeArgs<'a> {
     ci_pass_override: Option<bool>,
     preferred_remote: Option<&'a str>,
     base_override: Option<&'a str>,
+    reconcile_strategy: Option<config::ReconcileStrategy>,
     watch: bool,
 }
 
@@ -486,6 +489,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         merge_method: args.merge_method.unwrap_or(cfg.merge_method),
         required_approvals: args.required_approvals.unwrap_or(cfg.required_approvals),
         require_ci_pass: args.ci_pass_override.unwrap_or(cfg.require_ci_pass),
+        reconcile_strategy: args.reconcile_strategy.unwrap_or(cfg.reconcile_strategy),
     };
 
     let stack_base = args.base_override.or(analysis.base_branch.as_deref());

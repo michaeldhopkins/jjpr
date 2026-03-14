@@ -568,6 +568,7 @@ mod tests {
             Ok("wc_commit".to_string())
         }
         fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { unimplemented!() }
         fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
             Ok(vec!["dummy_commit_id".to_string()])
         }
@@ -1038,6 +1039,7 @@ mod tests {
             }
             fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
             fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { unimplemented!() }
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["dummy_commit_id".to_string()])
             }

@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 
+use crate::config::ReconcileStrategy;
 use crate::forge::types::MergeMethod;
 
 #[derive(Parser)]
@@ -118,7 +119,8 @@ Example output:
 Merge a stack of PRs from the bottom up.
 
 Merges the bottommost mergeable PR, fetches the updated default branch, \
-rebases the remaining stack onto it, pushes, retargets the next PR's base, \
+syncs the remaining stack (merge commits by default, or rebase with \
+--reconcile-strategy rebase), pushes, retargets the next PR's base, \
 and repeats until blocked or done.
 
 Before merging each PR, jjpr checks:
@@ -162,6 +164,13 @@ Examples:
         /// Use this flag to override (e.g., when the branch isn't pushed yet).
         #[arg(long)]
         base: Option<String>,
+
+        /// How to sync the remaining stack after each merge (overrides config file)
+        ///
+        /// "merge" (default): creates merge commits on downstream branches — no force pushes.
+        /// "rebase": rebases downstream commits — causes force pushes on GitHub.
+        #[arg(long, value_enum)]
+        reconcile_strategy: Option<ReconcileStrategy>,
 
         /// Watch for transient blockers (pending CI) and auto-continue
         ///

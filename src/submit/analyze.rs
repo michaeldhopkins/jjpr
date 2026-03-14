@@ -198,6 +198,7 @@ mod tests {
             Ok(self.wc_commit_id.clone())
         }
         fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { unimplemented!() }
         fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
             Ok(vec!["dummy_commit_id".to_string()])
         }

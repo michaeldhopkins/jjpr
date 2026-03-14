@@ -5,7 +5,8 @@ Multi-forge stacked pull requests for [Jujutsu](https://jj-vcs.github.io/jj/). P
 ## Why jjpr?
 
 - **Multi-forge** — GitHub, GitLab, and Forgejo/Codeberg in one binary, auto-detected from your remote URL
-- **Stack merging** — `jjpr merge` merges from the bottom up with live re-evaluation: merge a PR, rebase the rest, retarget bases, check the next one, repeat
+- **Stack merging** — `jjpr merge` merges from the bottom up with live re-evaluation: merge a PR, sync the rest, retarget bases, check the next one, repeat
+- **No force pushes** — after merging a PR, downstream branches are synced via merge commits (append-only), avoiding force push events that clutter GitHub PR timelines
 - **Merge commits** — `jj new A B` handled naturally; jjpr follows the first parent and lets other parents form independent stacks
 - **Pure HTTP** — talks directly to forge APIs via `ureq`; no `gh` or `glab` CLI required (though existing credentials are picked up automatically)
 - **Idempotent** — run `jjpr submit` repeatedly as you work; it converges to the correct state, pushing only what changed
@@ -160,7 +161,9 @@ The PR title is not automatically updated after creation. If you change your com
 - No changes requested
 - No merge conflicts
 
-If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, rebases the remaining stack onto it with `jj rebase`, pushes all remaining bookmarks, and retargets the next PR's base if needed. Then it checks the next PR and continues until blocked or done.
+If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, syncs the remaining stack, pushes all remaining bookmarks, and retargets the next PR's base if needed. Then it checks the next PR and continues until blocked or done.
+
+By default, the remaining stack is synced via **merge commits** — each downstream bookmark gets a merge commit incorporating the new base. This is append-only, so pushes are fast-forward and avoid force push events on GitHub. You can switch to the old rebase behavior with `reconcile_strategy = "rebase"` in config (see [Configuration](#configuration)).
 
 If a PR is blocked (e.g., CI pending), jjpr reports why and stops:
 
@@ -228,14 +231,29 @@ Or to fix local state and push it to the forge:
 
 Divergent change IDs (multiple commits sharing the same ID, typically from editing sessions) are also handled as local warnings rather than fatal errors. jjpr merges on the forge and reports the divergence for you to resolve locally.
 
-CLI flags override the config file: `--merge-method`, `--required-approvals`, `--no-ci-check`.
+CLI flags override the config file: `--merge-method`, `--required-approvals`, `--no-ci-check`, `--reconcile-strategy`.
+
+#### Merge method
+
+The `merge_method` setting (or `--merge-method` flag) controls how the forge combines the PR when it lands:
+
+- **`squash`** (default) — All commits in the PR are squashed into a single commit on the target branch. Keeps the main branch history linear and clean.
+- **`merge`** — A merge commit is created, preserving the individual commits from the PR branch. Useful when you want to retain granular commit history.
+- **`rebase`** — Commits are rebased onto the target branch individually (no merge commit). Linear history like squash, but preserves each commit separately.
+
+#### Reconcile strategy
+
+The `reconcile_strategy` setting controls how the remaining stack is synced after a PR is merged:
+
+- **`merge`** (default) — Creates merge commits on downstream branches that incorporate the updated base. Pushes are fast-forward, so no force push events appear on GitHub PR timelines.
+- **`rebase`** — Rebases downstream commits onto the new base. Rewrites commit history, which causes force pushes — these show up as immutable events on GitHub.
 
 ### Configuration
 
 jjpr uses an optional global config at `~/.config/jjpr/config.toml` (or `$XDG_CONFIG_HOME/jjpr/config.toml`). Run `jjpr config init` to create one with defaults:
 
 ```toml
-# Merge method: "squash", "merge", or "rebase"
+# How the forge combines the PR when it lands: "squash", "merge", or "rebase"
 merge_method = "squash"
 
 # Number of approving reviews required before merging
@@ -243,6 +261,9 @@ required_approvals = 1
 
 # Whether CI checks must pass before merging
 require_ci_pass = true
+
+# How to sync the remaining stack after merging a PR: "merge" or "rebase"
+reconcile_strategy = "merge"
 ```
 
 #### Repo-local config
