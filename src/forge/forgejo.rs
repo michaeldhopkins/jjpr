@@ -234,7 +234,9 @@ impl Forge for ForgejoForge {
         // paginate and scan. Cap at 5 pages (250 PRs) to avoid runaway requests
         // on repos with many closed PRs.
         let base_path = format!("repos/{owner}/{repo}/pulls?state=closed");
-        for page in 1..=5u32 {
+        let max_pages = 5u32;
+        let mut hit_cap = false;
+        for page in 1..=max_pages {
             let paged = format!("{base_path}&page={page}&limit=50");
             let body = self.client.get(&paged)?;
             let prs: Vec<PullRequest> =
@@ -248,6 +250,15 @@ impl Forge for ForgejoForge {
             {
                 return Ok(Some(pr));
             }
+            if page == max_pages {
+                hit_cap = true;
+            }
+        }
+        if hit_cap {
+            eprintln!(
+                "warning: scanned 250 closed PRs without finding a merged PR for '{head}'; \
+                 result may be incomplete on repos with many closed PRs"
+            );
         }
         Ok(None)
     }

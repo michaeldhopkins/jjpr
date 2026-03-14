@@ -167,23 +167,39 @@ impl Forge for GitLabForge {
             return Ok(());
         }
 
-        // GitLab requires numeric user IDs, so look up each username
+        let project = Self::encode_project(owner, repo);
+
+        // Batch lookup: fetch all project members in one paginated call
+        // instead of N individual user lookups.
+        let members_path = format!("projects/{project}/members/all?per_page=100");
+        let members = self.client.get_paginated(&members_path)?;
+        let member_map: std::collections::HashMap<&str, u64> = members
+            .iter()
+            .filter_map(|m| {
+                let username = m["username"].as_str()?;
+                let id = m["id"].as_u64()?;
+                Some((username, id))
+            })
+            .collect();
+
         let mut reviewer_ids = Vec::new();
         for username in reviewers {
-            let users: Vec<serde_json::Value> = {
+            if let Some(&id) = member_map.get(username.as_str()) {
+                reviewer_ids.push(id);
+            } else {
+                // Fallback for non-member reviewers (e.g., invited external users)
                 let encoded_user = super::http::url_encode(username);
                 let output = self.client.get(&format!("users?username={encoded_user}"))?;
-                serde_json::from_value(output)
-                    .context("failed to parse user lookup response")?
-            };
-            let user_id = users
-                .first()
-                .and_then(|u| u["id"].as_u64())
-                .ok_or_else(|| anyhow::anyhow!("user '{username}' not found on GitLab"))?;
-            reviewer_ids.push(user_id);
+                let users: Vec<serde_json::Value> = serde_json::from_value(output)
+                    .context("failed to parse user lookup response")?;
+                let user_id = users
+                    .first()
+                    .and_then(|u| u["id"].as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("user '{username}' not found on GitLab"))?;
+                reviewer_ids.push(user_id);
+            }
         }
 
-        let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}");
         self.client.put(&path, &serde_json::json!({ "reviewer_ids": reviewer_ids }))?;
         Ok(())
@@ -229,14 +245,11 @@ impl Forge for GitLabForge {
     ) -> Result<()> {
         // GitLab's note update API requires the MR iid in the path:
         //   PUT /projects/:id/merge_requests/:iid/notes/:note_id
-        // but the Forge trait only passes comment_id. We scan open MRs to find
-        // which one owns this note. In practice stacks are small (2-5 MRs).
+        // but the Forge trait only passes comment_id. We scan MRs (all states)
+        // to find which one owns this note. In practice stacks are small (2-5 MRs).
         let project = Self::encode_project(owner, repo);
-        let mrs_path = format!("projects/{project}/merge_requests?state=opened&per_page=100");
-        let mrs: Vec<serde_json::Value> = {
-            let output = self.client.get(&mrs_path)?;
-            serde_json::from_value(output).unwrap_or_default()
-        };
+        let mrs_path = format!("projects/{project}/merge_requests?state=all&per_page=100");
+        let mrs = self.client.get_paginated(&mrs_path)?;
 
         for mr in &mrs {
             let iid = mr["iid"].as_u64().unwrap_or(0);
@@ -254,7 +267,7 @@ impl Forge for GitLabForge {
             }
         }
 
-        anyhow::bail!("could not find note {comment_id} on any open MR")
+        anyhow::bail!("could not find note {comment_id} on any MR in project")
     }
 
     fn update_pr_body(
@@ -314,9 +327,21 @@ impl Forge for GitLabForge {
         method: MergeMethod,
     ) -> Result<()> {
         let project = Self::encode_project(owner, repo);
-        let path = format!("projects/{project}/merge_requests/{number}/merge");
-        let squash = matches!(method, MergeMethod::Squash);
-        self.client.put(&path, &serde_json::json!({ "squash": squash }))?;
+        let merge_path = format!("projects/{project}/merge_requests/{number}/merge");
+        match method {
+            MergeMethod::Squash => {
+                self.client.put(&merge_path, &serde_json::json!({ "squash": true }))?;
+            }
+            MergeMethod::Merge => {
+                self.client.put(&merge_path, &serde_json::json!({ "squash": false }))?;
+            }
+            MergeMethod::Rebase => {
+                // Rebase the MR onto the target branch first, then merge (fast-forward).
+                let rebase_path = format!("projects/{project}/merge_requests/{number}/rebase");
+                self.client.put(&rebase_path, &serde_json::json!({}))?;
+                self.client.put(&merge_path, &serde_json::json!({ "squash": false }))?;
+            }
+        }
         Ok(())
     }
 
@@ -344,26 +369,42 @@ impl Forge for GitLabForge {
         number: u64,
     ) -> Result<ReviewSummary> {
         let project = Self::encode_project(owner, repo);
+
+        // 1. Approval count from the approvals endpoint
         let approvals_path = format!("projects/{project}/merge_requests/{number}/approvals");
         let approvals = self.client.get(&approvals_path)?;
-
         let approved_count = approvals["approved_by"]
             .as_array()
             .map(|a| a.len() as u32)
             .unwrap_or(0);
 
-        // GitLab's "requested changes" feature is reflected in the MR's
-        // detailed_merge_status. Fetch the MR to check.
+        // 2. Check detailed_merge_status on the MR itself
         let mr_path = format!("projects/{project}/merge_requests/{number}");
         let mr = self.client.get(&mr_path)?;
-
-        let changes_requested = mr["detailed_merge_status"]
+        let merge_status_blocked = mr["detailed_merge_status"]
             .as_str()
             .is_some_and(|s| s == "requested_changes");
 
+        // 3. Check individual reviewer states (GitLab 16.3+).
+        //    Degrades gracefully on older instances that lack this endpoint.
+        let reviewer_changes_requested = self
+            .client
+            .get(&format!(
+                "projects/{project}/merge_requests/{number}/reviewers"
+            ))
+            .ok()
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .any(|r| {
+                r["state"]
+                    .as_str()
+                    .is_some_and(|s| s == "requested_changes")
+            });
+
         Ok(ReviewSummary {
             approved_count,
-            changes_requested,
+            changes_requested: merge_status_blocked || reviewer_changes_requested,
         })
     }
 
@@ -665,5 +706,42 @@ mod tests {
             .map(|a| a.len() as u32)
             .unwrap_or(0);
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_reviewer_state_requested_changes() {
+        let reviewers = serde_json::json!([
+            {"username": "alice", "state": "approved"},
+            {"username": "bob", "state": "requested_changes"}
+        ]);
+        let has_changes = reviewers
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
+        assert!(has_changes);
+    }
+
+    #[test]
+    fn test_reviewer_state_all_approved() {
+        let reviewers = serde_json::json!([
+            {"username": "alice", "state": "approved"},
+            {"username": "bob", "state": "approved"}
+        ]);
+        let has_changes = reviewers
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
+        assert!(!has_changes);
+    }
+
+    #[test]
+    fn test_reviewer_state_empty_degrades() {
+        let reviewers: Vec<serde_json::Value> = vec![];
+        let has_changes = reviewers
+            .iter()
+            .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
+        assert!(!has_changes);
     }
 }
