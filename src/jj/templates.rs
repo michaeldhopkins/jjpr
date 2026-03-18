@@ -1,4 +1,6 @@
 /// jj template strings for structured JSON output, and parsing logic.
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
@@ -65,6 +67,7 @@ struct RawBookmark {
 /// entries (empty `localBookmarks`) to avoid the remote entry overwriting the
 /// local one in downstream HashMaps.
 pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
+    let mut warned_names: HashSet<String> = HashSet::new();
     output
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -78,9 +81,11 @@ pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
                     // Try to extract the name for a helpful message
                     let name = extract_name_from_malformed_json(line);
                     if let Some(name) = name {
-                        eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit — typically after a squash merge on the forge)");
-                        eprintln!("    To clean up the stale local bookmark:");
-                        eprintln!("      jj bookmark forget {name} && jj git push --deleted");
+                        if warned_names.insert(name.clone()) {
+                            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit — typically after a squash merge on the forge)");
+                            eprintln!("    To clean up the stale local bookmark:");
+                            eprintln!("      jj bookmark forget {name} && jj git push --deleted");
+                        }
                     } else {
                         eprintln!("  Warning: skipping unparseable bookmark entry");
                     }

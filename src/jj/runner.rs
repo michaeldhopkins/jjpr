@@ -182,6 +182,13 @@ impl Jj for JjRunner {
             .map(|l| l.to_string())
             .collect())
     }
+
+    fn is_conflicted(&self, revset: &str) -> Result<bool> {
+        let output = self.run_jj(&[
+            "log", "-r", revset, "--no-graph", "-T", r#"if(conflict, "true", "false")"#,
+        ])?;
+        Ok(output.trim() == "true")
+    }
 }
 
 #[cfg(test)]

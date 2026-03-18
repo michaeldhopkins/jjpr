@@ -28,7 +28,6 @@ fn reconcile_local_state(
 
     println!("  Fetching remotes...");
     if let Err(e) = jj.git_fetch() {
-        eprintln!("  Warning: failed to fetch: {e}");
         warnings.push(LocalDivergenceWarning {
             message: format!("Failed to fetch remotes: {e}"),
         });
@@ -36,7 +35,7 @@ fn reconcile_local_state(
     }
 
     // Track which bookmarks to push. With merge strategy, only push bookmarks
-    // whose merge_into succeeded (to avoid pushing stale state).
+    // whose merge_into succeeded and are conflict-free.
     let bookmarks_to_push: Vec<&str> = match strategy {
         crate::config::ReconcileStrategy::Merge => {
             // Merge-based sync: create merge commits incorporating the new base.
@@ -45,12 +44,34 @@ fn reconcile_local_state(
             let mut succeeded = Vec::new();
             for seg in &segments[seg_idx + 1..] {
                 if let Err(e) = jj.merge_into(&seg.bookmark.name, effective_base) {
-                    eprintln!("  Warning: merge sync failed for '{}': {e}", seg.bookmark.name);
                     warnings.push(LocalDivergenceWarning {
                         message: format!("Failed to merge-sync '{}': {e}", seg.bookmark.name),
                     });
-                } else {
-                    succeeded.push(seg.bookmark.name.as_str());
+                    break;
+                }
+                // jj creates the merge commit even with conflicts — check before pushing
+                match jj.is_conflicted(&seg.bookmark.name) {
+                    Ok(true) => {
+                        warnings.push(LocalDivergenceWarning {
+                            message: format!(
+                                "Merge of '{effective_base}' into '{}' has conflicts — skipping push",
+                                seg.bookmark.name
+                            ),
+                        });
+                        break;
+                    }
+                    Err(e) => {
+                        warnings.push(LocalDivergenceWarning {
+                            message: format!(
+                                "Could not check conflict state of '{}': {e}",
+                                seg.bookmark.name
+                            ),
+                        });
+                        break;
+                    }
+                    Ok(false) => {
+                        succeeded.push(seg.bookmark.name.as_str());
+                    }
                 }
             }
             succeeded
@@ -78,9 +99,7 @@ fn reconcile_local_state(
                     });
                     return warnings;
                 }
-                Err(e) => {
-                    eprintln!("  Warning: could not verify change ID: {e}");
-                }
+                Err(_) => {}
                 _ => {}
             }
 
@@ -93,7 +112,6 @@ fn reconcile_local_state(
 
             println!("  Rebasing remaining stack onto {effective_base}...");
             if let Err(e) = jj.rebase_onto(rebase_root, effective_base) {
-                eprintln!("  Warning: rebase failed: {e}");
                 warnings.push(LocalDivergenceWarning {
                     message: format!("Failed to rebase remaining stack: {e}"),
                 });
@@ -108,10 +126,10 @@ fn reconcile_local_state(
     for name in &bookmarks_to_push {
         println!("  Pushing '{name}'...");
         if let Err(e) = jj.push_bookmark(name, remote_name) {
-            eprintln!("  Warning: failed to push '{name}': {e}");
             warnings.push(LocalDivergenceWarning {
                 message: format!("Failed to push '{name}': {e}"),
             });
+            break;
         }
     }
 
@@ -832,6 +850,7 @@ mod tests {
             self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
             Ok(())
         }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
     }
 
     /// Jj stub where push_bookmark always fails (simulates conflicted commits).
@@ -866,6 +885,7 @@ mod tests {
             Ok(vec!["dummy".to_string()])
         }
         fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
     }
 
     fn default_options() -> MergeOptions {
@@ -1278,6 +1298,7 @@ mod tests {
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["dummy".to_string()])
             }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
         }
 
         let jj = FailingMergeJj::new();
@@ -1330,20 +1351,127 @@ mod tests {
         let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
 
         let jj_calls = jj.calls();
-        // merge_into attempted for both
+        // merge_into attempted for profile, but breaks on failure — settings not attempted
         assert!(jj_calls.iter().any(|c| c == "merge_into:profile"));
-        assert!(jj_calls.iter().any(|c| c == "merge_into:settings"));
-        // profile failed → should NOT be pushed; settings succeeded → should be pushed
+        assert!(
+            !jj_calls.iter().any(|c| c == "merge_into:settings"),
+            "should stop after first merge_into failure: {jj_calls:?}"
+        );
+        // Neither should be pushed
         assert!(
             !jj_calls.iter().any(|c| c == "push:profile:origin"),
             "should NOT push bookmark whose merge_into failed: {jj_calls:?}"
         );
         assert!(
-            jj_calls.iter().any(|c| c == "push:settings:origin"),
-            "should push bookmark whose merge_into succeeded: {jj_calls:?}"
+            !jj_calls.iter().any(|c| c == "push:settings:origin"),
+            "should NOT push downstream bookmark after failure: {jj_calls:?}"
         );
         // Should have warnings about the failure
         assert!(!result.local_warnings.is_empty());
+    }
+
+    #[test]
+    fn test_merge_conflict_detected_skips_push() {
+        struct ConflictingMergeJj {
+            calls: Mutex<Vec<String>>,
+        }
+        impl ConflictingMergeJj {
+            fn new() -> Self { Self { calls: Mutex::new(Vec::new()) } }
+            fn calls(&self) -> Vec<String> { self.calls.lock().expect("poisoned").clone() }
+        }
+        impl Jj for ConflictingMergeJj {
+            fn git_fetch(&self) -> Result<()> {
+                self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+                Ok(())
+            }
+            fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
+                self.calls.lock().expect("poisoned").push(format!("push:{name}:{remote}"));
+                Ok(())
+            }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
+                self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
+                Ok(())
+            }
+            fn is_conflicted(&self, revset: &str) -> Result<bool> {
+                // First bookmark in remaining stack has conflicts
+                Ok(revset == "profile")
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+                Ok(vec!["dummy".to_string()])
+            }
+        }
+
+        let jj = ConflictingMergeJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2)
+            .with_evaluatable_pr("settings", 3);
+        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("settings".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[2]
+            .base
+            .ref_name = "profile".to_string();
+
+        let mut opts = default_options();
+        opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "settings".to_string(),
+                    pr: Some(make_pr("settings", 3)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: opts,
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![
+            make_segment("auth"),
+            make_segment("profile"),
+            make_segment("settings"),
+        ];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+
+        let jj_calls = jj.calls();
+        // merge_into succeeds but conflict detected — should not push or continue
+        assert!(jj_calls.iter().any(|c| c == "merge_into:profile:main"));
+        assert!(
+            !jj_calls.iter().any(|c| c == "merge_into:settings:main"),
+            "should stop after first conflicted bookmark: {jj_calls:?}"
+        );
+        assert!(
+            !jj_calls.iter().any(|c| c.starts_with("push:")),
+            "should not push any bookmark when conflict detected: {jj_calls:?}"
+        );
+        // Warning should mention the conflict
+        assert!(
+            result.local_warnings.iter().any(|w| w.message.contains("has conflicts")),
+            "should warn about conflicts: {:?}", result.local_warnings
+        );
     }
 
     #[test]
@@ -1962,6 +2090,7 @@ mod tests {
                 Ok(vec!["commit_a".to_string(), "commit_b".to_string()])
             }
             fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
         }
 
         let plan = MergePlan {
@@ -2127,6 +2256,7 @@ mod tests {
                 Ok(vec!["dummy".to_string()])
             }
             fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
         }
 
         let gh = RecordingGitHub::new()
