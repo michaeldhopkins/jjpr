@@ -247,6 +247,7 @@ mod tests {
         fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
             Ok(vec!["dummy_commit_id".to_string()])
         }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
     }
 
     fn make_log_entry(

@@ -25,4 +25,6 @@ pub trait Jj: Send + Sync {
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()>;
     /// Resolve a change ID to its commit IDs. Returns >1 if divergent.
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>>;
+    /// Check whether the commit at `revset` has unresolved conflicts.
+    fn is_conflicted(&self, revset: &str) -> Result<bool>;
 }
