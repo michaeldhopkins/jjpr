@@ -151,8 +151,19 @@ pub fn execute_submission_plan(
         completed_actions.push(format!("Marked {} as ready", fk.format_ref(item.pr_number)));
     }
 
-    // Phase 6: Request reviewers on existing PRs
+    // Phase 6: Request reviewers on existing PRs (skip already-requested)
     for (bookmark, pr_number) in &plan.bookmarks_needing_reviewers {
+        let already_requested: &[String] = plan
+            .existing_prs
+            .get(&bookmark.name)
+            .map(|pr| pr.requested_reviewers.as_slice())
+            .unwrap_or_default();
+        if reviewers
+            .iter()
+            .all(|r| already_requested.iter().any(|a| a.eq_ignore_ascii_case(r)))
+        {
+            continue;
+        }
         if dry_run {
             println!(
                 "  Would request reviewers on {} ('{}')",
@@ -164,7 +175,16 @@ pub fn execute_submission_plan(
             "  Requesting reviewers on {}...",
             fk.format_ref(*pr_number)
         );
-        if let Err(e) = github.request_reviewers(owner, repo, *pr_number, reviewers) {
+        // Full desired set: GitLab's PUT replaces the reviewer list,
+        // so we include existing reviewers to avoid dropping them.
+        // GitHub/Forgejo use additive POST, so duplicates are harmless.
+        let mut all_reviewers: Vec<String> = already_requested.to_vec();
+        for r in reviewers {
+            if !all_reviewers.iter().any(|a| a.eq_ignore_ascii_case(r)) {
+                all_reviewers.push(r.clone());
+            }
+        }
+        if let Err(e) = github.request_reviewers(owner, repo, *pr_number, &all_reviewers) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
@@ -455,6 +475,7 @@ mod tests {
                 draft,
                 node_id: "PR_node123".to_string(),
                 merged_at: None,
+                requested_reviewers: vec![],
             })
         }
         fn update_pr_base(&self, _o: &str, _r: &str, n: u64, base: &str) -> Result<()> {
@@ -777,6 +798,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         };
 
         let plan = SubmissionPlan {
@@ -822,6 +844,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         };
 
         let plan = SubmissionPlan {
@@ -884,6 +907,7 @@ mod tests {
                     draft: false,
                     node_id: String::new(),
                     merged_at: None,
+                    requested_reviewers: vec![],
                 },
             )]),
             remote_name: "origin".to_string(),
@@ -1018,6 +1042,144 @@ mod tests {
         assert!(
             github.calls().iter().any(|c| c == "request_reviewers:#10:alice"),
             "should request reviewers on existing PRs: {:?}",
+            github.calls()
+        );
+    }
+
+    #[test]
+    fn test_skips_already_requested_reviewers() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let existing_pr = PullRequest {
+            number: 10,
+            html_url: "https://github.com/o/r/pull/10".to_string(),
+            title: "Add auth".to_string(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec!["alice".to_string()],
+        };
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        let reviewers = vec!["alice".to_string(), "bob".to_string()];
+        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+
+        assert!(
+            github.calls().iter().any(|c| c == "request_reviewers:#10:alice,bob"),
+            "should pass full reviewer set (existing + new) to forge: {:?}",
+            github.calls()
+        );
+    }
+
+    #[test]
+    fn test_skips_reviewer_request_when_all_already_requested() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let existing_pr = PullRequest {
+            number: 10,
+            html_url: "https://github.com/o/r/pull/10".to_string(),
+            title: "Add auth".to_string(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec!["alice".to_string(), "bob".to_string()],
+        };
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        let reviewers = vec!["alice".to_string(), "bob".to_string()];
+        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+
+        assert!(
+            !github.calls().iter().any(|c| c.starts_with("request_reviewers")),
+            "should not request reviewers when all already requested: {:?}",
+            github.calls()
+        );
+    }
+
+    #[test]
+    fn test_skips_reviewer_case_insensitive() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let existing_pr = PullRequest {
+            number: 10,
+            html_url: "https://github.com/o/r/pull/10".to_string(),
+            title: "Add auth".to_string(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new() },
+            head: PullRequestRef { ref_name: "auth".to_string(), label: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec!["Alice".to_string()],
+        };
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
+            all_bookmarks: vec![make_bookmark("auth")],
+            default_branch: "main".to_string(),
+            draft: false,
+        };
+
+        let reviewers = vec!["alice".to_string()];
+        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+
+        assert!(
+            !github.calls().iter().any(|c| c.starts_with("request_reviewers")),
+            "should match reviewers case-insensitively: {:?}",
             github.calls()
         );
     }
@@ -1227,6 +1389,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         };
 
         let plan = SubmissionPlan {
@@ -1310,6 +1473,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         };
 
         let plan = SubmissionPlan {
@@ -1439,6 +1603,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         };
 
         let plan = SubmissionPlan {

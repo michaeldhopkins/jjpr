@@ -292,6 +292,8 @@ By default, `jjpr` fetches all remotes before operating to ensure it has the lat
 
 Use `--reviewer alice,bob` to request reviewers. Reviewers are applied to all PRs in the stack — both newly created and existing ones.
 
+Reviewer requests are idempotent: if a reviewer is already requested on a PR, they won't be re-requested, so re-running `jjpr submit --reviewer alice` as you grow a stack only affects PRs where Alice isn't already a reviewer.
+
 ## Requirements
 
 - Rust 1.88+ (for building from source)

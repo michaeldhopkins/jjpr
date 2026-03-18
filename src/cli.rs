@@ -71,7 +71,11 @@ Examples:
     jjpr submit              # submit the stack under your working copy
     jjpr submit auth         # submit the stack ending at bookmark 'auth'
     jjpr submit --draft      # create new PRs as drafts
-    jjpr submit --dry-run    # preview what would happen")]
+    jjpr submit --reviewer alice,bob  # request reviewers on all PRs
+    jjpr submit --dry-run    # preview what would happen
+
+Reviewer requests are idempotent — re-running with --reviewer only \
+affects PRs where the reviewer isn't already requested.")]
     Submit {
         /// Bookmark to submit (inferred from working copy if omitted)
         bookmark: Option<String>,

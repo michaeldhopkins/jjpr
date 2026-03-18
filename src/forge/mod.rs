@@ -233,6 +233,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         }
     }
 

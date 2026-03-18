@@ -417,6 +417,7 @@ mod tests {
             draft: false,
             node_id: String::new(),
             merged_at: None,
+            requested_reviewers: vec![],
         }
     }
 
@@ -693,6 +694,7 @@ mod tests {
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                        requested_reviewers: vec![],
                     }))
                 } else {
                     Ok(None)
@@ -796,6 +798,7 @@ mod tests {
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                        requested_reviewers: vec![],
                     }))
                 } else {
                     Ok(None)

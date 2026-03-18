@@ -537,4 +537,57 @@ mod tests {
         let pr: PullRequest = serde_json::from_str(json).unwrap();
         assert_eq!(pr.merged_at.as_deref(), Some("2024-06-15T10:30:00Z"));
     }
+
+    #[test]
+    fn test_parse_pr_requested_reviewers() {
+        let json = r#"{
+            "number": 42,
+            "html_url": "https://github.com/o/r/pull/42",
+            "title": "Auth",
+            "body": null,
+            "base": {"ref": "main", "label": ""},
+            "head": {"ref": "auth", "label": ""},
+            "draft": false,
+            "node_id": "",
+            "requested_reviewers": [
+                {"login": "alice", "id": 1},
+                {"login": "bob", "id": 2}
+            ]
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.requested_reviewers, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn test_parse_pr_null_requested_reviewers() {
+        let json = r#"{
+            "number": 42,
+            "html_url": "https://github.com/o/r/pull/42",
+            "title": "Auth",
+            "body": null,
+            "base": {"ref": "main", "label": ""},
+            "head": {"ref": "auth", "label": ""},
+            "draft": false,
+            "node_id": "",
+            "requested_reviewers": null
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert!(pr.requested_reviewers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pr_no_requested_reviewers() {
+        let json = r#"{
+            "number": 42,
+            "html_url": "https://github.com/o/r/pull/42",
+            "title": "Auth",
+            "body": null,
+            "base": {"ref": "main", "label": ""},
+            "head": {"ref": "auth", "label": ""},
+            "draft": false,
+            "node_id": ""
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert!(pr.requested_reviewers.is_empty());
+    }
 }

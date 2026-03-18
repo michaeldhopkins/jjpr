@@ -64,6 +64,14 @@ fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
         draft: mr["draft"].as_bool().unwrap_or(false),
         node_id: String::new(),
         merged_at: mr["merged_at"].as_str().map(|s| s.to_string()),
+        requested_reviewers: mr["reviewers"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r["username"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -734,6 +742,38 @@ mod tests {
             .iter()
             .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
         assert!(!has_changes);
+    }
+
+    #[test]
+    fn test_parse_mr_extracts_reviewers() {
+        let mr: serde_json::Value = serde_json::from_str(
+            r#"{
+                "iid": 42,
+                "web_url": "https://gitlab.com/o/r/-/merge_requests/42",
+                "title": "Auth",
+                "description": null,
+                "target_branch": "main",
+                "source_branch": "auth",
+                "draft": false,
+                "merged_at": null,
+                "source_project_id": 1,
+                "target_project_id": 1,
+                "reviewers": [
+                    {"username": "alice", "id": 10},
+                    {"username": "bob", "id": 20}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let pr = parse_mr(&mr).unwrap();
+        assert_eq!(pr.requested_reviewers, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn test_parse_mr_no_reviewers() {
+        let mr: serde_json::Value = serde_json::from_str(GITLAB_MR_RESPONSE).unwrap();
+        let pr = parse_mr(&mr).unwrap();
+        assert!(pr.requested_reviewers.is_empty());
     }
 
     #[test]

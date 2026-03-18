@@ -1,6 +1,6 @@
 [package]
 name = "jjpr"
-version = "0.12.12"
+version = "0.12.13"
 edition = "2024"
 rust-version = "1.88"
 description = "Manage stacked pull requests in Jujutsu repositories"

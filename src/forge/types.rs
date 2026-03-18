@@ -1,4 +1,5 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Repository owner and name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,59 @@ pub struct PullRequest {
     pub node_id: String,
     #[serde(default)]
     pub merged_at: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_reviewer_logins")]
+    pub requested_reviewers: Vec<String>,
+}
+
+/// Deserialize an array of user objects into a Vec of login/username strings.
+/// Handles GitHub/Forgejo format (`[{"login": "alice"}, ...]`) and
+/// GitLab format (`[{"username": "alice"}, ...]`).
+fn deserialize_reviewer_logins<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ReviewerVisitor;
+
+    impl<'de> Visitor<'de> for ReviewerVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("an array of user objects with login or username fields, or null")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Vec<String>, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut logins = Vec::new();
+            while let Some(obj) = seq.next_element::<serde_json::Value>()? {
+                if let Some(login) = obj
+                    .get("login")
+                    .or_else(|| obj.get("username"))
+                    .and_then(|v| v.as_str())
+                {
+                    logins.push(login.to_string());
+                }
+            }
+            Ok(logins)
+        }
+
+        fn visit_none<E>(self) -> Result<Vec<String>, E>
+        where
+            E: de::Error,
+        {
+            Ok(Vec::new())
+        }
+
+        fn visit_unit<E>(self) -> Result<Vec<String>, E>
+        where
+            E: de::Error,
+        {
+            Ok(Vec::new())
+        }
+    }
+
+    deserializer.deserialize_any(ReviewerVisitor)
 }
 
 /// A ref (base or head) on a pull request.
