@@ -262,3 +262,53 @@ jobs:
           repository: michaeldhopkins/homebrew-tap
           event-type: update-formula
           client-payload: '{"formula": "jjpr", "repo": "michaeldhopkins/jjpr", "version": "${{ needs.check-version.outputs.version }}"}'
+
+  update-aur:
+    name: Update AUR packages
+    needs: [check-version, release]
+    if: vars.AUR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [jjpr, jjpr-bin]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download checksums
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Update PKGBUILD
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          PKG="${{ matrix.package }}"
+          PKGBUILD="packaging/aur/$PKG/PKGBUILD"
+
+          # Update pkgver
+          sed -i "s/^pkgver=.*/pkgver=$VERSION/" "$PKGBUILD"
+          sed -i "s/^pkgrel=.*/pkgrel=1/" "$PKGBUILD"
+
+          if [ "$PKG" = "jjpr-bin" ]; then
+            # Update binary checksums from release artifacts
+            X86_SUM=$(grep "x86_64-unknown-linux-gnu" artifacts/SHA256SUMS.txt | awk '{print $1}')
+            AARCH64_SUM=$(grep "aarch64-unknown-linux-gnu" artifacts/SHA256SUMS.txt | awk '{print $1}')
+            sed -i "s/^sha256sums_x86_64=.*/sha256sums_x86_64=('$X86_SUM')/" "$PKGBUILD"
+            sed -i "s/^sha256sums_aarch64=.*/sha256sums_aarch64=('$AARCH64_SUM')/" "$PKGBUILD"
+          else
+            # Update source checksum from GitHub archive
+            SRC_SUM=$(curl -sL "${{ github.server_url }}/${{ github.repository }}/archive/v$VERSION.tar.gz" | sha256sum | awk '{print $1}')
+            sed -i "s/^sha256sums=.*/sha256sums=('$SRC_SUM')/" "$PKGBUILD"
+          fi
+
+          cat "$PKGBUILD"
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: ${{ matrix.package }}
+          pkgbuild: packaging/aur/${{ matrix.package }}/PKGBUILD
+          commit_username: Michael Hopkins
+          commit_email: michael.hopkins@hey.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
