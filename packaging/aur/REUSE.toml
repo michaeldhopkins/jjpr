@@ -1,0 +1,6 @@
+version = 1
+
+[[annotations]]
+path = ["jjpr/PKGBUILD", "jjpr-bin/PKGBUILD"]
+SPDX-FileCopyrightText = "Michael Hopkins"
+SPDX-License-Identifier = "0BSD"

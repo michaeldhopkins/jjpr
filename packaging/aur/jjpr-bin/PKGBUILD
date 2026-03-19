@@ -1,4 +1,5 @@
 # Maintainer: Michael Hopkins <michael.hopkins at hey dot com>
+# SPDX-License-Identifier: 0BSD
 pkgname=jjpr-bin
 pkgver=0.13.5
 pkgrel=1
