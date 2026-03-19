@@ -63,6 +63,7 @@ fn main() -> Result<()> {
             reconcile_strategy,
             watch,
             timeout,
+            ready,
         }) => {
             let ci_override = if no_ci_check { Some(false) } else { None };
             cmd_merge(
@@ -76,6 +77,7 @@ fn main() -> Result<()> {
                     reconcile_strategy,
                     watch,
                     timeout,
+                    ready,
                 },
                 cli.dry_run,
                 cli.no_fetch,
@@ -444,6 +446,7 @@ struct MergeArgs<'a> {
     reconcile_strategy: Option<config::ReconcileStrategy>,
     watch: bool,
     timeout: Option<u64>,
+    ready: bool,
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
@@ -494,6 +497,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         required_approvals: args.required_approvals.unwrap_or(cfg.required_approvals),
         require_ci_pass: args.ci_pass_override.unwrap_or(cfg.require_ci_pass),
         reconcile_strategy: args.reconcile_strategy.unwrap_or(cfg.reconcile_strategy),
+        ready: args.ready,
     };
 
     let stack_base = args.base_override.or(analysis.base_branch.as_deref());

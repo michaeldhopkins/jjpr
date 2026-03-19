@@ -187,6 +187,10 @@ Examples:
         /// Timeout in minutes for --watch mode (default: no timeout)
         #[arg(long, value_name = "MINUTES", requires = "watch")]
         timeout: Option<u64>,
+
+        /// Mark draft PRs as ready before merging
+        #[arg(long)]
+        ready: bool,
     },
     /// Manage forge authentication
     #[command(long_about = "\
