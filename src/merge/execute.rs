@@ -868,6 +868,7 @@ mod tests {
             required_approvals: 1,
             require_ci_pass: true,
             reconcile_strategy: crate::config::ReconcileStrategy::Rebase,
+            ready: false,
         }
     }
 

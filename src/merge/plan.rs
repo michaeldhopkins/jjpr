@@ -51,6 +51,7 @@ pub struct MergeOptions {
     pub required_approvals: u32,
     pub require_ci_pass: bool,
     pub reconcile_strategy: crate::config::ReconcileStrategy,
+    pub ready: bool,
 }
 
 /// The full merge plan for a stack.
@@ -101,7 +102,11 @@ pub fn evaluate_segment(
     let mut reasons = Vec::new();
 
     if pr.draft {
-        reasons.push(BlockReason::Draft);
+        if options.ready {
+            github.mark_pr_ready(&repo_info.owner, &repo_info.repo, pr.number)?;
+        } else {
+            reasons.push(BlockReason::Draft);
+        }
     }
 
     // API errors block the merge rather than silently skipping the check
@@ -273,6 +278,7 @@ mod tests {
             required_approvals: 1,
             require_ci_pass: true,
             reconcile_strategy: crate::config::ReconcileStrategy::Rebase,
+            ready: false,
         }
     }
 
