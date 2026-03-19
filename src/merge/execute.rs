@@ -310,7 +310,7 @@ pub fn execute_merge_plan(
             break;
         };
 
-        match status {
+        let needs_reconcile = match status {
             PrMergeStatus::AlreadyMerged {
                 bookmark_name,
                 pr_number,
@@ -323,6 +323,7 @@ pub fn execute_merge_plan(
                     bookmark_name,
                     pr_number,
                 });
+                true
             }
 
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
@@ -344,14 +345,7 @@ pub fn execute_merge_plan(
                     pr_number: pr.number,
                     html_url: pr.html_url.clone(),
                 });
-
-                if seg_idx + 1 < segments.len() {
-                    let fresh_map = reconcile_after_merge(
-                        jj, github, segments, seg_idx, plan, fk,
-                        &mut local_degraded, &mut local_warnings,
-                    );
-                    pr_map = fresh_map;
-                }
+                true
             }
 
             PrMergeStatus::Blocked {
@@ -374,6 +368,15 @@ pub fn execute_merge_plan(
                 });
                 break;
             }
+        };
+
+        // Reconcile after any resolved segment (merged or already-merged).
+        if needs_reconcile && seg_idx + 1 < segments.len() {
+            let fresh_map = reconcile_after_merge(
+                jj, github, segments, seg_idx, plan, fk,
+                &mut local_degraded, &mut local_warnings,
+            );
+            pr_map = fresh_map;
         }
     }
 
@@ -1508,6 +1511,44 @@ mod tests {
         assert_eq!(result.skipped_merged[0].pr_number, 1);
         assert_eq!(result.merged.len(), 1);
         assert_eq!(result.merged[0].pr_number, 2);
+    }
+
+    #[test]
+    fn test_reconciles_after_already_merged() {
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
+        gh.merged_prs.insert("auth".to_string(), make_pr("auth", 1));
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::AlreadyMerged {
+                    bookmark_name: "auth".to_string(),
+                    pr_number: 1,
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+
+        assert_eq!(result.skipped_merged.len(), 1);
+        assert_eq!(result.merged.len(), 1);
+
+        let jj_calls = jj.calls();
+        assert!(
+            jj_calls.iter().any(|c| c == "git_fetch"),
+            "reconcile should run after AlreadyMerged when more segments remain: {jj_calls:?}"
+        );
     }
 
     #[test]

@@ -188,13 +188,14 @@ pub fn execute_merge_plan_watch(
             }
         };
 
+        let prev_seg_idx = seg_idx;
+
         match status {
             PrMergeStatus::AlreadyMerged {
                 bookmark_name,
                 pr_number,
             } => {
                 if prev_reasons.is_some() {
-                    // Was blocked, now merged externally
                     println!("  {bookmark_name}: Merged externally ({}) \u{2014} moving on",
                         fk.format_ref(pr_number));
                 } else {
@@ -237,18 +238,6 @@ pub fn execute_merge_plan_watch(
                     html_url: pr.html_url.clone(),
                 });
 
-                if seg_idx + 1 < segments.len() {
-                    // If forge refresh fails, keep old pr_map — evaluate_segment
-                    // makes fresh API calls for the individual PR's status anyway.
-                    let fresh = reconcile_after_merge(
-                        jj, forge, segments, seg_idx, plan, fk,
-                        &mut local_degraded, &mut local_warnings,
-                    );
-                    if let Some(fresh_map) = fresh {
-                        pr_map = fresh_map;
-                    }
-                }
-
                 prev_reasons = None;
                 seg_idx += 1;
             }
@@ -276,7 +265,6 @@ pub fn execute_merge_plan_watch(
                     fk,
                 );
 
-                // Heartbeat: remind user we're still watching if nothing changed for a while
                 if !changed && last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                     let now = local_time_hhmm();
                     let first_reason = reasons
@@ -294,14 +282,23 @@ pub fn execute_merge_plan_watch(
                 prev_reasons = Some(reasons);
 
                 if interruptible_sleep(poll_interval, &shutdown) {
-                    println!("\nInterrupted.");
                     break;
                 }
 
-                // Refresh PR map each cycle to catch external changes
                 if let Ok(fresh) = refresh_pr_map(forge, owner, repo) {
                     pr_map = fresh;
                 }
+            }
+        }
+
+        // Reconcile after any segment advance (merged or already-merged).
+        if seg_idx > prev_seg_idx && seg_idx < segments.len() {
+            let fresh = reconcile_after_merge(
+                jj, forge, segments, prev_seg_idx, plan, fk,
+                &mut local_degraded, &mut local_warnings,
+            );
+            if let Some(fresh_map) = fresh {
+                pr_map = fresh_map;
             }
         }
     }
@@ -364,11 +361,10 @@ mod tests {
     }
 
     struct ScriptedForge {
-        /// Each call to evaluate returns the next status in the sequence.
-        /// When exhausted, repeats the last one.
         eval_sequence: Mutex<Vec<EvalResult>>,
         open_prs: Mutex<Vec<PullRequest>>,
         merge_calls: Mutex<Vec<u64>>,
+        merged_prs: Mutex<Vec<(String, PullRequest)>>,
     }
 
     enum EvalResult {
@@ -382,6 +378,7 @@ mod tests {
                 eval_sequence: Mutex::new(sequence),
                 open_prs: Mutex::new(Vec::new()),
                 merge_calls: Mutex::new(Vec::new()),
+                merged_prs: Mutex::new(Vec::new()),
             }
         }
 
@@ -477,7 +474,12 @@ mod tests {
         fn create_comment(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<crate::forge::IssueComment> { unimplemented!() }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { Ok(()) }
         fn get_authenticated_user(&self) -> Result<String> { Ok("user".to_string()) }
-        fn find_merged_pr(&self, _o: &str, _r: &str, _ref_name: &str) -> Result<Option<PullRequest>> { Ok(None) }
+        fn find_merged_pr(&self, _o: &str, _r: &str, ref_name: &str) -> Result<Option<PullRequest>> {
+            Ok(self.merged_prs.lock().expect("poisoned")
+                .iter()
+                .find(|(name, _)| name == ref_name)
+                .map(|(_, pr)| pr.clone()))
+        }
         fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<crate::forge::types::PrState> {
             Ok(crate::forge::types::PrState { merged: false, state: "open".to_string() })
         }
@@ -740,5 +742,70 @@ mod tests {
         let current = vec![BlockReason::Draft];
         let changed = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
         assert!(changed);
+    }
+
+    #[test]
+    fn test_watch_reconciles_after_already_merged() {
+        use std::sync::Mutex;
+
+        struct RecordingJj {
+            calls: Mutex<Vec<String>>,
+        }
+        impl RecordingJj {
+            fn new() -> Self { Self { calls: Mutex::new(Vec::new()) } }
+            fn calls(&self) -> Vec<String> { self.calls.lock().expect("poisoned").clone() }
+        }
+        impl Jj for RecordingJj {
+            fn git_fetch(&self) -> Result<()> {
+                self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+                Ok(())
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn push_bookmark(&self, name: &str, _remote: &str) -> Result<()> {
+                self.calls.lock().expect("poisoned").push(format!("push:{name}"));
+                Ok(())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
+                self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
+                Ok(())
+            }
+            fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+                Ok(vec!["dummy".to_string()])
+            }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+        }
+
+        // auth: not in open_prs, but find_merged_pr returns it → AlreadyMerged
+        // profile: in open_prs, all checks pass → Mergeable
+        let mut forge = ScriptedForge::new(vec![EvalResult::Mergeable])
+            .with_prs(vec![make_pr("profile", 2)]);
+
+        // Override find_merged_pr to return auth as merged
+        *forge.merged_prs.lock().expect("poisoned") =
+            vec![("auth".to_string(), make_pr("auth", 1))];
+
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+        let jj = RecordingJj::new();
+
+        let result = execute_merge_plan_watch(
+            &jj, &forge, &default_plan(), &segments, test_opts(),
+        )
+        .unwrap();
+
+        // auth skipped (already merged), profile merged
+        assert_eq!(result.skipped_merged.len(), 1);
+        assert_eq!(result.merged.len(), 1);
+
+        // Reconciliation ran between segments — git_fetch is proof
+        let jj_calls = jj.calls();
+        assert!(
+            jj_calls.iter().any(|c| c == "git_fetch"),
+            "reconcile should have run after AlreadyMerged: {jj_calls:?}"
+        );
     }
 }
