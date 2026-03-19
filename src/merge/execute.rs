@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::forge::comment;
 use crate::forge::http::HttpError;
 use crate::forge::types::{MergeMethod, PullRequest};
 use crate::forge::{Forge, ForgeKind};
@@ -177,6 +178,54 @@ fn reconcile_forge_state(
                     "Failed to retarget {} base to '{effective_base}': {e}",
                     fk.format_ref(next_pr.number)
                 ),
+            });
+        }
+    }
+
+    // Update stack comments on remaining open PRs to mark resolved segments.
+    let merged_names: std::collections::HashSet<&str> = segments[..=seg_idx]
+        .iter()
+        .map(|s| s.bookmark.name.as_str())
+        .collect();
+
+    for seg in &segments[seg_idx + 1..] {
+        let Some(pr) = fresh_map.get(&seg.bookmark.name) else {
+            continue;
+        };
+        let comments = match forge.list_comments(owner, repo, pr.number) {
+            Ok(c) => c,
+            Err(e) => {
+                warnings.push(LocalDivergenceWarning {
+                    message: format!("Failed to fetch comments for {}: {e}", fk.format_ref(pr.number)),
+                });
+                continue;
+            }
+        };
+        let Some(existing) = comment::find_stack_comment(&comments) else {
+            continue;
+        };
+        let Some(data) = existing.body.as_deref().and_then(comment::parse_comment_data) else {
+            continue;
+        };
+
+        let entries: Vec<comment::StackEntry> = data
+            .stack
+            .iter()
+            .map(|item| comment::StackEntry {
+                bookmark_name: item.bookmark_name.clone(),
+                pr_url: Some(item.pr_url.clone()),
+                pr_number: Some(item.pr_number),
+                is_current: item.bookmark_name == seg.bookmark.name,
+                is_merged: item.is_merged || merged_names.contains(item.bookmark_name.as_str()),
+            })
+            .collect();
+
+        let body = comment::generate_comment_body(&entries);
+        if existing.body.as_deref() != Some(&body)
+            && let Err(e) = forge.update_comment(owner, repo, existing.id, &body)
+        {
+            warnings.push(LocalDivergenceWarning {
+                message: format!("Failed to update stack comment on {}: {e}", fk.format_ref(pr.number)),
             });
         }
     }
@@ -721,7 +770,7 @@ mod tests {
         }
         fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
         fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-        fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+        fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
         fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
@@ -1597,7 +1646,7 @@ mod tests {
             fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
             fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
@@ -1937,7 +1986,7 @@ mod tests {
             fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
             fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
@@ -1975,7 +2024,7 @@ mod tests {
             fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
             fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
@@ -2013,7 +2062,7 @@ mod tests {
             fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
             fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
             fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
             fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
