@@ -782,7 +782,7 @@ mod tests {
 
         // auth: not in open_prs, but find_merged_pr returns it → AlreadyMerged
         // profile: in open_prs, all checks pass → Mergeable
-        let mut forge = ScriptedForge::new(vec![EvalResult::Mergeable])
+        let forge = ScriptedForge::new(vec![EvalResult::Mergeable])
             .with_prs(vec![make_pr("profile", 2)]);
 
         // Override find_merged_pr to return auth as merged
