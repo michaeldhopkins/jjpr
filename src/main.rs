@@ -458,7 +458,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
             let graph = change_graph::build_change_graph(&jj)?;
             match analyze::infer_target_bookmark(&graph, &jj)? {
                 Some(inferred) => {
-                    println!("Merging stack for '{inferred}' (inferred from working copy)\n");
+                    println!("Merging stack up to '{inferred}' (inferred from working copy)\n");
                     inferred
                 }
                 None => {
@@ -508,7 +508,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     )?;
 
     if args.watch {
-        println!("Watching stack for '{target_bookmark}'...\n");
+        println!("Watching stack up to '{target_bookmark}'...\n");
 
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = shutdown.clone();
@@ -548,7 +548,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     if args.bookmark.is_some() {
-        println!("Merging stack for '{target_bookmark}'...\n");
+        println!("Merging stack up to '{target_bookmark}'...\n");
     }
 
     let result = merge::execute::execute_merge_plan(
