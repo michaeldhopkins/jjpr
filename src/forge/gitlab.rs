@@ -56,10 +56,12 @@ fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
         base: PullRequestRef {
             ref_name: mr["target_branch"].as_str().unwrap_or("").to_string(),
             label: String::new(),
+            sha: mr["diff_refs"]["base_sha"].as_str().unwrap_or("").to_string(),
         },
         head: PullRequestRef {
             ref_name: mr["source_branch"].as_str().unwrap_or("").to_string(),
             label: head_label,
+            sha: mr["sha"].as_str().unwrap_or("").to_string(),
         },
         draft: mr["draft"].as_bool().unwrap_or(false),
         node_id: String::new(),

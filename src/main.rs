@@ -382,7 +382,8 @@ fn fetch_segment_status(
         .get_pr_mergeability(&repo_info.owner, &repo_info.repo, pr.number)
         .ok();
     let checks = forge
-        .get_pr_checks_status(&repo_info.owner, &repo_info.repo, &pr.head.ref_name)
+        .get_pr_checks_status(&repo_info.owner, &repo_info.repo,
+            if pr.head.sha.is_empty() { &pr.head.ref_name } else { &pr.head.sha })
         .ok();
     let reviews = forge
         .get_pr_reviews(&repo_info.owner, &repo_info.repo, pr.number)

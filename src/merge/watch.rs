@@ -492,10 +492,12 @@ mod tests {
             base: PullRequestRef {
                 ref_name: "main".to_string(),
                 label: String::new(),
+                sha: String::new(),
             },
             head: PullRequestRef {
                 ref_name: name.to_string(),
                 label: String::new(),
+                sha: format!("sha_{name}"),
             },
             draft: false,
             node_id: String::new(),

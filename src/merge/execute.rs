@@ -585,10 +585,12 @@ mod tests {
             base: PullRequestRef {
                 ref_name: "main".to_string(),
                 label: String::new(),
+                sha: String::new(),
             },
             head: PullRequestRef {
                 ref_name: name.to_string(),
                 label: String::new(),
+                sha: format!("sha_{name}"),
             },
             draft: false,
             node_id: String::new(),
@@ -640,7 +642,7 @@ mod tests {
                 },
             );
             self.checks
-                .insert(name.to_string(), ChecksStatus::Pass);
+                .insert(format!("sha_{name}"), ChecksStatus::Pass);
             self.reviews.insert(
                 number,
                 ReviewSummary {
@@ -870,7 +872,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
         // Profile's base points at auth (needs retargeting)
         gh.open_prs.lock().expect("poisoned")[1]
             .base
@@ -923,7 +925,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
@@ -1025,7 +1027,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
@@ -1077,7 +1079,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
@@ -1124,8 +1126,8 @@ mod tests {
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2)
             .with_evaluatable_pr("settings", 3);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
-        gh.checks.insert("settings".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_settings".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
@@ -1226,8 +1228,8 @@ mod tests {
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2)
             .with_evaluatable_pr("settings", 3);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
-        gh.checks.insert("settings".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_settings".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
@@ -1332,8 +1334,8 @@ mod tests {
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2)
             .with_evaluatable_pr("settings", 3);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
-        gh.checks.insert("settings".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_settings".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1]
             .base
             .ref_name = "auth".to_string();
@@ -1401,7 +1403,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
             actions: vec![
@@ -1441,7 +1443,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
             actions: vec![
@@ -1514,7 +1516,7 @@ mod tests {
         let mut gh = RecordingGitHub::new().with_evaluatable_pr("auth", 1);
         // Make auth a draft with failing CI so it blocks
         gh.open_prs.lock().expect("poisoned")[0].draft = true;
-        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
 
         let plan = MergePlan {
             actions: vec![PrMergeStatus::Blocked {
@@ -1748,7 +1750,7 @@ mod tests {
             .with_evaluatable_pr("profile", 2);
         // Override: profile CI is now pending (simulating CI re-running on rebased code)
         gh.checks
-            .insert("profile".to_string(), ChecksStatus::Pending);
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
             actions: vec![
@@ -1800,7 +1802,7 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("profile".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
         // Profile's base still points at auth (needs retarget to coworker-feat, not main)
         gh.open_prs.lock().expect("poisoned")[0]
             .base
@@ -2069,7 +2071,7 @@ mod tests {
         let jj = RecordingJj::new();
         let mut gh = RecordingGitHub::new().with_evaluatable_pr("auth", 1);
         // Simulate CI failing between plan creation and execution
-        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
 
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];

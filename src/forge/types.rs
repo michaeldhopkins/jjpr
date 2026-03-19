@@ -85,6 +85,8 @@ pub struct PullRequestRef {
     pub ref_name: String,
     #[serde(default)]
     pub label: String,
+    #[serde(default)]
+    pub sha: String,
 }
 
 /// A comment on an issue or pull request.

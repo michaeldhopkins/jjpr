@@ -115,14 +115,23 @@ pub fn evaluate_segment(
     }
 
     if options.require_ci_pass {
+        // Query by commit SHA to avoid stale results after a push.
+        // Fall back to branch ref if SHA is unavailable.
+        let checks_ref = if pr.head.sha.is_empty() {
+            &pr.head.ref_name
+        } else {
+            &pr.head.sha
+        };
         match github.get_pr_checks_status(
             &repo_info.owner,
             &repo_info.repo,
-            &pr.head.ref_name,
+            checks_ref,
         ) {
             Ok(ChecksStatus::Fail) => reasons.push(BlockReason::ChecksFailing),
             Ok(ChecksStatus::Pending) => reasons.push(BlockReason::ChecksPending),
-            Ok(ChecksStatus::Pass | ChecksStatus::None) => {}
+            Ok(ChecksStatus::Pass) => {}
+            // No checks exist for this commit — CI hasn't started yet.
+            Ok(ChecksStatus::None) => reasons.push(BlockReason::ChecksPending),
             Err(_) => reasons.push(BlockReason::ChecksPending),
         }
     }
@@ -244,10 +253,12 @@ mod tests {
             base: PullRequestRef {
                 ref_name: "main".to_string(),
                 label: String::new(),
+                sha: String::new(),
             },
             head: PullRequestRef {
                 ref_name: name.to_string(),
                 label: String::new(),
+                sha: format!("sha_{name}"),
             },
             draft: false,
             node_id: String::new(),
@@ -297,7 +308,7 @@ mod tests {
                 mergeable: Some(true),
                 mergeable_state: "clean".to_string(),
             });
-            self.checks.insert(name.to_string(), ChecksStatus::Pass);
+            self.checks.insert(format!("sha_{name}"), ChecksStatus::Pass);
             self.reviews.insert(number, ReviewSummary {
                 approved_count: 1,
                 changes_requested: false,
@@ -380,7 +391,7 @@ mod tests {
     #[test]
     fn test_blocked_by_failing_ci() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
 
         let segments = vec![make_segment("auth")];
         let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None).unwrap();
@@ -396,7 +407,7 @@ mod tests {
     #[test]
     fn test_blocked_by_pending_ci() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.checks.insert("auth".to_string(), ChecksStatus::Pending);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Pending);
 
         let segments = vec![make_segment("auth")];
         let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None).unwrap();
@@ -544,7 +555,7 @@ mod tests {
     #[test]
     fn test_ci_not_checked_when_disabled() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
 
         let mut options = default_options();
         options.require_ci_pass = false;
@@ -556,12 +567,25 @@ mod tests {
     }
 
     #[test]
-    fn test_no_checks_configured_allows_merge() {
+    fn test_no_checks_blocks_when_ci_required() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.checks.insert("auth".to_string(), ChecksStatus::None);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::None);
 
         let segments = vec![make_segment("auth")];
         let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None).unwrap();
+
+        assert!(matches!(&plan.actions[0], PrMergeStatus::Blocked { .. }));
+    }
+
+    #[test]
+    fn test_no_checks_allowed_when_ci_not_required() {
+        let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::None);
+
+        let mut options = default_options();
+        options.require_ci_pass = false;
+        let segments = vec![make_segment("auth")];
+        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &options, None).unwrap();
 
         assert!(matches!(&plan.actions[0], PrMergeStatus::Mergeable { .. }));
     }
@@ -570,7 +594,7 @@ mod tests {
     fn test_multiple_block_reasons_collected() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
         gh.open_prs[0].draft = true;
-        gh.checks.insert("auth".to_string(), ChecksStatus::Fail);
+        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
         gh.reviews.insert(1, ReviewSummary {
             approved_count: 0,
             changes_requested: true,
@@ -612,7 +636,7 @@ mod tests {
     fn test_api_error_blocks_ci_check() {
         // If CI checks API fails, PR should be blocked with pending (not silently skipped)
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.checks.remove("auth"); // remove stub so it returns Err
+        gh.checks.remove("sha_auth"); // remove stub so it returns Err
 
         let segments = vec![make_segment("auth")];
         let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None).unwrap();
