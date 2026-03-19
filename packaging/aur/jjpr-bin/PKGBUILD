@@ -1,0 +1,25 @@
+# Maintainer: Michael Hopkins <michael.hopkins@hey.com>
+pkgname=jjpr-bin
+pkgver=0.13.5
+pkgrel=1
+pkgdesc="Manage stacked pull requests in Jujutsu repositories"
+arch=('x86_64' 'aarch64')
+url="https://github.com/michaeldhopkins/jjpr"
+license=('MIT' 'Apache-2.0')
+provides=('jjpr')
+conflicts=('jjpr')
+
+source_x86_64=("$url/releases/download/v$pkgver/jjpr-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/jjpr-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('1efd82a2bd313bf2bff66ea59e92a6de867147f773e3ae204740194eb1b8f97d')
+sha256sums_aarch64=('79ce5e24df84abbf1bf1d6a633281fbb654fb73fcfc46b761845160a8cfb3fed')
+
+package() {
+    install -Dm755 "jjpr" "$pkgdir/usr/bin/jjpr"
+    install -Dm644 "jjpr.1" "$pkgdir/usr/share/man/man1/jjpr.1"
+    install -Dm644 "completions/jjpr.bash" "$pkgdir/usr/share/bash-completion/completions/jjpr"
+    install -Dm644 "completions/_jjpr" "$pkgdir/usr/share/zsh/site-functions/_jjpr"
+    install -Dm644 "completions/jjpr.fish" "$pkgdir/usr/share/fish/vendor_completions.d/jjpr.fish"
+    install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}

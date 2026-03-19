@@ -22,6 +22,25 @@ brew tap michaeldhopkins/tap
 brew install jjpr
 ```
 
+### Arch Linux (AUR)
+
+```
+yay -S jjpr-bin    # Pre-built binary
+yay -S jjpr        # Build from source
+```
+
+### cargo-binstall (pre-built binary)
+
+```
+cargo binstall jjpr
+```
+
+### From crates.io
+
+```
+cargo install jjpr
+```
+
 ### From source
 
 ```

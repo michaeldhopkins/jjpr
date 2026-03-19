@@ -55,6 +55,15 @@ too-many-arguments = "deny"
 needless-range-loop = "deny"
 extend_with_drain = "deny"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/jjpr-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "jjpr"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/jjpr-{ target }.zip"
+pkg-fmt = "zip"
+
 [profile.dist]
 inherits = "release"
 lto = "thin"
