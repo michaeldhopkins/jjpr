@@ -45,7 +45,7 @@ jjpr submit --draft               # Create new PRs as drafts
 jjpr submit --ready               # Mark existing draft PRs as ready
 jjpr merge                        # Merge stack from the bottom up
 jjpr merge <bookmark>             # Merge stack up to bookmark
-jjpr merge --watch                # Wait for pending CI and auto-continue
+jjpr merge --watch                # Watch for all blockers and auto-merge when ready
 jjpr merge --merge-method rebase  # Use rebase merge method
 jjpr merge --no-ci-check          # Merge even if CI hasn't passed
 jjpr merge --dry-run              # Preview without executing
@@ -181,21 +181,29 @@ If a PR is blocked (e.g., CI pending), jjpr reports why and stops:
 Run `jjpr merge --watch` to wait for CI and auto-continue.
 ```
 
-#### Watching for CI
+#### Watching and auto-merging
 
-Use `--watch` to wait for transient blockers (pending CI, unknown mergeability) instead of stopping. jjpr polls every 30 seconds for up to 30 minutes. When the blocker clears, it continues merging automatically:
+Use `--watch` to persistently watch for all blockers and auto-merge when ready. jjpr polls every 30 seconds. After merging a PR, it continues watching the next PR in the stack. Press Ctrl+C to exit:
 
 ```
-  Blocked at 'settings' (PR #44):
-    - CI checks are pending
+Watching stack for 'settings'...
 
-  Watching... (polling every 30s, timeout 30m)
-  ....  Ready — continuing merge.
+  Merging 'auth' (PR #42, squash)...
+    https://github.com/o/r/pull/42
+  Fetching remotes...
+
+  Waiting for 'settings' (PR #44):
+    - CI checks are pending
+    - Insufficient approvals (0/1)
+  settings: CI now passing
+  settings: Approval received (1/1)
 
   Merging 'settings' (PR #44, squash)...
+
+Done — 2 PRs merged.
 ```
 
-If a permanent blocker appears during watching (e.g., CI fails, changes requested), jjpr stops immediately.
+Use `--timeout <MINUTES>` to set a maximum wait time. Without it, watch runs until the stack is merged or Ctrl+C is pressed.
 
 #### Retry on transient errors
 

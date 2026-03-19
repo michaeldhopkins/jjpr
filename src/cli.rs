@@ -176,12 +176,17 @@ Examples:
         #[arg(long, value_enum)]
         reconcile_strategy: Option<ReconcileStrategy>,
 
-        /// Watch for transient blockers (pending CI) and auto-continue
+        /// Watch for all blockers and auto-merge when ready
         ///
-        /// When merge is blocked by pending CI checks or computing mergeability,
-        /// polls every 30 seconds and continues when ready. Times out after 30 minutes.
+        /// Polls every 30 seconds and continues when blockers resolve (CI passes,
+        /// approvals received, conflicts resolved, draft marked ready). After merging
+        /// a PR, continues watching the next PR in the stack. Press Ctrl+C to exit.
         #[arg(long)]
         watch: bool,
+
+        /// Timeout in minutes for --watch mode (default: no timeout)
+        #[arg(long, value_name = "MINUTES", requires = "watch")]
+        timeout: Option<u64>,
     },
     /// Manage forge authentication
     #[command(long_about = "\

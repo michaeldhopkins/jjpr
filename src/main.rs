@@ -62,6 +62,7 @@ fn main() -> Result<()> {
             base,
             reconcile_strategy,
             watch,
+            timeout,
         }) => {
             let ci_override = if no_ci_check { Some(false) } else { None };
             cmd_merge(
@@ -74,6 +75,7 @@ fn main() -> Result<()> {
                     base_override: base.as_deref(),
                     reconcile_strategy,
                     watch,
+                    timeout,
                 },
                 cli.dry_run,
                 cli.no_fetch,
@@ -440,6 +442,7 @@ struct MergeArgs<'a> {
     base_override: Option<&'a str>,
     reconcile_strategy: Option<config::ReconcileStrategy>,
     watch: bool,
+    timeout: Option<u64>,
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
@@ -504,23 +507,59 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         stack_base,
     )?;
 
+    if args.watch {
+        println!("Watching stack for '{target_bookmark}'...\n");
+
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = shutdown.clone();
+        ctrlc::set_handler(move || {
+            // Print immediately so the user knows we heard them.
+            // write() is async-signal-safe; println! is not, but in practice
+            // this is fine for a CLI tool — the worst case is a garbled line.
+            eprint!("\nInterrupting after current operation completes...");
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }).expect("failed to set Ctrl+C handler");
+
+        let timeout = args.timeout.map(|m| std::time::Duration::from_secs(m * 60));
+        let result = merge::watch::execute_merge_plan_watch(
+            &jj, forge.as_ref(), &merge_plan, &segments,
+            merge::watch::WatchOptions {
+                shutdown,
+                timeout,
+                poll_interval: std::time::Duration::from_secs(30),
+            },
+        )?;
+
+        if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
+            println!("\nNo PRs to merge in this stack.");
+        } else if let Some(ref blocked) = result.blocked_at {
+            if blocked.reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
+                println!("\nRun `jjpr submit` to create PRs, then re-run `jjpr merge --watch`.");
+            } else {
+                println!("\nRun `jjpr merge --watch` to resume watching.");
+            }
+        } else if result.merged.is_empty() && !result.skipped_merged.is_empty() {
+            println!("\nAll PRs in this stack are already merged.");
+        } else {
+            println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
+        }
+
+        return print_local_warnings(&result, &segments, stack_base, &default_branch);
+    }
+
     if args.bookmark.is_some() {
         println!("Merging stack for '{target_bookmark}'...\n");
     }
 
     let result = merge::execute::execute_merge_plan(
-        &jj, forge.as_ref(), &merge_plan, &segments, dry_run, args.watch,
+        &jj, forge.as_ref(), &merge_plan, &segments, dry_run,
     )?;
 
     if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
         println!("\nNo PRs to merge in this stack.");
     } else if let Some(ref blocked) = result.blocked_at {
         if blocked.reasons.iter().all(|r| r.is_transient()) {
-            if args.watch {
-                println!("\nWatch timed out. Run `jjpr merge --watch` to resume waiting.");
-            } else {
-                println!("\nRun `jjpr merge --watch` to wait for CI and auto-continue.");
-            }
+            println!("\nRun `jjpr merge --watch` to wait and auto-continue.");
         } else {
             println!("\nRun `jjpr merge` again once the issue is resolved.");
         }
@@ -530,38 +569,48 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
     }
 
-    if !result.local_warnings.is_empty() {
+    print_local_warnings(&result, &segments, stack_base, &default_branch)
+}
+
+fn print_local_warnings(
+    result: &merge::execute::MergeResult,
+    segments: &[jjpr::jj::types::NarrowedSegment],
+    stack_base: Option<&str>,
+    default_branch: &str,
+) -> Result<()> {
+    if result.local_warnings.is_empty() {
+        return Ok(());
+    }
+
+    println!();
+    println!("Note: local state is out of sync with the forge:");
+    for w in &result.local_warnings {
+        println!("  {}", w.message);
+    }
+
+    let merged_names: std::collections::HashSet<&str> = result.merged.iter()
+        .map(|m| m.bookmark_name.as_str())
+        .chain(result.skipped_merged.iter().map(|s| s.bookmark_name.as_str()))
+        .collect();
+    let unmerged: Vec<_> = segments.iter()
+        .filter(|s| !merged_names.contains(s.bookmark.name.as_str()))
+        .collect();
+
+    println!();
+    println!("To accept the forge state (discard local divergence):");
+    println!("  jj git fetch");
+    for seg in &unmerged {
+        println!("  jj bookmark set {} -r {}@origin", seg.bookmark.name, seg.bookmark.name);
+    }
+
+    if let Some(first_unmerged) = unmerged.first() {
         println!();
-        println!("Note: local state is out of sync with the forge:");
-        for w in &result.local_warnings {
-            println!("  {}", w.message);
-        }
-
-        // Collect unmerged bookmarks for concrete recovery instructions
-        let merged_names: std::collections::HashSet<&str> = result.merged.iter()
-            .map(|m| m.bookmark_name.as_str())
-            .chain(result.skipped_merged.iter().map(|s| s.bookmark_name.as_str()))
-            .collect();
-        let unmerged: Vec<_> = segments.iter()
-            .filter(|s| !merged_names.contains(s.bookmark.name.as_str()))
-            .collect();
-
-        println!();
-        println!("To accept the forge state (discard local divergence):");
-        println!("  jj git fetch");
-        for seg in &unmerged {
-            println!("  jj bookmark set {} -r {}@origin", seg.bookmark.name, seg.bookmark.name);
-        }
-
-        if let Some(first_unmerged) = unmerged.first() {
-            println!();
-            println!("Or to fix local state and push it to the forge:");
-            let base = stack_base.unwrap_or(&default_branch);
-            println!("  jj git fetch && jj rebase -s {} -d {base}",
-                first_unmerged.bookmark.change_id);
-            println!("  # resolve any conflicts, then:");
-            println!("  jjpr submit");
-        }
+        println!("Or to fix local state and push it to the forge:");
+        let base = stack_base.unwrap_or(default_branch);
+        println!("  jj git fetch && jj rebase -s {} -d {base}",
+            first_unmerged.bookmark.change_id);
+        println!("  # resolve any conflicts, then:");
+        println!("  jjpr submit");
     }
 
     Ok(())

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -139,6 +139,8 @@ fn reconcile_local_state(
 /// Refresh PR state from forge and retarget the next PR's base if needed.
 ///
 /// Independent of local state — runs even when local reconciliation failed.
+/// Returns `(Option<fresh_map>, Vec<warnings>)` — never errors, since the
+/// forge merge already happened and reconciliation is best-effort.
 fn reconcile_forge_state(
     forge: &dyn Forge,
     segments: &[NarrowedSegment],
@@ -147,8 +149,18 @@ fn reconcile_forge_state(
     repo: &str,
     effective_base: &str,
     fk: ForgeKind,
-) -> Result<HashMap<String, PullRequest>> {
-    let fresh_prs = forge.list_open_prs(owner, repo)?;
+) -> (Option<HashMap<String, PullRequest>>, Vec<LocalDivergenceWarning>) {
+    let mut warnings = Vec::new();
+
+    let fresh_prs = match forge.list_open_prs(owner, repo) {
+        Ok(prs) => prs,
+        Err(e) => {
+            warnings.push(LocalDivergenceWarning {
+                message: format!("Failed to refresh PR list: {e}"),
+            });
+            return (None, warnings);
+        }
+    };
     let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
 
     let next_name = &segments[seg_idx + 1].bookmark.name;
@@ -159,16 +171,25 @@ fn reconcile_forge_state(
             "  Updating {} base to '{effective_base}'...",
             fk.format_ref(next_pr.number)
         );
-        forge.update_pr_base(owner, repo, next_pr.number, effective_base)?;
+        if let Err(e) = forge.update_pr_base(owner, repo, next_pr.number, effective_base) {
+            warnings.push(LocalDivergenceWarning {
+                message: format!(
+                    "Failed to retarget {} base to '{effective_base}': {e}",
+                    fk.format_ref(next_pr.number)
+                ),
+            });
+        }
     }
 
-    Ok(fresh_map)
+    (Some(fresh_map), warnings)
 }
 
 /// Run both local and forge reconciliation after a successful merge.
 ///
 /// Shared by the normal merge path and the watch-mode path to avoid duplication.
-fn reconcile_after_merge(
+/// Never errors — the forge merge already happened, so reconciliation is
+/// best-effort. Failures are reported as warnings.
+pub(crate) fn reconcile_after_merge(
     jj: &dyn Jj,
     forge: &dyn Forge,
     segments: &[NarrowedSegment],
@@ -177,7 +198,7 @@ fn reconcile_after_merge(
     fk: ForgeKind,
     local_degraded: &mut bool,
     local_warnings: &mut Vec<LocalDivergenceWarning>,
-) -> Result<HashMap<String, PullRequest>> {
+) -> Option<HashMap<String, PullRequest>> {
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
     let effective_base = plan.stack_base.as_deref().unwrap_or(&plan.default_branch);
@@ -194,7 +215,14 @@ fn reconcile_after_merge(
     } else {
         println!("  Skipping local sync (local state already diverged)");
     }
-    reconcile_forge_state(forge, segments, seg_idx, owner, repo, effective_base, fk)
+
+    let (fresh_map, forge_warnings) =
+        reconcile_forge_state(forge, segments, seg_idx, owner, repo, effective_base, fk);
+    if !forge_warnings.is_empty() {
+        *local_degraded = true;
+        local_warnings.extend(forge_warnings);
+    }
+    fresh_map
 }
 
 /// A PR that was successfully merged.
@@ -245,7 +273,6 @@ pub fn execute_merge_plan(
     plan: &MergePlan,
     segments: &[NarrowedSegment],
     dry_run: bool,
-    watch: bool,
 ) -> Result<MergeResult> {
     if dry_run {
         return execute_dry_run(plan);
@@ -322,8 +349,8 @@ pub fn execute_merge_plan(
                     let fresh_map = reconcile_after_merge(
                         jj, github, segments, seg_idx, plan, fk,
                         &mut local_degraded, &mut local_warnings,
-                    )?;
-                    pr_map = Some(fresh_map);
+                    );
+                    pr_map = fresh_map;
                 }
             }
 
@@ -340,118 +367,11 @@ pub fn execute_merge_plan(
                 for reason in &reasons {
                     println!("    - {}", format_block_reason(reason, fk));
                 }
-
-                // Watch mode: poll transient blockers until resolved or timeout
-                if watch && reasons.iter().all(|r| r.is_transient()) {
-                    // Build a fresh PR map if we don't have one yet (first segment)
-                    let watch_map = if let Some(ref map) = pr_map {
-                        map.clone()
-                    } else {
-                        let fresh_prs = github.list_open_prs(owner, repo)?;
-                        crate::forge::build_pr_map(fresh_prs, owner)
-                    };
-                    {
-                        println!("\n  Watching... (polling every 30s, timeout 30m)");
-                        let deadline = Instant::now() + Duration::from_secs(30 * 60);
-                        let mut resolved = false;
-                        while Instant::now() < deadline {
-                            thread::sleep(Duration::from_secs(30));
-                            match evaluate_segment(
-                                github,
-                                &bookmark_name,
-                                &plan.repo_info,
-                                &watch_map,
-                                &plan.options,
-                            ) {
-                                Ok(PrMergeStatus::Mergeable { bookmark_name: bm, pr: p }) => {
-                                    println!("  Ready \u{2014} continuing merge.");
-                                    // Re-inject as mergeable and let the outer loop handle it
-                                    // For simplicity, just do the merge inline here
-                                    println!(
-                                        "\n  Merging '{bm}' ({}, {})...",
-                                        fk.format_ref(p.number), plan.options.merge_method
-                                    );
-                                    println!("    {}", p.html_url);
-                                    merge_with_retry(
-                                        github, owner, repo, p.number, plan.options.merge_method, fk,
-                                    )
-                                    .with_context(|| {
-                                        format!("failed to merge {} for '{bm}'", fk.format_ref(p.number))
-                                    })?;
-                                    merged.push(MergedPr {
-                                        bookmark_name: bm,
-                                        pr_number: p.number,
-                                        html_url: p.html_url.clone(),
-                                    });
-                                    resolved = true;
-                                    break;
-                                }
-                                Ok(PrMergeStatus::Blocked { reasons: new_reasons, .. })
-                                    if new_reasons.iter().all(|r| r.is_transient()) =>
-                                {
-                                    print!(".");
-                                    use std::io::Write;
-                                    std::io::stdout().flush().ok();
-                                    continue;
-                                }
-                                Ok(PrMergeStatus::Blocked { reasons: new_reasons, pr: new_pr, bookmark_name: bm }) => {
-                                    println!("\n  Blocked at '{bm}' (no longer transient):");
-                                    for reason in &new_reasons {
-                                        println!("    - {}", format_block_reason(reason, fk));
-                                    }
-                                    blocked_at = Some(BlockedPr {
-                                        bookmark_name: bm,
-                                        pr_number: new_pr.as_ref().map(|p| p.number),
-                                        reasons: new_reasons,
-                                    });
-                                    break;
-                                }
-                                Ok(PrMergeStatus::AlreadyMerged { bookmark_name: bm, pr_number: pn }) => {
-                                    println!("\n  '{bm}' was merged externally.");
-                                    skipped_merged.push(SkippedMergedPr {
-                                        bookmark_name: bm,
-                                        pr_number: pn,
-                                    });
-                                    resolved = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    eprintln!("\n  Watch poll error: {e}");
-                                    blocked_at = Some(BlockedPr {
-                                        bookmark_name: bookmark_name.clone(),
-                                        pr_number: pr.as_ref().map(|p| p.number),
-                                        reasons: reasons.clone(),
-                                    });
-                                    break;
-                                }
-                            }
-                        }
-                        if !resolved && blocked_at.is_none() {
-                            println!("\n  Watch timed out after 30 minutes.");
-                            blocked_at = Some(BlockedPr {
-                                bookmark_name,
-                                pr_number: pr.as_ref().map(|p| p.number),
-                                reasons,
-                            });
-                        }
-                        if resolved && seg_idx + 1 < segments.len() {
-                            let fresh_map = reconcile_after_merge(
-                                jj, github, segments, seg_idx, plan, fk,
-                                &mut local_degraded, &mut local_warnings,
-                            )?;
-                            pr_map = Some(fresh_map);
-                        }
-                        if resolved {
-                            continue;
-                        }
-                    }
-                } else {
-                    blocked_at = Some(BlockedPr {
-                        bookmark_name,
-                        pr_number: pr.as_ref().map(|p| p.number),
-                        reasons,
-                    });
-                }
+                blocked_at = Some(BlockedPr {
+                    bookmark_name,
+                    pr_number: pr.as_ref().map(|p| p.number),
+                    reasons,
+                });
                 break;
             }
         }
@@ -471,7 +391,7 @@ pub fn execute_merge_plan(
 /// - 502/503: transient server errors — verify state, then retry
 /// - 405 "already in progress": GitHub is processing — poll until merged
 /// - Other errors: propagate immediately
-fn merge_with_retry(
+pub(crate) fn merge_with_retry(
     forge: &dyn Forge,
     owner: &str,
     repo: &str,
@@ -597,7 +517,7 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
     })
 }
 
-fn format_block_reason(reason: &BlockReason, fk: ForgeKind) -> String {
+pub(crate) fn format_block_reason(reason: &BlockReason, fk: ForgeKind) -> String {
     let abbr = fk.request_abbreviation();
     match reason {
         BlockReason::NoPr => format!("No {abbr} exists for this bookmark"),
@@ -919,7 +839,7 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, true, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, true).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert!(jj.calls().is_empty());
@@ -933,7 +853,7 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert_eq!(result.merged[0].pr_number, 1);
@@ -977,7 +897,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert!(result.blocked_at.is_some());
@@ -1083,7 +1003,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), profile_segment];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
         assert_eq!(result.merged.len(), 1);
 
         // Must rebase from ch_oldest (the first commit after auth), NOT ch_profile (the tip).
@@ -1134,7 +1054,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
         assert_eq!(result.merged.len(), 1);
 
         let jj_calls = jj.calls();
@@ -1183,7 +1103,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
         assert_eq!(result.merged.len(), 1);
 
         let jj_calls = jj.calls();
@@ -1246,7 +1166,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
         assert_eq!(result.merged.len(), 1);
 
         let jj_calls = jj.calls();
@@ -1348,7 +1268,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         let jj_calls = jj.calls();
         // merge_into attempted for profile, but breaks on failure — settings not attempted
@@ -1454,7 +1374,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         let jj_calls = jj.calls();
         // merge_into succeeds but conflict detected — should not push or continue
@@ -1504,7 +1424,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         // Should NOT call update_base since it's already "main"
         assert!(
@@ -1544,7 +1464,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert!(
             jj.calls().iter().any(|c| c == "push:profile:upstream"),
@@ -1580,7 +1500,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.skipped_merged.len(), 1);
         assert_eq!(result.skipped_merged[0].pr_number, 1);
@@ -1611,7 +1531,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert!(result.merged.is_empty());
         assert!(result.blocked_at.is_some());
@@ -1657,7 +1577,7 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let err = execute_merge_plan(&jj, &FailingMergeGitHub, &plan, &segments, false, false).unwrap_err();
+        let err = execute_merge_plan(&jj, &FailingMergeGitHub, &plan, &segments, false).unwrap_err();
         assert!(format!("{err:#}").contains("merge conflict detected"));
     }
 
@@ -1689,7 +1609,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.merged.len(), 2);
         let gh_calls = gh.calls();
@@ -1733,7 +1653,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.merged.len(), 3);
         assert!(result.blocked_at.is_none());
@@ -1801,7 +1721,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.merged.len(), 1);
         assert_eq!(result.merged[0].bookmark_name, "auth");
@@ -1851,7 +1771,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         // Auth should be merged
         assert_eq!(result.merged.len(), 1);
@@ -1907,7 +1827,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         // Should rebase onto coworker-feat, not main
         assert!(
@@ -2113,7 +2033,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&DivergentJj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&DivergentJj, &gh, &plan, &segments, false).unwrap();
 
         // Both PRs should merge on the forge despite local divergence
         assert_eq!(result.merged.len(), 2, "both PRs should merge: {:?}", result.merged);
@@ -2154,7 +2074,7 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         // Should NOT have merged — CI is failing
         assert!(
@@ -2219,7 +2139,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         // All 3 PRs should have been merged on the forge
         assert_eq!(
@@ -2283,7 +2203,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&FailingRebaseJj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&FailingRebaseJj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(result.merged.len(), 2);
         assert!(result.local_warnings.iter().any(|w| w.message.contains("rebase")));
@@ -2326,7 +2246,7 @@ mod tests {
             make_segment("settings"),
         ];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
         assert_eq!(result.merged.len(), 3);
 
         // Should only have attempted fetch+rebase+push once (for the first reconciliation).
@@ -2367,7 +2287,7 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
-        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false, false).unwrap();
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         // Both should merge despite push failure
         assert_eq!(result.merged.len(), 2);
