@@ -6,7 +6,8 @@ pkgrel=1
 pkgdesc="Manage stacked pull requests in Jujutsu repositories"
 arch=('x86_64' 'aarch64')
 url="https://github.com/michaeldhopkins/jjpr"
-license=('MIT' 'Apache-2.0')
+license=('MIT OR Apache-2.0')
+depends=('gcc-libs' 'glibc')
 provides=('jjpr')
 conflicts=('jjpr')
 

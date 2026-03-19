@@ -6,28 +6,38 @@ pkgrel=1
 pkgdesc="Manage stacked pull requests in Jujutsu repositories"
 arch=('x86_64' 'aarch64')
 url="https://github.com/michaeldhopkins/jjpr"
-license=('MIT' 'Apache-2.0')
-makedepends=('cargo')
+license=('MIT OR Apache-2.0')
+depends=('gcc-libs' 'glibc')
+makedepends=('rust')
 conflicts=('jjpr-bin')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('a4a7ec933c498b1791f5d5cb2546f4abde24fd4ae85b4000ac7d397d5b35d95d')
 
 prepare() {
     cd "$pkgname-$pkgver"
-    export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
     cd "$pkgname-$pkgver"
-    export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo build --frozen --release
+    cargo run --frozen --example generate_assets
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export CARGO_TARGET_DIR=target
+    cargo test --frozen
 }
 
 package() {
     cd "$pkgname-$pkgver"
     install -Dm755 "target/release/jjpr" "$pkgdir/usr/bin/jjpr"
+    install -Dm644 "target/assets/jjpr.1" "$pkgdir/usr/share/man/man1/jjpr.1"
+    install -Dm644 "target/assets/completions/jjpr.bash" "$pkgdir/usr/share/bash-completion/completions/jjpr"
+    install -Dm644 "target/assets/completions/_jjpr" "$pkgdir/usr/share/zsh/site-functions/_jjpr"
+    install -Dm644 "target/assets/completions/jjpr.fish" "$pkgdir/usr/share/fish/vendor_completions.d/jjpr.fish"
     install -Dm644 "LICENSE-MIT" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
     install -Dm644 "LICENSE-APACHE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
 }
