@@ -31,10 +31,13 @@ JJPR_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
 
 E2E tests use `michaeldhopkins/jjpr-testing-environment` (private repo). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
 
-## After verifying changes
+## Before pushing
 
-After tests pass and clippy is clean, always run `cargo install --path .` to install the updated binary.
+Every push must pass these steps. CI runs `cargo check --locked`, `cargo test`, `cargo clippy`, and `cargo deny` — a stale lockfile or clippy warning will fail the build.
 
-## README
-
-Keep README.md up to date when adding features, commands, or changing usage patterns.
+1. **Bump the version** in `Cargo.toml` when adding features or making behavioral changes (semver: patch for fixes, minor for new features/behavioral changes).
+2. **Update Cargo.lock** — run `cargo check` after any `Cargo.toml` change so the lockfile stays in sync. CI uses `--locked` and will reject a stale lockfile.
+3. **`cargo test`** — all tests must pass.
+4. **`cargo clippy --tests`** — must be clean (warnings are errors in CI).
+5. **`cargo install --path .`** — install the updated binary locally.
+6. **Update README.md** when adding features, commands, or changing usage patterns.
