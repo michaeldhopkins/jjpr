@@ -6,3 +6,4 @@ pub mod graph;
 pub mod jj;
 pub mod merge;
 pub mod submit;
+pub mod watch;

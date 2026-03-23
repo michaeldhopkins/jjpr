@@ -83,6 +83,29 @@ fn main() -> Result<()> {
                 cli.no_fetch,
             )
         }
+        Some(Commands::Watch {
+            bookmark,
+            remote,
+            base,
+            merge_method,
+            required_approvals,
+            no_ci_check,
+            reconcile_strategy,
+            timeout,
+        }) => {
+            let ci_override = if no_ci_check { Some(false) } else { None };
+            cmd_watch(
+                bookmark.as_deref(),
+                remote.as_deref(),
+                base.as_deref(),
+                merge_method,
+                required_approvals,
+                ci_override,
+                reconcile_strategy,
+                timeout,
+                cli.no_fetch,
+            )
+        }
         Some(Commands::Auth { command }) => {
             match command {
                 AuthCommands::Test => {
@@ -126,6 +149,83 @@ fn main() -> Result<()> {
     }
 }
 
+/// Shared setup result used by submit, merge, and watch commands.
+struct ResolvedStack {
+    jj: JjRunner,
+    forge: Box<dyn Forge>,
+    forge_kind: ForgeKind,
+    remote_name: String,
+    repo_info: RepoInfo,
+    default_branch: String,
+    config: config::Config,
+    segments: Vec<jjpr::jj::types::NarrowedSegment>,
+    target_bookmark: String,
+    stack_base: Option<String>,
+}
+
+/// Resolve the target stack: find repo, infer bookmark, fetch, resolve forge,
+/// build graph, analyze segments, and resolve bookmark selections.
+///
+/// Returns `None` if no bookmark is found in the working copy's ancestry
+/// (user needs to create one first).
+fn resolve_stack(
+    bookmark: Option<&str>,
+    preferred_remote: Option<&str>,
+    no_fetch: bool,
+    command_verb: &str,
+) -> Result<Option<ResolvedStack>> {
+    let repo_path = find_repo_root()?;
+    let jj = JjRunner::new(repo_path.clone())?;
+    let cfg = config::load_config_with_repo(Some(&repo_path))?;
+
+    let target_bookmark = match bookmark {
+        Some(name) => name.to_string(),
+        None => {
+            let graph = change_graph::build_change_graph(&jj)?;
+            match analyze::infer_target_bookmark(&graph, &jj)? {
+                Some(inferred) => {
+                    println!("{command_verb} stack for '{inferred}' (inferred from working copy)\n");
+                    inferred
+                }
+                None => {
+                    println!("No bookmark found in the working copy's ancestry.");
+                    println!("Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr <command> <bookmark>`");
+                    return Ok(None);
+                }
+            }
+        }
+    };
+
+    if !no_fetch {
+        eprintln!("Fetching remotes...");
+        jj.git_fetch()?;
+    }
+
+    let remotes = jj.get_git_remotes()?;
+    let resolved = resolve_forge(&remotes, &cfg, preferred_remote)?;
+    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = resolved;
+
+    let default_branch = jj.get_default_branch()?;
+    let graph = change_graph::build_change_graph(&jj)?;
+    let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
+    let interactive = std::io::stdout().is_terminal();
+    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
+    let stack_base = analysis.base_branch;
+
+    Ok(Some(ResolvedStack {
+        jj,
+        forge,
+        forge_kind,
+        remote_name,
+        repo_info,
+        default_branch,
+        config: cfg,
+        segments,
+        target_bookmark,
+        stack_base,
+    }))
+}
+
 enum DraftMode {
     Normal,
     Draft,
@@ -143,50 +243,12 @@ struct SubmitOptions<'a> {
 }
 
 fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
-    let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path.clone())?;
-    let cfg = config::load_config_with_repo(Some(&repo_path))?;
-
-    // Infer bookmark before fetching to avoid a slow network round-trip
-    // when there's nothing to submit
-    let target_bookmark = match opts.bookmark {
-        Some(name) => name.to_string(),
-        None => {
-            let graph = change_graph::build_change_graph(&jj)?;
-            match analyze::infer_target_bookmark(&graph, &jj)? {
-                Some(inferred) => {
-                    println!("Submitting stack for '{inferred}' (inferred from working copy)\n");
-                    inferred
-                }
-                None => {
-                    println!("No bookmark found in the working copy's ancestry.");
-                    println!("Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr submit <bookmark>`");
-                    return Ok(());
-                }
-            }
-        }
+    let Some(stack) = resolve_stack(opts.bookmark, opts.preferred_remote, opts.no_fetch, "Submitting")? else {
+        return Ok(());
     };
 
-    if !opts.no_fetch {
-        eprintln!("Fetching remotes...");
-        jj.git_fetch()?;
-    }
-
-    let remotes = jj.get_git_remotes()?;
-    let resolved = resolve_forge(&remotes, &cfg, opts.preferred_remote)?;
-    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = resolved;
-
-    let default_branch = jj.get_default_branch()?;
-
-    let graph = change_graph::build_change_graph(&jj)?;
-
-    let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
-
-    let interactive = std::io::stdout().is_terminal();
-    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
-
     // Pre-flight: check for conflicted commits before attempting any pushes
-    let conflicted: Vec<_> = segments.iter()
+    let conflicted: Vec<_> = stack.segments.iter()
         .flat_map(|seg| seg.changes.iter().filter(|c| c.conflict)
             .map(|c| (seg.bookmark.name.as_str(), c.change_id.as_str(), c.description_first_line.as_str())))
         .collect();
@@ -200,24 +262,24 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         anyhow::bail!("unresolved conflicts in stack");
     }
 
-    let stack_base = opts.base_override.or(analysis.base_branch.as_deref());
+    let stack_base_override = opts.base_override.or(stack.stack_base.as_deref());
     let submission_plan = plan::create_submission_plan(
-        forge.as_ref(),
-        &segments,
-        &remote_name,
-        &repo_info,
-        forge_kind,
-        &default_branch,
+        stack.forge.as_ref(),
+        &stack.segments,
+        &stack.remote_name,
+        &stack.repo_info,
+        stack.forge_kind,
+        &stack.default_branch,
         matches!(opts.draft_mode, DraftMode::Draft),
         matches!(opts.draft_mode, DraftMode::Ready),
         opts.reviewers,
-        stack_base,
+        stack_base_override,
     )?;
 
     if opts.bookmark.is_some() {
-        println!("Submitting stack for '{target_bookmark}'...\n");
+        println!("Submitting stack for '{}'...\n", stack.target_bookmark);
     }
-    execute::execute_submission_plan(&jj, forge.as_ref(), &submission_plan, opts.reviewers, opts.dry_run)?;
+    execute::execute_submission_plan(&stack.jj, stack.forge.as_ref(), &submission_plan, opts.reviewers, opts.dry_run)?;
     println!("\nDone.");
 
     Ok(())
@@ -450,84 +512,48 @@ struct MergeArgs<'a> {
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
-    let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path.clone())?;
-    let cfg = config::load_config_with_repo(Some(&repo_path))?;
-
-    // Infer bookmark before fetching to avoid a slow network round-trip
-    // when there's nothing to merge
-    let target_bookmark = match args.bookmark {
-        Some(name) => name.to_string(),
-        None => {
-            let graph = change_graph::build_change_graph(&jj)?;
-            match analyze::infer_target_bookmark(&graph, &jj)? {
-                Some(inferred) => {
-                    println!("Merging stack up to '{inferred}' (inferred from working copy)\n");
-                    inferred
-                }
-                None => {
-                    println!("No bookmark found in the working copy's ancestry.");
-                    println!("Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr merge <bookmark>`");
-                    return Ok(());
-                }
-            }
-        }
+    let Some(stack) = resolve_stack(args.bookmark, args.preferred_remote, no_fetch, "Merging")? else {
+        return Ok(());
     };
 
-    if !no_fetch {
-        eprintln!("Fetching remotes...");
-        jj.git_fetch()?;
-    }
-
-    let remotes = jj.get_git_remotes()?;
-    let resolved = resolve_forge(&remotes, &cfg, args.preferred_remote)?;
-    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = resolved;
-
-    let default_branch = jj.get_default_branch()?;
-
-    let graph = change_graph::build_change_graph(&jj)?;
-
-    let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
-
-    let interactive = std::io::stdout().is_terminal();
-    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
-
     let merge_options = merge::plan::MergeOptions {
-        merge_method: args.merge_method.unwrap_or(cfg.merge_method),
-        required_approvals: args.required_approvals.unwrap_or(cfg.required_approvals),
-        require_ci_pass: args.ci_pass_override.unwrap_or(cfg.require_ci_pass),
-        reconcile_strategy: args.reconcile_strategy.unwrap_or(cfg.reconcile_strategy),
+        merge_method: args.merge_method.unwrap_or(stack.config.merge_method),
+        required_approvals: args.required_approvals.unwrap_or(stack.config.required_approvals),
+        require_ci_pass: args.ci_pass_override.unwrap_or(stack.config.require_ci_pass),
+        reconcile_strategy: args.reconcile_strategy.unwrap_or(stack.config.reconcile_strategy),
         ready: args.ready,
     };
 
-    let stack_base = args.base_override.or(analysis.base_branch.as_deref());
+    let stack_base_str = args.base_override
+        .map(|s| s.to_string())
+        .or(stack.stack_base.clone());
+    let stack_base = stack_base_str.as_deref();
+
     let merge_plan = merge::plan::create_merge_plan(
-        forge.as_ref(),
-        &segments,
-        &repo_info,
-        forge_kind,
-        &default_branch,
-        &remote_name,
+        stack.forge.as_ref(),
+        &stack.segments,
+        &stack.repo_info,
+        stack.forge_kind,
+        &stack.default_branch,
+        &stack.remote_name,
         &merge_options,
         stack_base,
     )?;
 
     if args.watch {
-        println!("Watching stack up to '{target_bookmark}'...\n");
+        eprintln!("hint: `jjpr merge --watch` is deprecated. Use `jjpr watch` instead.\n");
+        println!("Watching stack up to '{}'...\n", stack.target_bookmark);
 
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = shutdown.clone();
         ctrlc::set_handler(move || {
-            // Print immediately so the user knows we heard them.
-            // write() is async-signal-safe; println! is not, but in practice
-            // this is fine for a CLI tool — the worst case is a garbled line.
             eprint!("\nInterrupting after current operation completes...");
             flag.store(true, std::sync::atomic::Ordering::Relaxed);
         }).expect("failed to set Ctrl+C handler");
 
         let timeout = args.timeout.map(|m| std::time::Duration::from_secs(m * 60));
         let result = merge::watch::execute_merge_plan_watch(
-            &jj, forge.as_ref(), &merge_plan, &segments,
+            &stack.jj, stack.forge.as_ref(), &merge_plan, &stack.segments,
             merge::watch::WatchOptions {
                 shutdown,
                 timeout,
@@ -535,36 +561,107 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
             },
         )?;
 
-        if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
-            println!("\nNo PRs to merge in this stack.");
-        } else if let Some(ref blocked) = result.blocked_at {
-            if blocked.reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
-                println!("\nRun `jjpr submit` to create PRs, then re-run `jjpr merge --watch`.");
-            } else {
-                println!("\nRun `jjpr merge --watch` to resume watching.");
-            }
-        } else if result.merged.is_empty() && !result.skipped_merged.is_empty() {
-            println!("\nAll PRs in this stack are already merged.");
-        } else {
-            println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
-        }
-
-        return print_local_warnings(&result, &segments, stack_base, &default_branch);
+        print_merge_summary(&result);
+        return print_local_warnings(&result, &stack.segments, stack_base, &stack.default_branch);
     }
 
     if args.bookmark.is_some() {
-        println!("Merging stack up to '{target_bookmark}'...\n");
+        println!("Merging stack up to '{}'...\n", stack.target_bookmark);
     }
 
     let result = merge::execute::execute_merge_plan(
-        &jj, forge.as_ref(), &merge_plan, &segments, dry_run,
+        &stack.jj, stack.forge.as_ref(), &merge_plan, &stack.segments, dry_run,
     )?;
 
+    print_merge_summary(&result);
+    print_local_warnings(&result, &stack.segments, stack_base, &stack.default_branch)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_watch(
+    bookmark: Option<&str>,
+    preferred_remote: Option<&str>,
+    base_override: Option<&str>,
+    merge_method: Option<MergeMethod>,
+    required_approvals: Option<u32>,
+    ci_pass_override: Option<bool>,
+    reconcile_strategy: Option<config::ReconcileStrategy>,
+    timeout: Option<u64>,
+    no_fetch: bool,
+) -> Result<()> {
+    let Some(stack) = resolve_stack(bookmark, preferred_remote, no_fetch, "Watching")? else {
+        return Ok(());
+    };
+
+    let merge_options = merge::plan::MergeOptions {
+        merge_method: merge_method.unwrap_or(stack.config.merge_method),
+        required_approvals: required_approvals.unwrap_or(stack.config.required_approvals),
+        require_ci_pass: ci_pass_override.unwrap_or(stack.config.require_ci_pass),
+        reconcile_strategy: reconcile_strategy.unwrap_or(stack.config.reconcile_strategy),
+        ready: false,
+    };
+
+    let stack_base_str = base_override
+        .map(|s| s.to_string())
+        .or(stack.stack_base.clone());
+
+    println!("Watching stack up to '{}'...\n", stack.target_bookmark);
+
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = shutdown.clone();
+    ctrlc::set_handler(move || {
+        eprint!("\nInterrupting after current operation completes...");
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }).expect("failed to set Ctrl+C handler");
+
+    let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
+    let result = jjpr::watch::run_watch_loop(
+        &stack.jj,
+        stack.forge.as_ref(),
+        &stack.repo_info,
+        stack.forge_kind,
+        &stack.remote_name,
+        &stack.default_branch,
+        &merge_options,
+        &stack.target_bookmark,
+        stack_base_str.as_deref(),
+        merge::watch::WatchOptions {
+            shutdown,
+            timeout: timeout_dur,
+            poll_interval: std::time::Duration::from_secs(30),
+        },
+    )?;
+
+    print_watch_summary(&result);
+    print_local_warnings(
+        &result.merge_result,
+        &stack.segments,
+        stack_base_str.as_deref(),
+        &stack.default_branch,
+    )
+}
+
+fn print_watch_summary(result: &jjpr::watch::WatchResult) {
+    let mr = &result.merge_result;
+    if !result.prs_created.is_empty() {
+        let n = result.prs_created.len();
+        println!("\n  Created {n} draft PR{}.", if n == 1 { "" } else { "s" });
+    }
+    if !result.prs_promoted.is_empty() {
+        let n = result.prs_promoted.len();
+        println!("  Promoted {n} PR{} to ready.", if n == 1 { "" } else { "s" });
+    }
+    print_merge_summary(mr);
+}
+
+fn print_merge_summary(result: &merge::execute::MergeResult) {
     if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
         println!("\nNo PRs to merge in this stack.");
     } else if let Some(ref blocked) = result.blocked_at {
-        if blocked.reasons.iter().all(|r| r.is_transient()) {
-            println!("\nRun `jjpr merge --watch` to wait and auto-continue.");
+        if blocked.reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
+            println!("\nRun `jjpr submit` to create PRs, then re-run `jjpr watch`.");
+        } else if blocked.reasons.iter().all(|r| r.is_transient()) {
+            println!("\nRun `jjpr watch` to wait and auto-continue.");
         } else {
             println!("\nRun `jjpr merge` again once the issue is resolved.");
         }
@@ -573,8 +670,6 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     } else {
         println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
     }
-
-    print_local_warnings(&result, &segments, stack_base, &default_branch)
 }
 
 fn print_local_warnings(

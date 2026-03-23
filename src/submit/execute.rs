@@ -324,7 +324,7 @@ fn merge_with_previous_entries(
     result
 }
 
-fn update_stack_comments(
+pub(crate) fn update_stack_comments(
     github: &dyn Forge,
     plan: &SubmissionPlan,
     bookmark_to_pr: &HashMap<String, PullRequest>,
@@ -332,6 +332,14 @@ fn update_stack_comments(
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
     let mut updated = 0;
+
+    // Count bookmarks in the stack (excluding default branch) — skip stack comments
+    // for single-bookmark stacks so they look like normal PRs to reviewers.
+    let stack_bookmark_count = plan
+        .all_bookmarks
+        .iter()
+        .filter(|b| b.name != plan.default_branch)
+        .count();
 
     // Build a lookup for merged PRs so their links are preserved in comments
     let merged_prs: HashMap<&str, &super::plan::MergedBookmark> = plan
@@ -379,6 +387,11 @@ fn update_stack_comments(
         // Fetch existing comment first so we can merge previous data
         let comments = github.list_comments(owner, repo, pr.number)?;
         let existing = comment::find_stack_comment(&comments);
+
+        // For single-bookmark stacks: skip creating new comments but keep updating existing ones
+        if stack_bookmark_count <= 1 && existing.is_none() {
+            continue;
+        }
 
         let previous_items: Vec<comment::StackCommentItem> = existing
             .and_then(|c| c.body.as_deref())
@@ -696,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_creates_stack_comments() {
+    fn test_single_pr_skips_stack_comment() {
         let jj = RecordingJj::new();
         let github = RecordingGitHub::new();
         let plan = make_plan();
@@ -704,11 +717,41 @@ mod tests {
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
 
         assert!(
-            github
+            !github
                 .calls()
                 .iter()
                 .any(|c| c.starts_with("create_comment")),
-            "should create stack comments on PRs"
+            "single-PR stack should not get a stack comment"
+        );
+    }
+
+    #[test]
+    fn test_two_prs_creates_stack_comments() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let mut plan = make_plan();
+        // Add a second bookmark+PR so the stack has 2 PRs
+        plan.all_bookmarks.push(make_bookmark("profile"));
+        plan.bookmarks_needing_pr.push(super::super::plan::BookmarkNeedingPr {
+            bookmark: make_bookmark("profile"),
+            base_branch: "auth".to_string(),
+            title: "Add profile".to_string(),
+            body: "Profile body".to_string(),
+        });
+
+        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+
+        let comment_calls: Vec<_> = github
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("create_comment"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            comment_calls.len(),
+            2,
+            "two-PR stack should get comments on both PRs: {comment_calls:?}"
         );
     }
 
@@ -1396,6 +1439,19 @@ mod tests {
             requested_reviewers: vec![],
         };
 
+        let profile_pr = PullRequest {
+            number: 2,
+            html_url: "https://github.com/o/r/pull/2".to_string(),
+            title: "profile".to_string(),
+            body: None,
+            base: PullRequestRef { ref_name: "auth".to_string(), label: String::new(), sha: String::new() },
+            head: PullRequestRef { ref_name: "profile".to_string(), label: String::new(), sha: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec![],
+        };
+
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             bookmarks_needing_pr: vec![],
@@ -1405,26 +1461,32 @@ mod tests {
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
             bookmarks_already_merged: vec![],
-            existing_prs: HashMap::from([("auth".to_string(), auth_pr)]),
+            existing_prs: HashMap::from([
+                ("auth".to_string(), auth_pr),
+                ("profile".to_string(), profile_pr),
+            ]),
             remote_name: "origin".to_string(),
             repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
             forge_kind: ForgeKind::GitHub,
-            // main is in all_bookmarks (the bug scenario)
-            all_bookmarks: vec![make_bookmark("main"), make_bookmark("auth")],
+            // main is in all_bookmarks (the bug scenario) along with auth and profile
+            all_bookmarks: vec![make_bookmark("main"), make_bookmark("auth"), make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
 
-        // Should only create a comment for "auth", not for "main"
+        // Should create comments for "auth" and "profile", not for "main"
         let calls = github.calls.lock().expect("poisoned");
-        assert_eq!(calls.len(), 1, "should create exactly one comment: {calls:?}");
-        assert_eq!(calls[0], "create_comment:#1");
+        assert_eq!(calls.len(), 2, "should create exactly two comments: {calls:?}");
+        assert!(calls.contains(&"create_comment:#1".to_string()));
+        assert!(calls.contains(&"create_comment:#2".to_string()));
 
-        // The comment body should not mention "main"
+        // The comment bodies should not mention "main"
         let bodies = github.comment_bodies.lock().expect("poisoned");
-        assert!(!bodies[0].contains("`main`"), "comment should not contain main: {}", bodies[0]);
+        for body in bodies.iter() {
+            assert!(!body.contains("`main`"), "comment should not contain main: {body}");
+        }
     }
 
     #[test]

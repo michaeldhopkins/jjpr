@@ -4,13 +4,14 @@ Multi-forge stacked pull requests for [Jujutsu](https://jj-vcs.github.io/jj/). P
 
 ## Why jjpr?
 
+- **Watch mode** — `jjpr watch` is an always-on assistant that creates draft PRs, promotes them when CI passes, and merges them when approved — hands-free
 - **Multi-forge** — GitHub, GitLab, and Forgejo/Codeberg in one binary, auto-detected from your remote URL
-- **Stack merging** — `jjpr merge` merges from the bottom up with live re-evaluation: merge a PR, sync the rest, retarget bases, check the next one, repeat
-- **No force pushes** — after merging a PR, downstream branches are synced via merge commits (append-only), avoiding force push events that clutter GitHub PR timelines
+- **Stack merging** — merges from the bottom up with live re-evaluation: merge a PR, sync the rest, retarget bases, check the next one, repeat
+- **No force pushes** — downstream branches are synced via merge commits (append-only), avoiding force push events that clutter GitHub PR timelines
 - **Merge commits** — `jj new A B` handled naturally; jjpr follows the first parent and lets other parents form independent stacks
 - **Pure HTTP** — talks directly to forge APIs via `ureq`; no `gh` or `glab` CLI required (though existing credentials are picked up automatically)
-- **Idempotent** — run `jjpr submit` repeatedly as you work; it converges to the correct state, pushing only what changed
-- **Stack-awareness comments** — every PR gets a navigation comment showing its position in the stack
+- **Idempotent** — run commands repeatedly as you work; they converge to the correct state
+- **Stack-awareness comments** — PRs in multi-PR stacks get a navigation comment showing their position (single PRs look like normal PRs)
 - **Foreign base detection** — automatically targets PRs at a coworker's branch when your stack builds on one
 
 ## Install
@@ -50,33 +51,78 @@ cargo install --path jjpr
 
 Requires Rust 1.88+.
 
+## Quick start
+
+Create bookmarks for your stack, then let `jjpr watch` handle the rest:
+
+```
+jj bookmark set auth                  # create bookmarks for your changes
+jj bookmark set profile
+jjpr watch                            # watch creates draft PRs, promotes when
+                                      # CI passes, merges when approved
+```
+
+That's it. `jjpr watch` runs in a loop (Ctrl+C to exit) and manages the full lifecycle of your stack.
+
 ## Usage
 
 ```
-jjpr                              # Show stacks with CI/review/mergeability status
-jjpr status                       # Same as above (alias for discoverability)
-jjpr submit                       # Submit stack (inferred from working copy)
-jjpr submit <bookmark>            # Submit stack up to bookmark
-jjpr submit --dry-run             # Preview without executing
-jjpr submit --reviewer alice,bob  # Request reviewers on all PRs
-jjpr submit --remote upstream     # Use a specific git remote
-jjpr submit --draft               # Create new PRs as drafts
-jjpr submit --ready               # Mark existing draft PRs as ready
-jjpr merge                        # Merge stack from the bottom up
-jjpr merge <bookmark>             # Merge stack up to bookmark
-jjpr merge --watch                # Watch for all blockers and auto-merge when ready
-jjpr merge --merge-method rebase  # Use rebase merge method
-jjpr merge --no-ci-check          # Merge even if CI hasn't passed
-jjpr merge --dry-run              # Preview without executing
-jjpr submit --base coworker-feat  # Override auto-detected base branch
-jjpr merge --base coworker-feat   # Override auto-detected base branch
-jjpr config init                  # Create default config file
-jjpr config init --repo           # Create repo-local config at .jj/jjpr.toml
-jjpr --no-fetch                   # Show stacks without fetching
-jjpr submit --no-fetch            # Submit without fetching first
-jjpr auth test                    # Test forge authentication
-jjpr auth setup                   # Show auth setup instructions
+jjpr watch                            # Watch and auto-manage the stack
+jjpr watch --timeout 60               # Stop watching after 60 minutes
+jjpr                                  # Show stacks with CI/review/mergeability status
+jjpr status                           # Same as above (alias for discoverability)
+jjpr submit                           # Push bookmarks and create/update PRs
+jjpr submit --reviewer alice,bob      # Request reviewers on all PRs
+jjpr submit --draft                   # Create new PRs as drafts
+jjpr submit --ready                   # Mark existing draft PRs as ready
+jjpr merge                            # Merge stack from the bottom up (one-shot)
+jjpr merge --merge-method rebase      # Use rebase merge method
+jjpr merge --no-ci-check              # Merge even if CI hasn't passed
+jjpr submit --base coworker-feat      # Override auto-detected base branch
+jjpr config init                      # Create default config file
+jjpr config init --repo               # Create repo-local config at .jj/jjpr.toml
+jjpr auth test                        # Test forge authentication
+jjpr auth setup                       # Show auth setup instructions
 ```
+
+### Watching your stack
+
+`jjpr watch` is the primary way to use jjpr. It runs in a loop and handles everything:
+
+1. **Creates draft PRs** for bookmarks that don't have PRs yet
+2. **Marks drafts as ready** when CI checks pass (does not add reviewers)
+3. **Merges PRs** from the bottom up when they're approved and mergeable
+4. **Syncs the stack** after each merge (retargets bases, pushes updates)
+5. **Reports blockers** — if a PR needs review approval but has no reviewers, watch tells you
+
+Stack comments (showing each PR's position in the stack) are added automatically when the stack has 2 or more PRs. A single-PR stack looks like a normal PR to reviewers.
+
+```
+Watching stack for 'settings'...
+
+  Creating PR (draft) for 'auth'...
+    https://github.com/o/r/pull/42
+  Creating PR (draft) for 'settings'...
+    https://github.com/o/r/pull/43
+
+  Marked 'auth' as ready (CI passing)
+
+  'settings' (#43): needs review approval but has no reviewers
+    hint: run `jjpr submit --reviewer <username>` to request reviewers
+
+  Merging 'auth' (PR #42, squash)...
+    https://github.com/o/r/pull/42
+
+  Waiting for 'settings':
+    - Insufficient approvals (0/1)
+  settings: Approval received (1/1)
+
+  Merging 'settings' (PR #43, squash)...
+
+Done — 2 PRs merged.
+```
+
+Use `--timeout <MINUTES>` to set a maximum wait time. Press Ctrl+C to exit at any time.
 
 ### Stack overview
 
@@ -116,13 +162,13 @@ Stack 2:
 
 ### Submitting a stack
 
-`jjpr submit` (or `jjpr submit profile`) will:
+`jjpr submit` gives you manual control when you need it. It will:
 
 1. Push all bookmarks in the stack to the remote
 2. Create PRs for bookmarks that don't have one yet
 3. Update PR base branches to maintain the stack structure
 4. Update PR bodies when commit descriptions have changed
-5. Add/update a stack-awareness comment on each PR
+5. Add/update stack-awareness comments on multi-PR stacks
 
 Submit is idempotent — run it repeatedly as you work. After rebasing, editing commit messages, or restacking with `jj rebase`, just run `jjpr submit` again and it will push the updated commits, fix PR base branches, and sync descriptions. If everything is already up to date, it reports "Stack is up to date."
 
@@ -140,7 +186,7 @@ jjpr auto-detects when your stack is based on someone else's branch. If a commit
   (based on coworker-feat)
 ```
 
-Use `--base <branch>` on `submit` or `merge` to override auto-detection — for example, when the coworker hasn't pushed yet, or when you want to target a specific branch.
+Use `--base <branch>` on `submit`, `merge`, or `watch` to override auto-detection — for example, when the coworker hasn't pushed yet, or when you want to target a specific branch.
 
 ### Conflicts
 
@@ -170,9 +216,9 @@ If you manually remove the markers from the PR body, jjpr will stop updating the
 
 The PR title is not automatically updated after creation. If you change your commit's first line, jjpr will warn you about the drift.
 
-### Merging a stack
+### Merging a stack (one-shot)
 
-`jjpr merge` merges your stack from the bottom up. For each PR, it checks:
+`jjpr merge` is the one-shot alternative to `jjpr watch` — it merges what it can right now and exits. For each PR, it checks:
 
 - PR is not a draft
 - CI checks pass (configurable)
@@ -183,46 +229,6 @@ The PR title is not automatically updated after creation. If you change your com
 If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, syncs the remaining stack, pushes all remaining bookmarks, and retargets the next PR's base if needed. Then it checks the next PR and continues until blocked or done.
 
 By default, the remaining stack is synced via **merge commits** — each downstream bookmark gets a merge commit incorporating the new base. This is append-only, so pushes are fast-forward and avoid force push events on GitHub. You can switch to the old rebase behavior with `reconcile_strategy = "rebase"` in config (see [Configuration](#configuration)).
-
-If a PR is blocked (e.g., CI pending), jjpr reports why and stops:
-
-```
-  Skipping 'auth' — PR #42 already merged
-  Merging 'profile' (PR #43, squash)...
-    https://github.com/o/r/pull/43
-  Fetching remotes...
-  Rebasing remaining stack onto main...
-  Pushing 'settings'...
-  Updating PR #44 base to 'main'...
-  Blocked at 'settings' (PR #44):
-    - CI checks are pending
-
-Run `jjpr merge --watch` to wait for CI and auto-continue.
-```
-
-#### Watching and auto-merging
-
-Use `--watch` to persistently watch for all blockers and auto-merge when ready. jjpr polls every 30 seconds. After merging a PR, it continues watching the next PR in the stack. Press Ctrl+C to exit:
-
-```
-Watching stack for 'settings'...
-
-  Merging 'auth' (PR #42, squash)...
-    https://github.com/o/r/pull/42
-  Fetching remotes...
-
-  Waiting for 'settings' (PR #44):
-    - CI checks are pending
-    - Insufficient approvals (0/1)
-  settings: CI now passing
-  settings: Approval received (1/1)
-
-  Merging 'settings' (PR #44, squash)...
-
-Done — 2 PRs merged.
-```
-
-Use `--timeout <MINUTES>` to set a maximum wait time. Without it, watch runs until the stack is merged or Ctrl+C is pressed.
 
 #### Retry on transient errors
 

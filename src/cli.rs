@@ -176,21 +176,73 @@ Examples:
         #[arg(long, value_enum)]
         reconcile_strategy: Option<ReconcileStrategy>,
 
-        /// Watch for all blockers and auto-merge when ready
-        ///
-        /// Polls every 30 seconds and continues when blockers resolve (CI passes,
-        /// approvals received, conflicts resolved, draft marked ready). After merging
-        /// a PR, continues watching the next PR in the stack. Press Ctrl+C to exit.
-        #[arg(long)]
+        /// Deprecated: use `jjpr watch` instead
+        #[arg(long, hide = true)]
         watch: bool,
 
-        /// Timeout in minutes for --watch mode (default: no timeout)
-        #[arg(long, value_name = "MINUTES", requires = "watch")]
+        /// Timeout in minutes for --watch mode
+        #[arg(long, value_name = "MINUTES", requires = "watch", hide = true)]
         timeout: Option<u64>,
 
         /// Mark draft PRs as ready before merging
         #[arg(long)]
         ready: bool,
+    },
+    /// Watch your stack and auto-manage PRs from draft to merge
+    #[command(long_about = "\
+Watch your stack and auto-manage PRs from draft through merge.
+
+jjpr watch is an always-on assistant for your stack. It runs in a loop, \
+polling every 30 seconds, and handles the full PR lifecycle:
+
+  1. Creates draft PRs for bookmarks that don't have PRs yet
+  2. Marks draft PRs as ready when CI passes
+  3. Merges ready PRs (bottom-up) when approved and mergeable
+  4. Syncs the remaining stack after each merge
+
+If a PR needs review approval but has no reviewers, watch will tell you.
+
+Stack comments (showing position in the stack) are added automatically when \
+the stack has 2 or more PRs. A single-PR stack looks like a normal PR.
+
+Press Ctrl+C to exit. Use --timeout to set a maximum watch duration.
+
+Examples:
+    jjpr watch                          # watch the stack under your working copy
+    jjpr watch auth                     # watch the stack ending at bookmark 'auth'
+    jjpr watch --timeout 60             # stop after 60 minutes
+    jjpr watch --no-ci-check            # merge without waiting for CI")]
+    Watch {
+        /// Bookmark to watch (inferred from working copy if omitted)
+        bookmark: Option<String>,
+
+        /// Git remote name
+        #[arg(long)]
+        remote: Option<String>,
+
+        /// Base branch for the bottom of the stack
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Merge method (overrides config file)
+        #[arg(long, value_enum)]
+        merge_method: Option<MergeMethod>,
+
+        /// Required approvals before merging (overrides config file)
+        #[arg(long)]
+        required_approvals: Option<u32>,
+
+        /// Skip CI check requirement
+        #[arg(long)]
+        no_ci_check: bool,
+
+        /// How to sync the remaining stack after each merge (overrides config file)
+        #[arg(long, value_enum)]
+        reconcile_strategy: Option<ReconcileStrategy>,
+
+        /// Timeout in minutes (default: no timeout)
+        #[arg(long, value_name = "MINUTES")]
+        timeout: Option<u64>,
     },
     /// Manage forge authentication
     #[command(long_about = "\

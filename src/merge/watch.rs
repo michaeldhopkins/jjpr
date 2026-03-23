@@ -17,12 +17,12 @@ use super::execute::{
 };
 use super::plan::{evaluate_segment, BlockReason, MergePlan, PrMergeStatus};
 
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 /// Sleep in small increments so Ctrl+C is responsive.
 /// Returns `true` if interrupted by the shutdown flag.
-fn interruptible_sleep(duration: Duration, shutdown: &AtomicBool) -> bool {
+pub(crate) fn interruptible_sleep(duration: Duration, shutdown: &AtomicBool) -> bool {
     let end = Instant::now() + duration;
     while Instant::now() < end {
         if shutdown.load(Ordering::Relaxed) {
@@ -33,7 +33,7 @@ fn interruptible_sleep(duration: Duration, shutdown: &AtomicBool) -> bool {
     false
 }
 
-fn format_resolved_reason(reason: &BlockReason) -> &'static str {
+pub(crate) fn format_resolved_reason(reason: &BlockReason) -> &'static str {
     match reason {
         BlockReason::ChecksPending | BlockReason::ChecksFailing => "CI now passing",
         BlockReason::Draft => "No longer a draft",
@@ -47,7 +47,7 @@ fn format_resolved_reason(reason: &BlockReason) -> &'static str {
 
 /// Report status changes between previous and current block reasons.
 /// Returns true if any output was printed (i.e., something changed).
-fn report_status_changes(
+pub(crate) fn report_status_changes(
     bookmark: &str,
     prev: Option<&[BlockReason]>,
     current: &[BlockReason],
@@ -101,7 +101,7 @@ fn report_status_changes(
     printed
 }
 
-fn refresh_pr_map(
+pub(crate) fn refresh_pr_map(
     forge: &dyn Forge,
     owner: &str,
     repo: &str,
@@ -311,7 +311,7 @@ pub fn execute_merge_plan_watch(
     })
 }
 
-fn local_time_hhmm() -> String {
+pub(crate) fn local_time_hhmm() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as libc::time_t)
