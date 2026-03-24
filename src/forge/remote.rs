@@ -45,6 +45,9 @@ pub fn detect_forge(url: &str) -> Option<(ForgeKind, RepoInfo)> {
 }
 
 /// Extract host from a remote URL.
+///
+/// For `ssh://git@host:port/path` remotes, this strips the SSH port so API
+/// clients use the HTTPS host rather than the SSH transport port.
 pub fn extract_host(url: &str) -> Option<&str> {
     extract_host_and_path(url).map(|(host, _)| host)
 }
@@ -54,9 +57,10 @@ fn extract_host_and_path(url: &str) -> Option<(&str, &str)> {
     if let Some(rest) = url.strip_prefix("git@") {
         return rest.split_once(':');
     }
-    // SSH: ssh://git@host/path
+    // SSH: ssh://git@host[:port]/path
     if let Some(rest) = url.strip_prefix("ssh://git@") {
-        return rest.split_once('/');
+        let (host, path) = rest.split_once('/')?;
+        return Some((strip_ssh_port(host), path));
     }
     // HTTPS/HTTP
     for prefix in &["https://", "http://"] {
@@ -65,6 +69,24 @@ fn extract_host_and_path(url: &str) -> Option<(&str, &str)> {
         }
     }
     None
+}
+
+fn strip_ssh_port(host: &str) -> &str {
+    // IPv6 host
+    if host.starts_with('[')
+        && let Some(idx) = host.find(']')
+    {
+        return &host[..=idx];
+    }
+
+    if let Some((hostname, port)) = host.rsplit_once(':')
+        && !hostname.is_empty()
+        && !port.is_empty()
+    {
+        return hostname;
+    }
+
+    host
 }
 
 fn parse_url_for_host(url: &str, host_check: fn(&str) -> bool) -> Option<RepoInfo> {
@@ -209,6 +231,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_github_ssh_protocol_url_with_port() {
+        let info = parse_github_url("ssh://git@github.com:22/owner/repo.git").unwrap();
+        assert_eq!(info.owner, "owner");
+        assert_eq!(info.repo, "repo");
+    }
+
+    #[test]
     fn test_parse_github_enterprise_subdomain() {
         let info = parse_github_url("https://company.github.com/owner/repo.git").unwrap();
         assert_eq!(info.owner, "owner");
@@ -241,6 +270,13 @@ mod tests {
     #[test]
     fn test_parse_gitlab_ssh() {
         let info = parse_gitlab_url("git@gitlab.com:owner/repo.git").unwrap();
+        assert_eq!(info.owner, "owner");
+        assert_eq!(info.repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_gitlab_ssh_protocol_url_with_port() {
+        let info = parse_gitlab_url("ssh://git@gitlab.com:22/owner/repo.git").unwrap();
         assert_eq!(info.owner, "owner");
         assert_eq!(info.repo, "repo");
     }
@@ -418,5 +454,17 @@ mod tests {
     #[test]
     fn test_parse_url_as_invalid_url() {
         assert!(parse_url_as("", ForgeKind::GitHub).is_none());
+    }
+
+    #[test]
+    fn test_extract_host_strips_ssh_port() {
+        let host = extract_host("ssh://git@my.gitlab.dev:2022/me/repo.git").unwrap();
+        assert_eq!(host, "my.gitlab.dev");
+    }
+
+    #[test]
+    fn test_extract_host_preserves_https_port() {
+        let host = extract_host("https://my.gitlab.dev:8443/me/repo.git").unwrap();
+        assert_eq!(host, "my.gitlab.dev:8443");
     }
 }
