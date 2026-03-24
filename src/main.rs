@@ -589,7 +589,60 @@ fn cmd_watch(
     timeout: Option<u64>,
     no_fetch: bool,
 ) -> Result<()> {
-    let Some(stack) = resolve_stack(bookmark, preferred_remote, no_fetch, "Watching")? else {
+    // Set up Ctrl+C handler once, shared between bookmark wait and watch loop
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = shutdown.clone();
+    ctrlc::set_handler(move || {
+        eprint!("\nInterrupting after current operation completes...");
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }).expect("failed to set Ctrl+C handler");
+
+    // For watch: if no bookmark is specified, try to infer one. If none exists
+    // yet, wait for one to appear (unlike submit/merge which exit immediately).
+    let resolved_bookmark = if bookmark.is_some() {
+        bookmark.map(|s| s.to_string())
+    } else {
+        let repo_path = find_repo_root()?;
+        let jj = jjpr::jj::runner::JjRunner::new(repo_path)?;
+        let graph = change_graph::build_change_graph(&jj)?;
+        match analyze::infer_target_bookmark(&graph, &jj)? {
+            Some(name) => Some(name),
+            None => {
+                let deadline = timeout.map(|m| std::time::Instant::now() + std::time::Duration::from_secs(m * 60));
+                let poll = std::time::Duration::from_secs(5);
+
+                println!("Waiting for a bookmark in the working copy's ancestry...");
+                println!("    hint: jj bookmark set <name>\n");
+
+                loop {
+                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        println!("\nInterrupted.");
+                        return Ok(());
+                    }
+                    if let Some(dl) = deadline
+                        && std::time::Instant::now() >= dl
+                    {
+                        println!("Watch timed out while waiting for a bookmark.");
+                        return Ok(());
+                    }
+
+                    if let Ok(graph) = change_graph::build_change_graph(&jj)
+                        && let Ok(Some(name)) = analyze::infer_target_bookmark(&graph, &jj)
+                    {
+                        println!("Found bookmark '{name}'\n");
+                        break Some(name);
+                    }
+
+                    if jjpr::merge::watch::interruptible_sleep(poll, &shutdown) {
+                        println!("\nInterrupted.");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    };
+
+    let Some(stack) = resolve_stack(resolved_bookmark.as_deref(), preferred_remote, no_fetch, "Watching")? else {
         return Ok(());
     };
 
@@ -606,13 +659,6 @@ fn cmd_watch(
         .or(stack.stack_base.clone());
 
     println!("Watching stack up to '{}'...\n", stack.target_bookmark);
-
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let flag = shutdown.clone();
-    ctrlc::set_handler(move || {
-        eprint!("\nInterrupting after current operation completes...");
-        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }).expect("failed to set Ctrl+C handler");
 
     let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
     let result = jjpr::watch::run_watch_loop(

@@ -22,7 +22,7 @@ pub(crate) const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 /// Sleep in small increments so Ctrl+C is responsive.
 /// Returns `true` if interrupted by the shutdown flag.
-pub(crate) fn interruptible_sleep(duration: Duration, shutdown: &AtomicBool) -> bool {
+pub fn interruptible_sleep(duration: Duration, shutdown: &AtomicBool) -> bool {
     let end = Instant::now() + duration;
     while Instant::now() < end {
         if shutdown.load(Ordering::Relaxed) {
