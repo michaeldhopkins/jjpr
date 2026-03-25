@@ -270,10 +270,13 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         &stack.repo_info,
         stack.forge_kind,
         &stack.default_branch,
-        matches!(opts.draft_mode, DraftMode::Draft),
-        matches!(opts.draft_mode, DraftMode::Ready),
-        opts.reviewers,
-        stack_base_override,
+        &plan::SubmitOptions {
+            draft: matches!(opts.draft_mode, DraftMode::Draft),
+            ready: matches!(opts.draft_mode, DraftMode::Ready),
+            reviewers: opts.reviewers,
+            stack_base: stack_base_override,
+            stack_nav: stack.config.stack_nav,
+        },
     )?;
 
     if opts.bookmark.is_some() {
@@ -538,6 +541,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         &stack.remote_name,
         &merge_options,
         stack_base,
+        stack.config.stack_nav,
     )?;
 
     if args.watch {
@@ -671,6 +675,7 @@ fn cmd_watch(
         &merge_options,
         &stack.target_bookmark,
         stack_base_str.as_deref(),
+        stack.config.stack_nav,
         merge::watch::WatchOptions {
             shutdown,
             timeout: timeout_dur,

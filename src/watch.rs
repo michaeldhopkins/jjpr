@@ -121,6 +121,7 @@ fn make_merge_plan(
     remote_name: &str,
     options: &MergeOptions,
     stack_base: Option<&str>,
+    stack_nav: crate::config::StackNavMode,
 ) -> crate::merge::plan::MergePlan {
     crate::merge::plan::MergePlan {
         actions: vec![],
@@ -130,6 +131,7 @@ fn make_merge_plan(
         remote_name: remote_name.to_string(),
         options: options.clone(),
         stack_base: stack_base.map(|s| s.to_string()),
+        stack_nav,
     }
 }
 
@@ -320,6 +322,7 @@ fn run_merge_phase(
 }
 
 /// Run the watch loop: submit → promote → merge → repeat.
+#[allow(clippy::too_many_arguments)]
 pub fn run_watch_loop(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -330,6 +333,7 @@ pub fn run_watch_loop(
     merge_options: &MergeOptions,
     target_bookmark: &str,
     stack_base: Option<&str>,
+    stack_nav: crate::config::StackNavMode,
     opts: WatchOptions,
 ) -> Result<WatchResult> {
     let shutdown = opts.shutdown;
@@ -352,7 +356,7 @@ pub fn run_watch_loop(
     let deadline = timeout.map(|d| Instant::now() + d);
 
     let merge_plan = make_merge_plan(
-        repo_info, forge_kind, default_branch, remote_name, merge_options, stack_base,
+        repo_info, forge_kind, default_branch, remote_name, merge_options, stack_base, stack_nav,
     );
 
     // Print initial status so the user knows what watch is working with
@@ -454,7 +458,7 @@ pub fn run_watch_loop(
         }
 
         // --- Phase 2: Submit (push + create draft PRs) ---
-        let bookmarks_being_created = match run_submit_phase(jj, forge, &segments, remote_name, repo_info, forge_kind, default_branch, stack_base) {
+        let bookmarks_being_created = match run_submit_phase(jj, forge, &segments, remote_name, repo_info, forge_kind, default_branch, stack_base, stack_nav) {
             Ok(names) => {
                 consecutive_errors = 0;
                 names
@@ -581,6 +585,7 @@ fn run_submit_phase(
     forge_kind: ForgeKind,
     default_branch: &str,
     stack_base: Option<&str>,
+    stack_nav: crate::config::StackNavMode,
 ) -> Result<Vec<String>> {
     let submission_plan = plan::create_submission_plan(
         forge,
@@ -589,10 +594,13 @@ fn run_submit_phase(
         repo_info,
         forge_kind,
         default_branch,
-        true,  // draft
-        false, // ready
-        &[],   // no reviewers
-        stack_base,
+        &plan::SubmitOptions {
+            draft: true,
+            ready: false,
+            reviewers: &[],
+            stack_base,
+            stack_nav,
+        },
     )?;
 
     if !submission_plan.has_actions() {

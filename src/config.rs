@@ -17,6 +17,17 @@ pub enum ReconcileStrategy {
     Rebase,
 }
 
+/// Where to display stack navigation on PRs.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StackNavMode {
+    /// Stack navigation as a PR comment (default).
+    #[default]
+    Comment,
+    /// Stack navigation embedded in the PR description/body.
+    Description,
+}
+
 /// User configuration for jjpr.
 ///
 /// Loaded from `~/.config/jjpr/config.toml` (global) and optionally merged
@@ -39,6 +50,11 @@ pub struct Config {
     /// "merge" (default): create merge commits — no force pushes.
     /// "rebase": rebase onto new base — causes force pushes.
     pub reconcile_strategy: ReconcileStrategy,
+
+    /// Where to display stack navigation: "comment" (default) or "description".
+    /// "comment" posts a separate comment on each PR.
+    /// "description" embeds the stack nav in the PR body.
+    pub stack_nav: StackNavMode,
 }
 
 impl Default for Config {
@@ -50,6 +66,7 @@ impl Default for Config {
             forge: None,
             forge_token_env: None,
             reconcile_strategy: ReconcileStrategy::Merge,
+            stack_nav: StackNavMode::Comment,
         }
     }
 }
@@ -180,6 +197,11 @@ require_ci_pass = true
 # "merge" (default): creates merge commits on downstream branches — no force pushes.
 # "rebase": rebases downstream commits — causes force pushes on GitHub.
 reconcile_strategy = "merge"
+
+# Where to show stack navigation: "comment" (default) or "description".
+# "comment" posts a separate comment on each PR.
+# "description" embeds it in the PR body (more visible to reviewers).
+stack_nav = "comment"
 "#;
 
 const DEFAULT_REPO_CONFIG: &str = r#"# jjpr repo-local configuration
@@ -433,6 +455,30 @@ merge_method = "squash"
 
         let config = load_config_from(&path).unwrap();
         assert!(config.forge.is_none());
+    }
+
+    #[test]
+    fn test_parse_stack_nav_comment() {
+        let config: Config = toml::from_str(r#"stack_nav = "comment""#).unwrap();
+        assert_eq!(config.stack_nav, StackNavMode::Comment);
+    }
+
+    #[test]
+    fn test_parse_stack_nav_description() {
+        let config: Config = toml::from_str(r#"stack_nav = "description""#).unwrap();
+        assert_eq!(config.stack_nav, StackNavMode::Description);
+    }
+
+    #[test]
+    fn test_parse_invalid_stack_nav() {
+        let result: Result<Config, _> = toml::from_str(r#"stack_nav = "inline""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stack_nav_defaults_to_comment() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.stack_nav, StackNavMode::Comment);
     }
 
     #[test]

@@ -233,6 +233,7 @@ fn test_submit_forgejo_custom_token_env_in_error() {
         .args(["submit", "--no-fetch"])
         .current_dir(repo.path())
         .env_remove(custom_env)
+        .env_remove("FORGEJO_TOKEN") // clear default fallback too
         .assert()
         .failure()
         .stderr(predicate::str::contains(custom_env));
@@ -277,6 +278,7 @@ fn test_auth_test_forgejo_uses_custom_token_env() {
         .args(["auth", "test"])
         .current_dir(repo.path())
         .env_remove(custom_env)
+        .env_remove("FORGEJO_TOKEN") // clear default fallback too
         .assert()
         .failure()
         .stderr(predicate::str::contains(custom_env));

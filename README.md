@@ -297,13 +297,18 @@ require_ci_pass = true
 
 # How to sync the remaining stack after merging a PR: "merge" or "rebase"
 reconcile_strategy = "merge"
+
+# Where to show stack navigation: "comment" (default) or "description"
+# "comment" posts a separate comment on each PR.
+# "description" embeds it in the PR body (more visible to reviewers).
+stack_nav = "comment"
 ```
 
 #### Repo-local config
 
 You can also create a repo-local config at `.jj/jjpr.toml` (inside the `.jj/` directory, which is gitignored). Run `jjpr config init --repo` to create one. Repo-local settings override global settings.
 
-This is useful for setting the forge type and token for self-hosted instances:
+This is useful for setting the forge type for self-hosted instances, or per-repo preferences like stack nav mode:
 
 ```toml
 # Forge type: "github", "gitlab", or "forgejo"
@@ -311,6 +316,9 @@ forge = "forgejo"
 
 # Environment variable name containing the API token
 forge_token_env = "FORGEJO_TOKEN"
+
+# Show stack navigation in the PR description instead of a comment
+stack_nav = "description"
 ```
 
 When `forge` is set in config, auto-detection is skipped and the configured forge type is used directly. The token is read from the env var named by `forge_token_env` (or the forge's default: `GITHUB_TOKEN`, `GITLAB_TOKEN`, or `FORGEJO_TOKEN`).
