@@ -202,6 +202,95 @@ impl StackNav for CommentNav {
     }
 }
 
+const NAV_START: &str = "<!-- jjpr:stack-nav -->";
+const NAV_END: &str = "<!-- /jjpr:stack-nav -->";
+
+/// Store stack navigation in the PR description/body.
+pub struct DescriptionNav;
+
+impl DescriptionNav {
+    fn extract_section(body: &str) -> Option<&str> {
+        let start_idx = body.find(NAV_START)?;
+        let end_tag_start = body[start_idx..].find(NAV_END)?;
+        let end_idx = start_idx + end_tag_start + NAV_END.len();
+        Some(&body[start_idx..end_idx])
+    }
+
+    fn splice_section(body: &str, new_section: &str) -> String {
+        if let Some(start_idx) = body.find(NAV_START)
+            && let Some(end_tag_start) = body[start_idx..].find(NAV_END)
+        {
+            let end_idx = start_idx + end_tag_start + NAV_END.len();
+            let before = &body[..start_idx];
+            let after = &body[end_idx..];
+            format!("{before}{new_section}{after}")
+        } else {
+            // Append at the end, separated by blank lines
+            let trimmed = body.trim_end();
+            if trimmed.is_empty() {
+                new_section.to_string()
+            } else {
+                format!("{trimmed}\n\n{new_section}\n")
+            }
+        }
+    }
+
+    fn wrap_section(content: &str) -> String {
+        format!("{NAV_START}\n{content}{NAV_END}")
+    }
+}
+
+impl StackNav for DescriptionNav {
+    fn has_existing(
+        &self,
+        _forge: &dyn Forge,
+        _owner: &str,
+        _repo: &str,
+        pr: &PullRequest,
+    ) -> Result<bool> {
+        Ok(pr.body.as_deref().is_some_and(|b| b.contains(NAV_START)))
+    }
+
+    fn update(
+        &self,
+        forge: &dyn Forge,
+        owner: &str,
+        repo: &str,
+        pr: &PullRequest,
+        build_entries: &dyn Fn(Option<&StackCommentData>) -> Vec<StackEntry>,
+    ) -> Result<bool> {
+        let current_body = pr.body.as_deref().unwrap_or("");
+
+        let previous_data = Self::extract_section(current_body)
+            .and_then(parse_comment_data);
+
+        let entries = build_entries(previous_data.as_ref());
+        if entries.is_empty() {
+            return Ok(false);
+        }
+
+        let nav_content = generate_comment_body(&entries);
+        let new_section = Self::wrap_section(&nav_content);
+
+        let new_body = Self::splice_section(current_body, &new_section);
+
+        if new_body.trim() == current_body.trim() {
+            return Ok(false);
+        }
+
+        forge.update_pr_body(owner, repo, pr.number, &new_body)?;
+        Ok(true)
+    }
+}
+
+/// Create a StackNav adapter for the given mode.
+pub fn create_stack_nav(mode: crate::config::StackNavMode) -> Box<dyn StackNav> {
+    match mode {
+        crate::config::StackNavMode::Comment => Box::new(CommentNav),
+        crate::config::StackNavMode::Description => Box::new(DescriptionNav),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +507,70 @@ mod tests {
             body.contains("~~[`auth`](https://github.com/o/r/pull/1)~~ :white_check_mark:"),
             "merged entry should have strikethrough and checkmark: {body}"
         );
+    }
+
+    // --- DescriptionNav tests ---
+
+    #[test]
+    fn test_description_nav_extract_section() {
+        let body = format!(
+            "PR description\n\n{}\ncontent here\n{}\n\nuser notes",
+            NAV_START, NAV_END
+        );
+        let section = DescriptionNav::extract_section(&body).unwrap();
+        assert!(section.starts_with(NAV_START));
+        assert!(section.ends_with(NAV_END));
+        assert!(section.contains("content here"));
+    }
+
+    #[test]
+    fn test_description_nav_extract_section_missing() {
+        assert!(DescriptionNav::extract_section("no nav here").is_none());
+    }
+
+    #[test]
+    fn test_description_nav_splice_appends_when_absent() {
+        let body = "PR description";
+        let result = DescriptionNav::splice_section(body, "NEW NAV");
+        assert!(result.starts_with("PR description"));
+        assert!(result.contains("NEW NAV"));
+    }
+
+    #[test]
+    fn test_description_nav_splice_replaces_when_present() {
+        let body = format!(
+            "before\n\n{}old nav{}\n\nafter",
+            NAV_START, NAV_END
+        );
+        let new_section = format!("{NAV_START}new nav{NAV_END}");
+        let result = DescriptionNav::splice_section(&body, &new_section);
+        assert!(result.contains("before"));
+        assert!(result.contains("after"));
+        assert!(result.contains("new nav"));
+        assert!(!result.contains("old nav"));
+    }
+
+    #[test]
+    fn test_description_nav_roundtrip() {
+        let entries = sample_entries();
+        let content = generate_comment_body(&entries);
+        let section = DescriptionNav::wrap_section(&content);
+
+        // The section should contain parseable data
+        let data = parse_comment_data(&section).unwrap();
+        assert_eq!(data.stack.len(), 2);
+        assert_eq!(data.stack[0].bookmark_name, "auth");
+    }
+
+    #[test]
+    fn test_description_nav_preserves_description_sentinels() {
+        let body = "<!-- jjpr:description -->\ncommit body\n<!-- /jjpr:description -->\n\nuser notes";
+        let section = DescriptionNav::wrap_section("stack nav content\n");
+        let result = DescriptionNav::splice_section(body, &section);
+        assert!(result.contains("<!-- jjpr:description -->"));
+        assert!(result.contains("commit body"));
+        assert!(result.contains("<!-- /jjpr:description -->"));
+        assert!(result.contains("user notes"));
+        assert!(result.contains("stack nav content"));
     }
 }

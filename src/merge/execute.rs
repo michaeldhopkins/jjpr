@@ -251,9 +251,9 @@ pub(crate) fn reconcile_after_merge(
         println!("  Skipping local sync (local state already diverged)");
     }
 
-    let nav = comment::CommentNav;
+    let nav = comment::create_stack_nav(plan.stack_nav);
     let (fresh_map, forge_warnings) =
-        reconcile_forge_state(forge, &nav, segments, seg_idx, owner, repo, effective_base, fk);
+        reconcile_forge_state(forge, nav.as_ref(), segments, seg_idx, owner, repo, effective_base, fk);
     if !forge_warnings.is_empty() {
         *local_degraded = true;
         local_warnings.extend(forge_warnings);
@@ -871,6 +871,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         }
     }
 
@@ -936,6 +937,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -988,6 +990,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         // Profile segment has 3 commits: tip (bookmark) + 2 intermediate.
@@ -1093,6 +1096,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1142,6 +1146,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1201,6 +1206,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![
             make_segment("auth"),
@@ -1303,6 +1309,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![
             make_segment("auth"),
@@ -1409,6 +1416,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![
             make_segment("auth"),
@@ -1463,6 +1471,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1503,6 +1512,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "upstream".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1539,6 +1549,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1573,6 +1584,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1608,6 +1620,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth")];
 
@@ -1686,6 +1699,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1726,6 +1740,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![
             make_segment("auth"),
@@ -1798,6 +1813,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1848,6 +1864,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -1904,6 +1921,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: Some("coworker-feat".to_string()),
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -2110,6 +2128,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -2212,6 +2231,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![
             make_segment("auth"),
@@ -2280,6 +2300,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 
@@ -2319,6 +2340,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![
             make_segment("auth"),
@@ -2364,6 +2386,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
 

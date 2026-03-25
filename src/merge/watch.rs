@@ -548,6 +548,7 @@ mod tests {
             default_branch: "main".to_string(),
             remote_name: "origin".to_string(),
             stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
         }
     }
 

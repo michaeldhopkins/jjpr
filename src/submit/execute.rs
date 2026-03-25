@@ -192,12 +192,12 @@ pub fn execute_submission_plan(
     }
 
     // Phase 7: Update/create stack navigation on all PRs
-    let nav = comment::CommentNav;
+    let nav = comment::create_stack_nav(plan.stack_nav);
     let comments_updated = if dry_run {
         println!("  Would update stack comments");
         0
     } else {
-        match update_stack_comments(github, &nav, plan, &bookmark_to_pr) {
+        match update_stack_comments(github, nav.as_ref(), plan, &bookmark_to_pr) {
             Ok(n) => {
                 if n > 0 {
                     println!("  Updated stack comments on {n} {}.", if n == 1 { "PR" } else { "PRs" });
@@ -635,6 +635,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         }
     }
 
@@ -855,6 +856,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -905,6 +907,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -951,6 +954,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -986,6 +990,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], true).unwrap();
@@ -1037,6 +1042,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -1069,6 +1075,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         let reviewers = vec!["alice".to_string()];
@@ -1115,6 +1122,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         let reviewers = vec!["alice".to_string(), "bob".to_string()];
@@ -1161,6 +1169,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         let reviewers = vec!["alice".to_string(), "bob".to_string()];
@@ -1207,6 +1216,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         let reviewers = vec!["alice".to_string()];
@@ -1261,6 +1271,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth"), make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         let err = execute_submission_plan(&FailingJj, &github, &plan, &[], false).unwrap_err();
@@ -1288,6 +1299,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         let reviewers = vec!["alice".to_string()];
@@ -1321,6 +1333,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -1347,6 +1360,7 @@ mod tests {
             all_bookmarks: vec![],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         assert!(!plan.has_actions());
     }
@@ -1369,6 +1383,7 @@ mod tests {
             all_bookmarks: vec![],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
         assert!(plan.has_actions());
     }
@@ -1461,6 +1476,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("main"), make_bookmark("auth"), make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -1551,6 +1567,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth"), make_bookmark("profile")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
@@ -1680,6 +1697,7 @@ mod tests {
             all_bookmarks: vec![make_bookmark("auth")],
             default_branch: "main".to_string(),
             draft: false,
+            stack_nav: crate::config::StackNavMode::Comment,
         };
 
         // Comment creation fails, but submission should still succeed

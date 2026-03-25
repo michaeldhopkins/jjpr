@@ -237,7 +237,11 @@ fn test_submit_creates_stacked_prs() {
         repo: REPO.to_string(),
     };
     let submission_plan = plan::create_submission_plan(
-        &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main", false, false, &[], None,
+        &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main",
+        &plan::SubmitOptions {
+            draft: false, ready: false, reviewers: &[], stack_base: None,
+            stack_nav: jjpr::config::StackNavMode::Comment,
+        },
     )
     .unwrap();
 

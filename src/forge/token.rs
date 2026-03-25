@@ -137,9 +137,19 @@ mod tests {
 
     #[test]
     fn test_resolve_token_error_mentions_custom_env() {
-        // Use a var name that definitely won't exist in the environment
+        // Temporarily clear default env vars so the test reaches the error path
+        let saved = std::env::var("FORGEJO_TOKEN").ok();
+        // SAFETY: test is single-threaded for this env var; restored immediately after
+        unsafe { std::env::remove_var("FORGEJO_TOKEN") };
+
         let var_name = "JJPR_TEST_NONEXISTENT_TOKEN_42_ZZZZZ";
         let result = resolve_token(ForgeKind::Forgejo, Some(var_name));
+
+        // Restore
+        if let Some(val) = saved {
+            unsafe { std::env::set_var("FORGEJO_TOKEN", val) };
+        }
+
         let err = result.expect_err("should fail");
         assert!(
             err.to_string().contains(var_name),
