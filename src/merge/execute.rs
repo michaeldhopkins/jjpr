@@ -144,6 +144,7 @@ fn reconcile_local_state(
 /// forge merge already happened and reconciliation is best-effort.
 fn reconcile_forge_state(
     forge: &dyn Forge,
+    nav: &dyn comment::StackNav,
     segments: &[NarrowedSegment],
     seg_idx: usize,
     owner: &str,
@@ -182,7 +183,7 @@ fn reconcile_forge_state(
         }
     }
 
-    // Update stack comments on remaining open PRs to mark resolved segments.
+    // Update stack nav on remaining open PRs to mark resolved segments.
     let merged_names: std::collections::HashSet<&str> = segments[..=seg_idx]
         .iter()
         .map(|s| s.bookmark.name.as_str())
@@ -192,40 +193,25 @@ fn reconcile_forge_state(
         let Some(pr) = fresh_map.get(&seg.bookmark.name) else {
             continue;
         };
-        let comments = match forge.list_comments(owner, repo, pr.number) {
-            Ok(c) => c,
-            Err(e) => {
-                warnings.push(LocalDivergenceWarning {
-                    message: format!("Failed to fetch comments for {}: {e}", fk.format_ref(pr.number)),
-                });
-                continue;
-            }
-        };
-        let Some(existing) = comment::find_stack_comment(&comments) else {
-            continue;
-        };
-        let Some(data) = existing.body.as_deref().and_then(comment::parse_comment_data) else {
-            continue;
-        };
-
-        let entries: Vec<comment::StackEntry> = data
-            .stack
-            .iter()
-            .map(|item| comment::StackEntry {
-                bookmark_name: item.bookmark_name.clone(),
-                pr_url: Some(item.pr_url.clone()),
-                pr_number: Some(item.pr_number),
-                is_current: item.bookmark_name == seg.bookmark.name,
-                is_merged: item.is_merged || merged_names.contains(item.bookmark_name.as_str()),
-            })
-            .collect();
-
-        let body = comment::generate_comment_body(&entries);
-        if existing.body.as_deref() != Some(&body)
-            && let Err(e) = forge.update_comment(owner, repo, existing.id, &body)
-        {
+        let seg_name = seg.bookmark.name.clone();
+        let result = nav.update(forge, owner, repo, pr, &|previous_data| {
+            let Some(data) = previous_data else {
+                return vec![];
+            };
+            data.stack
+                .iter()
+                .map(|item| comment::StackEntry {
+                    bookmark_name: item.bookmark_name.clone(),
+                    pr_url: Some(item.pr_url.clone()),
+                    pr_number: Some(item.pr_number),
+                    is_current: item.bookmark_name == seg_name,
+                    is_merged: item.is_merged || merged_names.contains(item.bookmark_name.as_str()),
+                })
+                .collect()
+        });
+        if let Err(e) = result {
             warnings.push(LocalDivergenceWarning {
-                message: format!("Failed to update stack comment on {}: {e}", fk.format_ref(pr.number)),
+                message: format!("Failed to update stack nav on {}: {e}", fk.format_ref(pr.number)),
             });
         }
     }
@@ -265,8 +251,9 @@ pub(crate) fn reconcile_after_merge(
         println!("  Skipping local sync (local state already diverged)");
     }
 
+    let nav = comment::CommentNav;
     let (fresh_map, forge_warnings) =
-        reconcile_forge_state(forge, segments, seg_idx, owner, repo, effective_base, fk);
+        reconcile_forge_state(forge, &nav, segments, seg_idx, owner, repo, effective_base, fk);
     if !forge_warnings.is_empty() {
         *local_degraded = true;
         local_warnings.extend(forge_warnings);

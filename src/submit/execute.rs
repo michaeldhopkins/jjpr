@@ -191,12 +191,13 @@ pub fn execute_submission_plan(
         completed_actions.push(format!("Requested reviewers on {}", fk.format_ref(*pr_number)));
     }
 
-    // Phase 7: Update/create stack comments on all PRs
+    // Phase 7: Update/create stack navigation on all PRs
+    let nav = comment::CommentNav;
     let comments_updated = if dry_run {
         println!("  Would update stack comments");
         0
     } else {
-        match update_stack_comments(github, plan, &bookmark_to_pr) {
+        match update_stack_comments(github, &nav, plan, &bookmark_to_pr) {
             Ok(n) => {
                 if n > 0 {
                     println!("  Updated stack comments on {n} {}.", if n == 1 { "PR" } else { "PRs" });
@@ -325,7 +326,8 @@ fn merge_with_previous_entries(
 }
 
 pub(crate) fn update_stack_comments(
-    github: &dyn Forge,
+    forge: &dyn Forge,
+    nav: &dyn comment::StackNav,
     plan: &SubmissionPlan,
     bookmark_to_pr: &HashMap<String, PullRequest>,
 ) -> Result<usize> {
@@ -333,7 +335,7 @@ pub(crate) fn update_stack_comments(
     let repo = &plan.repo_info.repo;
     let mut updated = 0;
 
-    // Count bookmarks in the stack (excluding default branch) — skip stack comments
+    // Count bookmarks in the stack (excluding default branch) — skip stack nav
     // for single-bookmark stacks so they look like normal PRs to reviewers.
     let stack_bookmark_count = plan
         .all_bookmarks
@@ -341,7 +343,7 @@ pub(crate) fn update_stack_comments(
         .filter(|b| b.name != plan.default_branch)
         .count();
 
-    // Build a lookup for merged PRs so their links are preserved in comments
+    // Build a lookup for merged PRs so their links are preserved
     let merged_prs: HashMap<&str, &super::plan::MergedBookmark> = plan
         .bookmarks_already_merged
         .iter()
@@ -384,43 +386,30 @@ pub(crate) fn update_stack_comments(
             continue;
         };
 
-        // Fetch existing comment first so we can merge previous data
-        let comments = github.list_comments(owner, repo, pr.number)?;
-        let existing = comment::find_stack_comment(&comments);
-
-        // For single-bookmark stacks: skip creating new comments but keep updating existing ones
-        if stack_bookmark_count <= 1 && existing.is_none() {
+        // For single-bookmark stacks: skip creating new nav but keep updating existing ones
+        if stack_bookmark_count <= 1 && !nav.has_existing(forge, owner, repo, pr)? {
             continue;
         }
 
-        let previous_items: Vec<comment::StackCommentItem> = existing
-            .and_then(|c| c.body.as_deref())
-            .and_then(comment::parse_comment_data)
-            .map(|d| d.stack)
-            .unwrap_or_default();
+        let bookmark_name = bookmark.name.clone();
+        let did_update = nav.update(forge, owner, repo, pr, &|previous_data| {
+            let previous_items = previous_data
+                .map(|d| d.stack.as_slice())
+                .unwrap_or_default();
+            let merged = merge_with_previous_entries(&current_entries, previous_items);
+            merged
+                .iter()
+                .map(|e| StackEntry {
+                    bookmark_name: e.name.clone(),
+                    pr_url: e.url.clone(),
+                    pr_number: e.number,
+                    is_current: e.name == bookmark_name,
+                    is_merged: e.is_merged,
+                })
+                .collect()
+        })?;
 
-        let merged = merge_with_previous_entries(&current_entries, &previous_items);
-
-        let entries: Vec<StackEntry> = merged
-            .iter()
-            .map(|e| StackEntry {
-                bookmark_name: e.name.clone(),
-                pr_url: e.url.clone(),
-                pr_number: e.number,
-                is_current: e.name == bookmark.name,
-                is_merged: e.is_merged,
-            })
-            .collect();
-
-        let body = comment::generate_comment_body(&entries);
-
-        if let Some(existing_comment) = existing {
-            if existing_comment.body.as_deref() != Some(&body) {
-                github.update_comment(owner, repo, existing_comment.id, &body)?;
-                updated += 1;
-            }
-        } else {
-            github.create_comment(owner, repo, pr.number, &body)?;
+        if did_update {
             updated += 1;
         }
     }

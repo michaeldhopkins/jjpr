@@ -1,8 +1,14 @@
-/// Stack navigation comment generation, parsing, and in-place editing.
+/// Stack navigation generation, parsing, and in-place editing.
+///
+/// The `StackNav` trait abstracts where stack navigation lives (comment vs PR
+/// description). `CommentNav` is the default — it stores stack info as a PR
+/// comment. Alternative implementations can store it elsewhere.
+use anyhow::Result;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 
-use super::types::IssueComment;
+use super::Forge;
+use super::types::{IssueComment, PullRequest};
 
 const SENTINEL: &str = "<!-- jjpr:stack-info -->";
 const FOOTER: &str = "*Created with [jjpr](https://github.com/michaeldhopkins/jjpr)*";
@@ -113,6 +119,87 @@ pub fn find_stack_comment(comments: &[IssueComment]) -> Option<&IssueComment> {
         let body = c.body.as_deref().unwrap_or("");
         body.contains(SENTINEL) || body.contains(LEGACY_FOOTER)
     })
+}
+
+/// Adapter for reading and writing stack navigation on PRs.
+///
+/// Each method that touches the forge should make at most one API call
+/// for the navigation data. Callers use `has_existing` for the skip check
+/// and `update` for the full read-merge-write cycle.
+pub trait StackNav: Send + Sync {
+    /// Check if this PR already has stack nav content.
+    fn has_existing(
+        &self,
+        forge: &dyn Forge,
+        owner: &str,
+        repo: &str,
+        pr: &PullRequest,
+    ) -> Result<bool>;
+
+    /// Read existing data, merge with new entries, and write the result.
+    /// Returns true if content was written or updated.
+    ///
+    /// `previous_items` is called to get the entries to merge with. This
+    /// callback receives the existing stack data (if any) and returns the
+    /// merged entries to write.
+    fn update(
+        &self,
+        forge: &dyn Forge,
+        owner: &str,
+        repo: &str,
+        pr: &PullRequest,
+        build_entries: &dyn Fn(Option<&StackCommentData>) -> Vec<StackEntry>,
+    ) -> Result<bool>;
+}
+
+/// Store stack navigation as a PR comment (default behavior).
+pub struct CommentNav;
+
+impl StackNav for CommentNav {
+    fn has_existing(
+        &self,
+        forge: &dyn Forge,
+        owner: &str,
+        repo: &str,
+        pr: &PullRequest,
+    ) -> Result<bool> {
+        let comments = forge.list_comments(owner, repo, pr.number)?;
+        Ok(find_stack_comment(&comments).is_some())
+    }
+
+    fn update(
+        &self,
+        forge: &dyn Forge,
+        owner: &str,
+        repo: &str,
+        pr: &PullRequest,
+        build_entries: &dyn Fn(Option<&StackCommentData>) -> Vec<StackEntry>,
+    ) -> Result<bool> {
+        // Single list_comments call — used for reading existing data AND writing
+        let comments = forge.list_comments(owner, repo, pr.number)?;
+        let existing = find_stack_comment(&comments);
+
+        let previous_data = existing
+            .and_then(|c| c.body.as_deref())
+            .and_then(parse_comment_data);
+
+        let entries = build_entries(previous_data.as_ref());
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        let body = generate_comment_body(&entries);
+
+        if let Some(existing_comment) = existing {
+            if existing_comment.body.as_deref() != Some(&body) {
+                forge.update_comment(owner, repo, existing_comment.id, &body)?;
+                return Ok(true);
+            }
+            Ok(false)
+        } else {
+            forge.create_comment(owner, repo, pr.number, &body)?;
+            Ok(true)
+        }
+    }
 }
 
 #[cfg(test)]
