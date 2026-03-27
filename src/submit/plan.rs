@@ -207,16 +207,16 @@ pub fn create_submission_plan(
     let mut existing_prs: HashMap<String, PullRequest> = HashMap::new();
     let mut all_bookmarks = Vec::new();
 
-    for (i, segment) in segments.iter().enumerate() {
+    // Track the effective base: starts at the stack base (or default branch),
+    // advances to each live segment's bookmark name. Merged segments don't
+    // advance it — their branches are deleted by the forge after merge.
+    let mut effective_base = stack_base.unwrap_or(default_branch).to_string();
+
+    for segment in segments {
         let bookmark = &segment.bookmark;
         all_bookmarks.push(bookmark.clone());
 
-        // Determine expected base branch
-        let base_branch = if i == 0 {
-            stack_base.unwrap_or(default_branch).to_string()
-        } else {
-            segments[i - 1].bookmark.name.clone()
-        };
+        let base_branch = effective_base.clone();
 
         let existing_pr = pr_map.get(&bookmark.name).cloned();
 
@@ -229,6 +229,7 @@ pub fn create_submission_plan(
                         pr_number: merged_pr.number,
                         html_url: merged_pr.html_url,
                     });
+                    // Don't advance effective_base — this branch is deleted
                     continue;
                 }
                 Err(e) => {
@@ -240,6 +241,9 @@ pub fn create_submission_plan(
                 Ok(None) => {}
             }
         }
+
+        // This segment is live — it becomes the base for the next segment
+        effective_base = bookmark.name.clone();
 
         // Check if bookmark needs push (after merged check to avoid recreating deleted branches)
         if !bookmark.is_synced {
@@ -744,9 +748,155 @@ mod tests {
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
         assert_eq!(plan.bookmarks_already_merged[0].bookmark.name, "auth");
         assert_eq!(plan.bookmarks_already_merged[0].pr_number, 99);
-        // profile should still get a new PR
+        // profile should still get a new PR — based on "main", NOT "auth" (deleted branch)
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].bookmark.name, "profile");
+        assert_eq!(
+            plan.bookmarks_needing_pr[0].base_branch, "main",
+            "PR after a merged segment should base on default branch, not the deleted branch"
+        );
+    }
+
+    #[test]
+    fn test_base_skips_consecutive_merged_segments() {
+        // auth and profile are both merged; settings should base on "main"
+        struct GitHubTwoMerged;
+        impl Forge for GitHubTwoMerged {
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+                if head == "auth" || head == "profile" {
+                    Ok(Some(PullRequest {
+                        number: if head == "auth" { 1 } else { 2 },
+                        html_url: format!("https://github.com/o/r/pull/{}", if head == "auth" { 1 } else { 2 }),
+                        title: head.to_string(),
+                        body: None,
+                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
+                        head: PullRequestRef { ref_name: head.to_string(), label: String::new(), sha: String::new() },
+                        draft: false,
+                        node_id: String::new(),
+                        merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                        requested_reviewers: vec![],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
+        }
+
+        let segments = vec![
+            make_segment("auth", true),
+            make_segment("profile", true),
+            make_segment("settings", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &GitHubTwoMerged, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_already_merged.len(), 2);
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1);
+        assert_eq!(plan.bookmarks_needing_pr[0].bookmark.name, "settings");
+        assert_eq!(
+            plan.bookmarks_needing_pr[0].base_branch, "main",
+            "PR after two merged segments should base on default branch"
+        );
+    }
+
+    #[test]
+    fn test_base_uses_live_segment_after_merged() {
+        // auth is merged, profile has a PR (live), settings needs a new PR
+        // settings should base on "profile" (the nearest live segment), not "main"
+        struct GitHubOneMergedOneLive;
+        impl Forge for GitHubOneMergedOneLive {
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![PullRequest {
+                    number: 2,
+                    html_url: "https://github.com/o/r/pull/2".to_string(),
+                    title: "profile".to_string(),
+                    body: None,
+                    base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
+                    head: PullRequestRef { ref_name: "profile".to_string(), label: "o:profile".to_string(), sha: "sha_profile".to_string() },
+                    draft: false,
+                    node_id: String::new(),
+                    merged_at: None,
+                    requested_reviewers: vec![],
+                }])
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+                if head == "auth" {
+                    Ok(Some(PullRequest {
+                        number: 1,
+                        html_url: "https://github.com/o/r/pull/1".to_string(),
+                        title: "auth".to_string(),
+                        body: None,
+                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
+                        head: PullRequestRef { ref_name: "auth".to_string(), label: String::new(), sha: String::new() },
+                        draft: false,
+                        node_id: String::new(),
+                        merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                        requested_reviewers: vec![],
+                    }))
+                } else {
+                    Ok(None)
+                }
+            }
+            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".to_string() })
+            }
+        }
+
+        let segments = vec![
+            make_segment("auth", true),
+            make_segment("profile", true),
+            make_segment("settings", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &GitHubOneMergedOneLive, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_already_merged.len(), 1, "auth should be merged");
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1);
+        assert_eq!(plan.bookmarks_needing_pr[0].bookmark.name, "settings");
+        assert_eq!(
+            plan.bookmarks_needing_pr[0].base_branch, "profile",
+            "settings should base on profile (nearest live segment), not main"
+        );
     }
 
     #[test]
