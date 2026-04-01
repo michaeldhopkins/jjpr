@@ -245,6 +245,24 @@ pub fn create_submission_plan(
         // This segment is live — it becomes the base for the next segment
         effective_base = bookmark.name.clone();
 
+        // Skip segments where all commits are empty (e.g., after jj squash).
+        // Pushing an empty bookmark would make the PR's diff zero, and GitHub
+        // auto-closes PRs when head is no longer ahead of base.
+        if segment.changes.iter().all(|c| c.empty) {
+            if existing_pr.is_some() {
+                eprintln!(
+                    "  Warning: '{}' has no file changes (all commits are empty)",
+                    bookmark.name
+                );
+                eprintln!("    Skipping push to avoid closing the existing PR.");
+                eprintln!(
+                    "    hint: jj bookmark delete {} && jj git push --deleted",
+                    bookmark.name
+                );
+            }
+            continue;
+        }
+
         // Check if bookmark needs push (after merged check to avoid recreating deleted branches)
         if !bookmark.is_synced {
             bookmarks_needing_push.push(bookmark.clone());
@@ -418,6 +436,7 @@ mod tests {
                 remote_bookmarks: vec![],
                 is_working_copy: false,
                 conflict: false,
+                empty: false,
             }],
             merge_source_names: vec![],
         }
@@ -1034,6 +1053,7 @@ mod tests {
             remote_bookmarks: vec![],
             is_working_copy: false,
             conflict: false,
+            empty: false,
         });
         let segments = vec![segment];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
@@ -1273,5 +1293,115 @@ mod tests {
             &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
         ).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
+    }
+
+    fn make_empty_segment(name: &str, synced: bool) -> NarrowedSegment {
+        NarrowedSegment {
+            bookmark: Bookmark {
+                name: name.to_string(),
+                commit_id: format!("c_{name}"),
+                change_id: format!("ch_{name}"),
+                has_remote: synced,
+                is_synced: synced,
+            },
+            changes: vec![LogEntry {
+                commit_id: format!("c_{name}"),
+                change_id: format!("ch_{name}"),
+                author_name: "Test".to_string(),
+                author_email: "test@test.com".to_string(),
+                description: format!("Add {name}"),
+                description_first_line: format!("Add {name}"),
+                parents: vec![],
+                local_bookmarks: vec![name.to_string()],
+                remote_bookmarks: vec![],
+                is_working_copy: false,
+                conflict: false,
+                empty: true,
+            }],
+            merge_source_names: vec![],
+        }
+    }
+
+    #[test]
+    fn test_plan_skips_empty_segment_with_existing_pr() {
+        // An empty bookmark with an existing PR should be skipped to avoid
+        // GitHub auto-closing the PR when the branch is force-pushed.
+        let gh = StubGitHub {
+            prs: HashMap::from([(
+                "auth".to_string(),
+                PullRequest {
+                    number: 1,
+                    html_url: "https://github.com/o/r/pull/1".to_string(),
+                    title: "Add auth".to_string(),
+                    body: None,
+                    base: PullRequestRef {
+                        ref_name: "main".to_string(),
+                        label: String::new(),
+                        sha: String::new(),
+                    },
+                    head: PullRequestRef {
+                        ref_name: "auth".to_string(),
+                        label: String::new(),
+                        sha: "sha_auth".to_string(),
+                    },
+                    draft: false,
+                    node_id: String::new(),
+                    merged_at: None,
+                    requested_reviewers: vec![],
+                },
+            )]),
+        };
+        let segments = vec![make_empty_segment("auth", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+        ).unwrap();
+
+        assert!(plan.bookmarks_needing_push.is_empty(), "should not push empty bookmark");
+        assert!(plan.bookmarks_needing_pr.is_empty(), "should not create PR for empty bookmark");
+        assert!(plan.bookmarks_needing_base_update.is_empty(), "should not update base of empty bookmark");
+    }
+
+    #[test]
+    fn test_plan_skips_empty_segment_without_pr() {
+        // An empty bookmark without a PR should be silently skipped
+        let gh = StubGitHub { prs: HashMap::new() };
+        let segments = vec![make_empty_segment("auth", false)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+        ).unwrap();
+
+        assert!(plan.bookmarks_needing_push.is_empty());
+        assert!(plan.bookmarks_needing_pr.is_empty());
+    }
+
+    #[test]
+    fn test_plan_empty_segment_advances_effective_base() {
+        // Even though an empty segment is skipped, it should still advance the
+        // effective base for subsequent segments.
+        let gh = StubGitHub { prs: HashMap::new() };
+        let segments = vec![
+            make_empty_segment("auth", true),
+            make_segment("profile", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+        ).unwrap();
+
+        // profile should base on "auth" (the empty segment), not "main"
+        assert_eq!(plan.bookmarks_needing_pr.len(), 1);
+        assert_eq!(plan.bookmarks_needing_pr[0].bookmark.name, "profile");
+        assert_eq!(
+            plan.bookmarks_needing_pr[0].base_branch, "auth",
+            "effective_base should advance through empty segments"
+        );
     }
 }

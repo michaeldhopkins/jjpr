@@ -545,28 +545,21 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     )?;
 
     if args.watch {
+        if dry_run {
+            anyhow::bail!("--dry-run is not supported with --watch");
+        }
         eprintln!("hint: `jjpr merge --watch` is deprecated. Use `jjpr watch` instead.\n");
-        println!("Watching stack up to '{}'...\n", stack.target_bookmark);
-
-        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let flag = shutdown.clone();
-        ctrlc::set_handler(move || {
-            eprint!("\nInterrupting after current operation completes...");
-            flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        }).expect("failed to set Ctrl+C handler");
-
-        let timeout = args.timeout.map(|m| std::time::Duration::from_secs(m * 60));
-        let result = merge::watch::execute_merge_plan_watch(
-            &stack.jj, stack.forge.as_ref(), &merge_plan, &stack.segments,
-            merge::watch::WatchOptions {
-                shutdown,
-                timeout,
-                poll_interval: std::time::Duration::from_secs(30),
-            },
-        )?;
-
-        print_merge_summary(&result);
-        return print_local_warnings(&result, &stack.segments, stack_base, &stack.default_branch);
+        return cmd_watch(
+            args.bookmark,
+            args.preferred_remote,
+            args.base_override,
+            args.merge_method,
+            args.required_approvals,
+            args.ci_pass_override,
+            args.reconcile_strategy,
+            args.timeout,
+            no_fetch,
+        );
     }
 
     if args.bookmark.is_some() {

@@ -43,9 +43,26 @@ pub fn execute_submission_plan(
         }
         completed_actions.push(format!("Pushed '{}'", bookmark.name));
 
-        // Show PR URL if this bookmark has an existing PR
+        // Show PR URL if this bookmark has an existing PR, and verify it
+        // wasn't auto-closed by the force-push (GitHub closes PRs when head
+        // is no longer ahead of base).
         if let Some(pr) = plan.existing_prs.get(&bookmark.name) {
             println!("    {}", pr.html_url);
+            if let Ok(state) = github.get_pr_state(owner, repo, pr.number)
+                && state.state == "closed" && !state.merged
+            {
+                eprintln!(
+                    "\n  Warning: {} was closed after pushing '{}'.",
+                    fk.format_ref(pr.number), bookmark.name
+                );
+                eprintln!(
+                    "    This means the bookmark's changes are already in the base branch."
+                );
+                eprintln!(
+                    "    hint: jj bookmark delete {} && jj git push --deleted",
+                    bookmark.name
+                );
+            }
         }
     }
 

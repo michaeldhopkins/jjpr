@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -17,7 +18,7 @@ use super::execute::{
 };
 use super::plan::{evaluate_segment, BlockReason, MergePlan, PrMergeStatus};
 
-pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 pub(crate) const MAX_CONSECUTIVE_ERRORS: u32 = 10;
 
 /// Sleep in small increments so Ctrl+C is responsive.
@@ -46,24 +47,38 @@ pub(crate) fn format_resolved_reason(reason: &BlockReason) -> &'static str {
 }
 
 /// Report status changes between previous and current block reasons.
-/// Returns true if any output was printed (i.e., something changed).
+///
+/// Returns `Some(displayed_reasons)` if any output was printed, where the
+/// vec contains the reasons that were shown to the user. Returns `None` if
+/// nothing was printed. Callers should use the returned vec as `prev_reasons`
+/// for the next call, so delta reporting tracks what the user actually saw.
+///
+/// On the first evaluation (prev is None), `MergeabilityUnknown` is suppressed
+/// because it's expected immediately after a push and resolves within seconds.
 pub(crate) fn report_status_changes(
     bookmark: &str,
     prev: Option<&[BlockReason]>,
     current: &[BlockReason],
     fk: ForgeKind,
-) -> bool {
+) -> Option<Vec<BlockReason>> {
     let Some(prev) = prev else {
-        // First time blocked — print all reasons
+        // First time blocked — suppress MergeabilityUnknown (expected after push)
+        let reportable: Vec<_> = current
+            .iter()
+            .filter(|r| !matches!(r, BlockReason::MergeabilityUnknown))
+            .collect();
+        if reportable.is_empty() {
+            return None;
+        }
         println!("\n  Waiting for '{bookmark}':");
-        for reason in current {
+        for reason in &reportable {
             println!("    - {}", format_block_reason(reason, fk));
         }
-        return true;
+        return Some(reportable.into_iter().cloned().collect());
     };
 
     if prev == current {
-        return false;
+        return None;
     }
 
     let mut printed = false;
@@ -91,14 +106,30 @@ pub(crate) fn report_status_changes(
                 if let BlockReason::InsufficientApprovals { have: old_have, .. } = old
                     && new_have != old_have
                 {
-                    println!("  {bookmark}: Approvals now {new_have}/{need}");
+                    if *new_have >= *need {
+                        println!("  {bookmark}: Approval threshold reached ({new_have}/{need})");
+                    } else {
+                        println!("  {bookmark}: Approvals now {new_have}/{need}");
+                    }
                     printed = true;
                 }
             }
         }
     }
 
-    printed
+    if printed {
+        Some(current.to_vec())
+    } else {
+        None
+    }
+}
+
+/// Clear any dots printed on the current line before printing a status message.
+pub(crate) fn clear_dot_line(dots_on_line: &mut bool) {
+    if *dots_on_line {
+        println!();
+        *dots_on_line = false;
+    }
 }
 
 pub(crate) fn refresh_pr_map(
@@ -139,6 +170,7 @@ pub fn execute_merge_plan_watch(
 
     let mut pr_map = refresh_pr_map(forge, owner, repo)?;
     let mut seg_idx = 0;
+    let mut dots_on_line = false;
     let mut prev_reasons: Option<Vec<BlockReason>> = None;
     let mut consecutive_errors: u32 = 0;
     let mut last_heartbeat = Instant::now();
@@ -195,6 +227,7 @@ pub fn execute_merge_plan_watch(
                 bookmark_name,
                 pr_number,
             } => {
+                clear_dot_line(&mut dots_on_line);
                 if prev_reasons.is_some() {
                     println!("  {bookmark_name}: Merged externally ({}) \u{2014} moving on",
                         fk.format_ref(pr_number));
@@ -211,6 +244,7 @@ pub fn execute_merge_plan_watch(
             }
 
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
+                clear_dot_line(&mut dots_on_line);
                 if prev_reasons.is_some() {
                     println!("  {bookmark_name}: Ready to merge");
                 }
@@ -248,6 +282,7 @@ pub fn execute_merge_plan_watch(
                 reasons,
             } => {
                 if reasons.iter().any(|r| matches!(r, BlockReason::NoPr)) {
+                    clear_dot_line(&mut dots_on_line);
                     println!("\n  Blocked at '{bookmark_name}':");
                     println!("    - No PR exists for this bookmark");
                     blocked_at = Some(BlockedPr {
@@ -258,28 +293,39 @@ pub fn execute_merge_plan_watch(
                     break;
                 }
 
-                let changed = report_status_changes(
+                match report_status_changes(
                     &bookmark_name,
                     prev_reasons.as_deref(),
                     &reasons,
                     fk,
-                );
-
-                if !changed && last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                    let now = local_time_hhmm();
-                    let first_reason = reasons
-                        .first()
-                        .map(|r| format_block_reason(r, fk))
-                        .unwrap_or_default();
-                    println!("  [{now}] Still waiting for {bookmark_name}: {first_reason}");
-                    last_heartbeat = Instant::now();
+                ) {
+                    Some(displayed) => {
+                        clear_dot_line(&mut dots_on_line);
+                        prev_reasons = Some(displayed);
+                        last_heartbeat = Instant::now();
+                    }
+                    None => {
+                        if prev_reasons.is_none() {
+                            prev_reasons = Some(vec![]);
+                        }
+                        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                            clear_dot_line(&mut dots_on_line);
+                            let now = local_time_hhmm();
+                            let first_reason = reasons
+                                .first()
+                                .map(|r| format_block_reason(r, fk))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{now}] Still waiting for {bookmark_name}: {first_reason}"
+                            );
+                            last_heartbeat = Instant::now();
+                        } else {
+                            print!(".");
+                            let _ = std::io::stdout().flush();
+                            dots_on_line = true;
+                        }
+                    }
                 }
-
-                if changed {
-                    last_heartbeat = Instant::now();
-                }
-
-                prev_reasons = Some(reasons);
 
                 if interruptible_sleep(poll_interval, &shutdown) {
                     break;
@@ -727,23 +773,75 @@ mod tests {
     #[test]
     fn test_report_status_changes_first_time() {
         let reasons = vec![BlockReason::ChecksPending, BlockReason::Draft];
-        let changed = report_status_changes("auth", None, &reasons, ForgeKind::GitHub);
-        assert!(changed);
+        let result = report_status_changes("auth", None, &reasons, ForgeKind::GitHub);
+        assert!(result.is_some());
+        let displayed = result.unwrap();
+        assert!(displayed.contains(&BlockReason::ChecksPending));
+        assert!(displayed.contains(&BlockReason::Draft));
     }
 
     #[test]
     fn test_report_status_changes_no_change() {
         let reasons = vec![BlockReason::ChecksPending];
-        let changed = report_status_changes("auth", Some(&reasons), &reasons, ForgeKind::GitHub);
-        assert!(!changed);
+        let result = report_status_changes("auth", Some(&reasons), &reasons, ForgeKind::GitHub);
+        assert!(result.is_none());
     }
 
     #[test]
     fn test_report_status_changes_reason_resolved() {
         let prev = vec![BlockReason::ChecksPending, BlockReason::Draft];
         let current = vec![BlockReason::Draft];
-        let changed = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
-        assert!(changed);
+        let result = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_report_status_changes_suppresses_mergeability_unknown_on_first() {
+        // MergeabilityUnknown is expected after a push and should be suppressed
+        // on the first evaluation to avoid confusing "still being computed" noise.
+        let reasons = vec![BlockReason::MergeabilityUnknown];
+        let result = report_status_changes("auth", None, &reasons, ForgeKind::GitHub);
+        assert!(result.is_none(), "should suppress MergeabilityUnknown on first eval");
+    }
+
+    #[test]
+    fn test_report_status_changes_suppresses_mergeability_but_shows_others() {
+        let reasons = vec![BlockReason::MergeabilityUnknown, BlockReason::ChecksPending];
+        let result = report_status_changes("auth", None, &reasons, ForgeKind::GitHub);
+        let displayed = result.expect("should print non-MU reasons");
+        assert_eq!(displayed.len(), 1);
+        assert!(displayed.contains(&BlockReason::ChecksPending));
+        assert!(!displayed.contains(&BlockReason::MergeabilityUnknown));
+    }
+
+    #[test]
+    fn test_report_status_changes_shows_mergeability_on_second_eval() {
+        // After suppressing MU on first eval (prev=[]), if MU persists,
+        // it should appear as a "new" reason on the second eval.
+        let prev = vec![];
+        let current = vec![BlockReason::MergeabilityUnknown];
+        let result = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
+        assert!(result.is_some(), "MU should be reported as new on second eval");
+    }
+
+    #[test]
+    fn test_report_status_changes_approval_count_change() {
+        // When approval count changes, the function should report it and
+        // return Some (so the caller knows output happened).
+        let prev = vec![BlockReason::InsufficientApprovals { have: 0, need: 2 }];
+        let current = vec![BlockReason::InsufficientApprovals { have: 1, need: 2 }];
+        let result = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
+        assert!(result.is_some(), "approval count change should be reported");
+    }
+
+    #[test]
+    fn test_report_status_changes_approval_threshold_reached() {
+        // When approval count reaches the threshold, the function should report
+        // it clearly (the next poll will detect InsufficientApprovals resolved).
+        let prev = vec![BlockReason::InsufficientApprovals { have: 0, need: 1 }];
+        let current = vec![BlockReason::InsufficientApprovals { have: 1, need: 1 }];
+        let result = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
+        assert!(result.is_some(), "approval threshold reached should be reported");
     }
 
     #[test]
@@ -809,5 +907,29 @@ mod tests {
             jj_calls.iter().any(|c| c == "git_fetch"),
             "reconcile should have run after AlreadyMerged: {jj_calls:?}"
         );
+    }
+
+    #[test]
+    fn test_watch_terminates_when_all_already_merged() {
+        // When all segments are AlreadyMerged, the watch loop should terminate
+        // without spinning. This guards against infinite loops.
+        let forge = ScriptedForge::new(vec![])
+            .with_prs(vec![]);
+
+        // Both segments are already merged (not in open_prs, found by find_merged_pr)
+        *forge.merged_prs.lock().expect("poisoned") = vec![
+            ("auth".to_string(), make_pr("auth", 1)),
+            ("profile".to_string(), make_pr("profile", 2)),
+        ];
+
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan_watch(
+            &StubJj, &forge, &default_plan(), &segments, test_opts(),
+        )
+        .unwrap();
+
+        assert!(result.merged.is_empty(), "nothing should be merged");
+        assert_eq!(result.skipped_merged.len(), 2, "both should be skipped as already merged");
     }
 }

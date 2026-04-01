@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 /// A single jj log entry, deserialized from jj template JSON output.
 #[derive(Debug, Clone, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LogEntry {
     pub commit_id: String,
     pub change_id: String,
@@ -14,6 +15,7 @@ pub struct LogEntry {
     pub remote_bookmarks: Vec<String>,
     pub is_working_copy: bool,
     pub conflict: bool,
+    pub empty: bool,
 }
 
 /// A bookmark pointing at a specific change.
