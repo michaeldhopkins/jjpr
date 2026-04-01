@@ -610,6 +610,7 @@ mod tests {
                 remote_bookmarks: vec![],
                 is_working_copy: false,
                 conflict: false,
+                empty: false,
             }],
             merge_source_names: vec![],
         }
@@ -1016,6 +1017,7 @@ mod tests {
                     remote_bookmarks: vec![],
                     is_working_copy: false,
                     conflict: false,
+                    empty: false,
                 },
                 LogEntry {
                     commit_id: "c_middle".to_string(),
@@ -1029,6 +1031,7 @@ mod tests {
                     remote_bookmarks: vec![],
                     is_working_copy: false,
                     conflict: false,
+                    empty: false,
                 },
                 LogEntry {
                     commit_id: "c_oldest".to_string(),
@@ -1042,6 +1045,7 @@ mod tests {
                     remote_bookmarks: vec![],
                     is_working_copy: false,
                     conflict: false,
+                    empty: false,
                 },
             ],
             merge_source_names: vec![],

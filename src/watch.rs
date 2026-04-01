@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -15,8 +16,8 @@ use crate::merge::execute::{
 };
 use crate::merge::plan::{evaluate_segment, BlockReason, MergeOptions, PrMergeStatus};
 use crate::merge::watch::{
-    interruptible_sleep, local_time_hhmm, refresh_pr_map, report_status_changes,
-    WatchOptions, HEARTBEAT_INTERVAL, MAX_CONSECUTIVE_ERRORS,
+    clear_dot_line, interruptible_sleep, local_time_hhmm, refresh_pr_map,
+    report_status_changes, WatchOptions, HEARTBEAT_INTERVAL, MAX_CONSECUTIVE_ERRORS,
 };
 use crate::submit::{analyze, plan, execute, resolve};
 
@@ -156,6 +157,7 @@ fn run_merge_phase(
     last_heartbeat: &mut Instant,
     local_degraded: &mut bool,
     local_warnings: &mut Vec<LocalDivergenceWarning>,
+    dots_on_line: &mut bool,
 ) -> Result<MergePhaseOutcome> {
     let owner = &merge_plan.repo_info.owner;
     let repo = &merge_plan.repo_info.repo;
@@ -191,6 +193,7 @@ fn run_merge_phase(
                 bookmark_name,
                 pr_number,
             } => {
+                clear_dot_line(dots_on_line);
                 if prev_reasons.is_some() {
                     println!(
                         "  {bookmark_name}: Merged externally ({}) \u{2014} moving on",
@@ -212,6 +215,7 @@ fn run_merge_phase(
             }
 
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
+                clear_dot_line(dots_on_line);
                 if prev_reasons.is_some() {
                     println!("  {bookmark_name}: Ready to merge");
                 }
@@ -249,6 +253,7 @@ fn run_merge_phase(
                 reasons,
             } => {
                 if reasons.iter().any(|r| matches!(r, BlockReason::NoPr)) {
+                    clear_dot_line(dots_on_line);
                     return Ok(MergePhaseOutcome {
                         merged,
                         skipped,
@@ -264,33 +269,43 @@ fn run_merge_phase(
                 if prev_reasons.is_none()
                     && let Some(hint) = reviewer_hint(pr.as_ref(), &reasons, &bookmark_name, forge_kind)
                 {
+                    clear_dot_line(dots_on_line);
                     println!("{hint}");
                 }
 
-                let changed = report_status_changes(
+                match report_status_changes(
                     &bookmark_name,
                     prev_reasons.as_deref(),
                     &reasons,
                     forge_kind,
-                );
-
-                if !changed && last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                    let now = local_time_hhmm();
-                    let first_reason = reasons
-                        .first()
-                        .map(|r| format_block_reason(r, forge_kind))
-                        .unwrap_or_default();
-                    println!(
-                        "  [{now}] Still waiting for {bookmark_name}: {first_reason}"
-                    );
-                    *last_heartbeat = Instant::now();
+                ) {
+                    Some(displayed) => {
+                        clear_dot_line(dots_on_line);
+                        *prev_reasons = Some(displayed);
+                        *last_heartbeat = Instant::now();
+                    }
+                    None => {
+                        if prev_reasons.is_none() {
+                            *prev_reasons = Some(vec![]);
+                        }
+                        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+                            clear_dot_line(dots_on_line);
+                            let now = local_time_hhmm();
+                            let first_reason = reasons
+                                .first()
+                                .map(|r| format_block_reason(r, forge_kind))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{now}] Still waiting for {bookmark_name}: {first_reason}"
+                            );
+                            *last_heartbeat = Instant::now();
+                        } else {
+                            print!(".");
+                            let _ = std::io::stdout().flush();
+                            *dots_on_line = true;
+                        }
+                    }
                 }
-
-                if changed {
-                    *last_heartbeat = Instant::now();
-                }
-
-                *prev_reasons = Some(reasons);
                 break; // Wait for next iteration
             }
         }
@@ -322,7 +337,7 @@ fn run_merge_phase(
 }
 
 /// Run the watch loop: submit → promote → merge → repeat.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub fn run_watch_loop(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -353,6 +368,8 @@ pub fn run_watch_loop(
     let mut prev_reasons: Option<Vec<BlockReason>> = None;
     let mut consecutive_errors: u32 = 0;
     let mut last_heartbeat = Instant::now();
+    let mut dots_on_line = false;
+    let mut no_progress_count: u32 = 0;
     let deadline = timeout.map(|d| Instant::now() + d);
 
     let merge_plan = make_merge_plan(
@@ -432,6 +449,39 @@ pub fn run_watch_loop(
         };
 
         if segments.is_empty() {
+            // Final check: any open PRs we didn't process?
+            clear_dot_line(&mut dots_on_line);
+            if let Ok(pr_map) = refresh_pr_map(forge, owner, repo)
+                && let Ok(my_bookmarks) = jj.get_my_bookmarks()
+            {
+                let orphaned: Vec<_> = my_bookmarks
+                    .iter()
+                    .filter(|b| pr_map.contains_key(&b.name))
+                    .filter(|b| !merged.iter().any(|m| m.bookmark_name == b.name))
+                    .filter(|b| {
+                        !skipped_merged
+                            .iter()
+                            .any(|s| s.bookmark_name == b.name)
+                    })
+                    .collect();
+                if !orphaned.is_empty() {
+                    println!(
+                        "\n  Note: {} open PR{} still exist for your bookmarks:",
+                        orphaned.len(),
+                        if orphaned.len() == 1 { "" } else { "s" }
+                    );
+                    for b in &orphaned {
+                        if let Some(pr) = pr_map.get(&b.name) {
+                            println!(
+                                "    - '{}' ({})",
+                                b.name,
+                                forge_kind.format_ref(pr.number)
+                            );
+                        }
+                    }
+                    println!("  These may need manual attention.");
+                }
+            }
             break;
         }
 
@@ -517,6 +567,8 @@ pub fn run_watch_loop(
         } else {
             pr_map
         };
+        let had_creates = !bookmarks_being_created.is_empty();
+        let had_promotes = !promoted.is_empty();
         all_promoted.extend(promoted);
 
         // --- Phase 5: Merge phase (bottom-up) ---
@@ -524,17 +576,44 @@ pub fn run_watch_loop(
             jj, forge, &segments, &pr_map, merge_options, &merge_plan,
             forge_kind, &mut prev_reasons, &mut consecutive_errors,
             &mut last_heartbeat, &mut local_degraded, &mut local_warnings,
+            &mut dots_on_line,
         )?;
 
+        let total_before = merged.len() + skipped_merged.len();
         merged.extend(merge_outcome.merged);
-        skipped_merged.extend(merge_outcome.skipped);
+        // Dedup skipped to avoid re-counting the same AlreadyMerged bookmark
+        for s in merge_outcome.skipped {
+            if !skipped_merged.iter().any(|existing| existing.bookmark_name == s.bookmark_name) {
+                skipped_merged.push(s);
+            }
+        }
+        let total_after = merged.len() + skipped_merged.len();
+        let created_or_promoted = had_creates || had_promotes;
 
         if let Some(blocked) = merge_outcome.blocked {
             blocked_at = Some(blocked);
             break;
         }
+
+        // No-progress safety valve: must run even when all_done fires, because
+        // rediscover_segments might keep returning the same already-merged segments.
+        if total_after == total_before && !created_or_promoted {
+            no_progress_count += 1;
+            if no_progress_count >= 5 {
+                clear_dot_line(&mut dots_on_line);
+                println!("\n  No progress after {no_progress_count} consecutive iterations \u{2014} exiting.");
+                println!("  Remaining bookmarks may need manual intervention.");
+                break;
+            }
+        } else {
+            no_progress_count = 0;
+        }
+
         if merge_outcome.all_done {
-            break;
+            // All segments in this snapshot were processed. Loop back to
+            // rediscover — reconciliation after merge may have changed the
+            // graph. Skip the sleep since we just made progress.
+            continue;
         }
 
         // Sleep before next iteration
@@ -556,19 +635,29 @@ pub fn run_watch_loop(
 }
 
 /// Re-discover segments by rebuilding the change graph.
+///
+/// If the target bookmark is no longer in the graph (e.g., it was merged into
+/// trunk), falls back to inferring the target from the working copy's position.
+/// This handles the case where mid-stack merges change the graph while the
+/// leaf bookmark is gone.
 fn rediscover_segments(
     jj: &dyn Jj,
     target_bookmark: &str,
 ) -> Result<Vec<NarrowedSegment>> {
     let graph = change_graph::build_change_graph(jj)?;
 
-    // If the target bookmark no longer exists (fully merged), return empty
-    let analysis = match analyze::analyze_submission_graph(&graph, target_bookmark) {
-        Ok(a) => a,
-        Err(_) => return Ok(vec![]),
-    };
-
-    resolve::resolve_bookmark_selections(&analysis.relevant_segments, false)
+    match analyze::analyze_submission_graph(&graph, target_bookmark) {
+        Ok(a) => resolve::resolve_bookmark_selections(&a.relevant_segments, false),
+        Err(_) => {
+            // Target bookmark gone — try inferring from working copy
+            if let Ok(Some(inferred)) = analyze::infer_target_bookmark(&graph, jj)
+                && let Ok(a) = analyze::analyze_submission_graph(&graph, &inferred)
+            {
+                return resolve::resolve_bookmark_selections(&a.relevant_segments, false);
+            }
+            Ok(vec![])
+        }
+    }
 }
 
 /// Run the submit phase: push unsynced bookmarks, create draft PRs, update bases/bodies.
