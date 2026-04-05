@@ -123,8 +123,8 @@ Example output:
 Merge a stack of PRs from the bottom up.
 
 Merges the bottommost mergeable PR, fetches the updated default branch, \
-syncs the remaining stack (merge commits by default, or rebase with \
---reconcile-strategy rebase), pushes, retargets the next PR's base, \
+syncs the remaining stack (rebase by default, or merge commits with \
+--reconcile-strategy merge), pushes, retargets the next PR's base, \
 and repeats until blocked or done.
 
 Before merging each PR, jjpr checks:
@@ -171,8 +171,8 @@ Examples:
 
         /// How to sync the remaining stack after each merge (overrides config file)
         ///
-        /// "merge" (default): creates merge commits on downstream branches — no force pushes.
-        /// "rebase": rebases downstream commits — causes force pushes on GitHub.
+        /// "rebase" (default): rebases downstream commits onto the new base.
+        /// "merge": creates merge commits on downstream branches.
         #[arg(long, value_enum)]
         reconcile_strategy: Option<ReconcileStrategy>,
 

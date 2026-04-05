@@ -10,10 +10,10 @@ use crate::forge::types::MergeMethod;
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum ReconcileStrategy {
-    /// Create merge commits incorporating the new base (no force pushes).
-    #[default]
+    /// Create merge commits incorporating the new base.
     Merge,
-    /// Rebase downstream commits onto the new base (causes force pushes).
+    /// Rebase downstream commits onto the new base.
+    #[default]
     Rebase,
 }
 
@@ -47,8 +47,8 @@ pub struct Config {
     pub forge_token_env: Option<String>,
 
     /// How to sync the remaining stack after merging a PR.
-    /// "merge" (default): create merge commits — no force pushes.
-    /// "rebase": rebase onto new base — causes force pushes.
+    /// "rebase" (default): rebase onto new base.
+    /// "merge": create merge commits incorporating the new base.
     pub reconcile_strategy: ReconcileStrategy,
 
     /// Where to display stack navigation: "comment" (default) or "description".
@@ -65,7 +65,7 @@ impl Default for Config {
             require_ci_pass: true,
             forge: None,
             forge_token_env: None,
-            reconcile_strategy: ReconcileStrategy::Merge,
+            reconcile_strategy: ReconcileStrategy::Rebase,
             stack_nav: StackNavMode::Comment,
         }
     }
@@ -194,9 +194,9 @@ required_approvals = 1
 require_ci_pass = true
 
 # How to sync the remaining stack after merging a PR.
-# "merge" (default): creates merge commits on downstream branches — no force pushes.
-# "rebase": rebases downstream commits — causes force pushes on GitHub.
-reconcile_strategy = "merge"
+# "rebase" (default): rebases downstream commits onto the new base.
+# "merge": creates merge commits on downstream branches.
+reconcile_strategy = "rebase"
 
 # Where to show stack navigation: "comment" (default) or "description".
 # "comment" posts a separate comment on each PR.
@@ -230,7 +230,7 @@ mod tests {
         assert!(config.require_ci_pass);
         assert!(config.forge.is_none());
         assert!(config.forge_token_env.is_none());
-        assert_eq!(config.reconcile_strategy, ReconcileStrategy::Merge);
+        assert_eq!(config.reconcile_strategy, ReconcileStrategy::Rebase);
     }
 
     #[test]
