@@ -7,7 +7,7 @@ Multi-forge stacked pull requests for [Jujutsu](https://jj-vcs.github.io/jj/). P
 - **Watch mode** — `jjpr watch` is an always-on assistant that creates draft PRs, promotes them when CI passes, and merges them when approved — hands-free
 - **Multi-forge** — GitHub, GitLab, and Forgejo/Codeberg in one binary, auto-detected from your remote URL
 - **Stack merging** — merges from the bottom up with live re-evaluation: merge a PR, sync the rest, retarget bases, check the next one, repeat
-- **No force pushes** — downstream branches are synced via merge commits (append-only), avoiding force push events that clutter GitHub PR timelines
+- **Stack syncing** — after merging a PR, downstream branches are rebased onto the new base automatically
 - **Merge commits** — `jj new A B` handled naturally; jjpr follows the first parent and lets other parents form independent stacks
 - **Pure HTTP** — talks directly to forge APIs via `ureq`; no `gh` or `glab` CLI required (though existing credentials are picked up automatically)
 - **Idempotent** — run commands repeatedly as you work; they converge to the correct state
@@ -228,7 +228,7 @@ The PR title is not automatically updated after creation. If you change your com
 
 If the bottommost PR is mergeable, jjpr merges it, fetches the updated default branch, syncs the remaining stack, pushes all remaining bookmarks, and retargets the next PR's base if needed. Then it checks the next PR and continues until blocked or done.
 
-By default, the remaining stack is synced via **merge commits** — each downstream bookmark gets a merge commit incorporating the new base. This is append-only, so pushes are fast-forward and avoid force push events on GitHub. You can switch to the old rebase behavior with `reconcile_strategy = "rebase"` in config (see [Configuration](#configuration)).
+By default, the remaining stack is synced by rebasing downstream commits onto the new base. You can switch to merge-based reconciliation with `reconcile_strategy = "merge"` in config (see [Configuration](#configuration)), which creates merge commits instead and avoids force pushes.
 
 #### Retry on transient errors
 
@@ -278,8 +278,8 @@ The `merge_method` setting (or `--merge-method` flag) controls how the forge com
 
 The `reconcile_strategy` setting controls how the remaining stack is synced after a PR is merged:
 
-- **`merge`** (default) — Creates merge commits on downstream branches that incorporate the updated base. Pushes are fast-forward, so no force push events appear on GitHub PR timelines.
-- **`rebase`** — Rebases downstream commits onto the new base. Rewrites commit history, which causes force pushes — these show up as immutable events on GitHub.
+- **`rebase`** (default) — Rebases downstream commits onto the new base. Rewrites commit history, keeping it linear and clean.
+- **`merge`** — Creates merge commits on downstream branches that incorporate the updated base. Pushes are fast-forward (no force push events on GitHub), but adds merge commits to the history.
 
 ### Configuration
 
@@ -295,8 +295,8 @@ required_approvals = 1
 # Whether CI checks must pass before merging
 require_ci_pass = true
 
-# How to sync the remaining stack after merging a PR: "merge" or "rebase"
-reconcile_strategy = "merge"
+# How to sync the remaining stack after merging a PR: "rebase" or "merge"
+reconcile_strategy = "rebase"
 
 # Where to show stack navigation: "comment" (default) or "description"
 # "comment" posts a separate comment on each PR.

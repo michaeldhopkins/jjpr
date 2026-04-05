@@ -960,6 +960,62 @@ mod tests {
     }
 
     #[test]
+    fn test_config_default_reconciles_with_rebase() {
+        let jj = RecordingJj::new();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1]
+            .base
+            .ref_name = "auth".to_string();
+
+        let config = crate::config::Config::default();
+        let opts = MergeOptions {
+            merge_method: config.merge_method,
+            required_approvals: config.required_approvals,
+            require_ci_pass: config.require_ci_pass,
+            reconcile_strategy: config.reconcile_strategy,
+            ready: false,
+        };
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: opts,
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        assert_eq!(result.merged.len(), 1);
+
+        let jj_calls = jj.calls();
+        assert!(
+            jj_calls.iter().any(|c| c.starts_with("rebase:")),
+            "Config::default() should reconcile with rebase, got: {jj_calls:?}"
+        );
+        assert!(
+            !jj_calls.iter().any(|c| c.starts_with("merge_into:")),
+            "Config::default() should not use merge_into, got: {jj_calls:?}"
+        );
+    }
+
+    #[test]
     fn test_rebase_uses_oldest_commit_in_segment() {
         // When a segment has multiple commits (e.g., 3 commits between two bookmarks),
         // the rebase must start from the oldest commit (closest to the merged bookmark),
