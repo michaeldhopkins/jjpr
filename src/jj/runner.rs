@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use vcs_runner::{is_transient_error, jj_available, run_jj_utf8, run_jj_utf8_with_retry};
 
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
@@ -14,13 +14,10 @@ pub struct JjRunner {
 
 impl JjRunner {
     pub fn new(repo_path: PathBuf) -> Result<Self> {
-        // Verify jj is available
-        Command::new("jj")
-            .arg("--version")
-            .output()
-            .context("jj not found. Install it: https://jj-vcs.github.io/jj/")?;
+        if !jj_available() {
+            anyhow::bail!("jj not found. Install it: https://jj-vcs.github.io/jj/");
+        }
 
-        // Verify path is a jj repo
         if !repo_path.join(".jj").is_dir() {
             anyhow::bail!("{} is not a jj repository", repo_path.display());
         }
@@ -28,19 +25,9 @@ impl JjRunner {
         Ok(Self { repo_path })
     }
 
+    /// Run jj and return lossy-decoded stdout with surrounding whitespace trimmed.
     fn run_jj(&self, args: &[&str]) -> Result<String> {
-        let output = Command::new("jj")
-            .args(args)
-            .current_dir(&self.repo_path)
-            .output()
-            .context("failed to run jj")?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("jj {} failed: {}", args.join(" "), stderr.trim())
-        }
+        Ok(run_jj_utf8(&self.repo_path, args)?)
     }
 
     pub fn repo_path(&self) -> &Path {
@@ -50,7 +37,14 @@ impl JjRunner {
 
 impl Jj for JjRunner {
     fn git_fetch(&self) -> Result<()> {
-        self.run_jj(&["git", "fetch", "--all-remotes"])?;
+        // Only idempotent operations retry. `vcs_runner::is_transient_error`
+        // matches both ".lock" (op didn't start — always safe) and "stale"
+        // (working-copy staleness — op may have partially committed). Retrying
+        // mutating ops like `jj new` or `jj rebase` on "stale" could create
+        // duplicate commits, so those deliberately use `run_jj` (no retry).
+        // Fetch is pure-read into the git backend; retrying is safe in both
+        // cases.
+        run_jj_utf8_with_retry(&self.repo_path, &["git", "fetch", "--all-remotes"], is_transient_error)?;
         Ok(())
     }
 
@@ -97,7 +91,6 @@ impl Jj for JjRunner {
     }
 
     fn get_default_branch(&self) -> Result<String> {
-        // Try parsing the trunk() alias — if it's a simple "name@remote" form, extract the name
         if let Ok(alias) = self.run_jj(&["config", "get", r#"revset-aliases."trunk()""#]) {
             let alias = alias.trim();
             if let Some((name, _remote)) = alias.split_once('@')
@@ -108,7 +101,6 @@ impl Jj for JjRunner {
             }
         }
 
-        // Fall back to querying remote bookmarks on trunk()
         let template = r#"remote_bookmarks.map(|b| b.name()).join(",")"#;
         let output = self.run_jj(&[
             "log",
@@ -146,11 +138,10 @@ impl Jj for JjRunner {
             "log", "-r", "@", "--no-graph", "--limit", "1",
             "--template", "commit_id",
         ])?;
-        let id = output.trim().to_string();
-        if id.is_empty() {
+        if output.is_empty() {
             anyhow::bail!("could not determine working copy commit");
         }
-        Ok(id)
+        Ok(output)
     }
 
     fn rebase_onto(&self, source: &str, destination: &str) -> Result<()> {
@@ -159,13 +150,8 @@ impl Jj for JjRunner {
     }
 
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
-        // Create a merge commit with both the bookmark and dest as parents,
-        // without moving the working copy. A description is required or jj
-        // will refuse to push the commit.
         let msg = format!("Merge {dest} into {bookmark}");
         self.run_jj(&["new", "--no-edit", "-m", &msg, bookmark, dest])?;
-        // Move the bookmark to the new merge commit. The revset uniquely
-        // identifies it as the child of both parents.
         let revset = format!("children({bookmark}) & children({dest})");
         self.run_jj(&["bookmark", "set", bookmark, "-r", &revset])?;
         Ok(())
@@ -193,14 +179,9 @@ impl Jj for JjRunner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::process::Command;
 
-    fn jj_available() -> bool {
-        Command::new("jj")
-            .arg("--version")
-            .output()
-            .is_ok_and(|o| o.status.success())
-    }
+    use super::*;
 
     fn init_jj_repo(path: &Path) {
         Command::new("jj")
