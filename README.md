@@ -49,7 +49,7 @@ git clone https://github.com/michaeldhopkins/jjpr
 cargo install --path jjpr
 ```
 
-Requires Rust 1.88+.
+Requires Rust 1.91+.
 
 ## Quick start
 
@@ -337,7 +337,7 @@ Reviewer requests are idempotent: if a reviewer is already requested on a PR, th
 
 ## Requirements
 
-- Rust 1.88+ (for building from source)
+- Rust 1.91+ (for building from source)
 - [jj](https://jj-vcs.github.io/jj/) 0.36+ (Jujutsu VCS)
 - A colocated jj/git repository with a supported remote
 
