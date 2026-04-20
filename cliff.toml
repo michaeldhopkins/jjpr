@@ -21,7 +21,7 @@ postprocessors = []
 [git]
 conventional_commits = true
 filter_unconventional = true
-require_conventional = false
+require_conventional = true
 split_commits = false
 commit_preprocessors = []
 protect_breaking_commits = false
