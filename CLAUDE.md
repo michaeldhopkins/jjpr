@@ -31,6 +31,21 @@ JJPR_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
 
 E2E tests use `michaeldhopkins/jjpr-testing-environment` (private repo). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
 
+## Commit style
+
+Every commit message must use a conventional-commit prefix so `git cliff` produces real release notes (`cliff.toml` has `filter_unconventional = true` — unprefixed commits silently disappear from the changelog).
+
+- `feat:` → Features (minor bump candidate).
+- `fix:` → Bug Fixes (patch).
+- `docs:` → Documentation.
+- `refactor:` → Refactor.
+- `test:` → Testing.
+- `perf:` → Performance.
+- `chore:` / `ci:` / `build:` → Miscellaneous.
+- `!` suffix marks a breaking change: `feat!:`, `fix!:`. Forces a minor bump in 0.x.
+
+Subject ≤ 70 chars. Body explains *why* and lists any breaking migration steps.
+
 ## Before pushing
 
 Every push must pass these steps. CI runs `cargo check --locked`, `cargo test`, `cargo clippy`, and `cargo deny` — a stale lockfile or clippy warning will fail the build.

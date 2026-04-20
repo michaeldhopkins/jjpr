@@ -20,7 +20,7 @@ postprocessors = []
 
 [git]
 conventional_commits = true
-filter_unconventional = false
+filter_unconventional = true
 require_conventional = false
 split_commits = false
 commit_preprocessors = []
