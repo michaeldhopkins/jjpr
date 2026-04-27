@@ -1,0 +1,89 @@
+# Configuration
+
+jjpr reads configuration from two optional TOML files.
+
+| Location | Created by | Purpose |
+|---|---|---|
+| `~/.config/jjpr/config.toml` (or `$XDG_CONFIG_HOME/jjpr/config.toml`) | `jjpr config init` | Global defaults |
+| `.jj/jjpr.toml` (inside the repo's `.jj/` directory) | `jjpr config init --repo` | Repo-local overrides |
+
+If neither file exists, jjpr uses built-in defaults. CLI flags override
+config files. Repo-local config overrides global config.
+
+## Global config
+
+```toml
+merge_method = "squash"
+required_approvals = 1
+require_ci_pass = true
+reconcile_strategy = "rebase"
+stack_nav = "comment"
+```
+
+## Repo-local config
+
+Repo-local config goes in `.jj/jjpr.toml`. Because `.jj/` is gitignored,
+the file is per-clone.
+
+```toml
+forge = "forgejo"
+forge_token_env = "FORGEJO_TOKEN"
+stack_nav = "description"
+```
+
+## Field reference
+
+### `merge_method`
+
+How the forge combines the PR when it lands.
+
+- `squash` (default): all commits in the PR collapse into one commit on
+  the target branch. Linear history.
+- `merge`: a merge commit is created. The individual commits from the
+  PR branch are preserved.
+- `rebase`: commits are rebased onto the target branch individually
+  with no merge commit. Linear history, each commit kept separately.
+
+### `required_approvals`
+
+Number of approving reviews required before merging. Default `1`.
+
+### `require_ci_pass`
+
+If `true` (default), CI checks must pass before merging. Override with
+`--no-ci-check` on a single invocation.
+
+### `reconcile_strategy`
+
+How the remaining stack is synced after a PR is merged.
+
+- `rebase` (default): rebases downstream commits onto the new base.
+  Rewrites history. Pushes become force-pushes.
+- `merge`: creates merge commits on downstream branches that
+  incorporate the updated base. Pushes stay fast-forward (no force-push
+  events on GitHub) but the history grows merge commits.
+
+### `stack_nav`
+
+Where to show the stack navigation block.
+
+- `comment` (default): a separate comment on each PR.
+- `description`: embedded in the PR body. More visible to reviewers.
+  Updates the body on each `submit`.
+
+### `forge`
+
+Forge type. One of `github`, `gitlab`, or `forgejo`. When set,
+auto-detection is skipped. Use this for self-hosted instances that
+auto-detection can't recognize. Repo-local only.
+
+### `forge_token_env`
+
+Name of the environment variable that holds the API token. When
+unset, jjpr falls back to the forge's default (`GITHUB_TOKEN`,
+`GITLAB_TOKEN`, or `FORGEJO_TOKEN`). Repo-local only.
+
+## Configuring forges
+
+Forge-specific authentication and self-hosted instance setup live in
+[Forge support](forges.md).
