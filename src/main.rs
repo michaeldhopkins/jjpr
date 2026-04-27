@@ -596,8 +596,8 @@ fn cmd_watch(
 
     // For watch: if no bookmark is specified, try to infer one. If none exists
     // yet, wait for one to appear (unlike submit/merge which exit immediately).
-    let resolved_bookmark = if bookmark.is_some() {
-        bookmark.map(|s| s.to_string())
+    let resolved_bookmark = if let Some(name) = bookmark {
+        Some(name.to_string())
     } else {
         let repo_path = find_repo_root()?;
         let jj = jjpr::jj::runner::JjRunner::new(repo_path)?;
@@ -605,33 +605,19 @@ fn cmd_watch(
         match analyze::infer_target_bookmark(&graph, &jj)? {
             Some(name) => Some(name),
             None => {
-                let deadline = timeout.map(|m| std::time::Instant::now() + std::time::Duration::from_secs(m * 60));
+                let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
                 let poll = std::time::Duration::from_secs(5);
-
-                println!("Waiting for a bookmark in the working copy's ancestry...");
-                println!("    hint: jj bookmark set <name>\n");
-
-                loop {
-                    if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
-                        println!("\nInterrupted.");
-                        return Ok(());
-                    }
-                    if let Some(dl) = deadline
-                        && std::time::Instant::now() >= dl
-                    {
-                        println!("Watch timed out while waiting for a bookmark.");
-                        return Ok(());
-                    }
-
-                    if let Ok(graph) = change_graph::build_change_graph(&jj)
-                        && let Ok(Some(name)) = analyze::infer_target_bookmark(&graph, &jj)
-                    {
+                match jjpr::watch::wait_for_bookmark(&jj, timeout_dur, poll, &shutdown)? {
+                    Some(name) => {
                         println!("Found bookmark '{name}'\n");
-                        break Some(name);
+                        Some(name)
                     }
-
-                    if jjpr::merge::watch::interruptible_sleep(poll, &shutdown) {
-                        println!("\nInterrupted.");
+                    None => {
+                        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                            println!("\nInterrupted.");
+                        } else {
+                            println!("Watch timed out while waiting for a bookmark.");
+                        }
                         return Ok(());
                     }
                 }

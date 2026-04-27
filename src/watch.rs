@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -337,6 +337,46 @@ fn run_merge_phase(
 }
 
 /// Run the watch loop: submit → promote → merge → repeat.
+/// Poll until a bookmark appears in the working copy's ancestry.
+///
+/// Prints a "Waiting for a bookmark..." preamble, then rebuilds the change
+/// graph every `poll_interval` and runs `infer_target_bookmark`. Returns
+/// `Ok(Some(name))` as soon as one is found, or `Ok(None)` if `shutdown` is
+/// set or `timeout` elapses. The caller decides what to print on the `None`
+/// path so it can distinguish interrupt from timeout.
+pub fn wait_for_bookmark(
+    jj: &dyn Jj,
+    timeout: Option<Duration>,
+    poll_interval: Duration,
+    shutdown: &AtomicBool,
+) -> Result<Option<String>> {
+    let deadline = timeout.map(|d| Instant::now() + d);
+
+    println!("Waiting for a bookmark in the working copy's ancestry...");
+    println!("    hint: jj bookmark set <name>\n");
+
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        if let Some(dl) = deadline
+            && Instant::now() >= dl
+        {
+            return Ok(None);
+        }
+
+        if let Ok(graph) = change_graph::build_change_graph(jj)
+            && let Ok(Some(name)) = analyze::infer_target_bookmark(&graph, jj)
+        {
+            return Ok(Some(name));
+        }
+
+        if interruptible_sleep(poll_interval, shutdown) {
+            return Ok(None);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub fn run_watch_loop(
     jj: &dyn Jj,
@@ -717,7 +757,7 @@ mod tests {
         ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest,
         PullRequestRef, ReviewSummary,
     };
-    use crate::jj::types::Bookmark;
+    use crate::jj::types::{Bookmark, GitRemote, LogEntry};
 
     // --- Test helpers ---
 
@@ -962,5 +1002,138 @@ mod tests {
         assert!(calls.contains(&"mark_pr_ready:1".to_string()));
         assert!(calls.contains(&"mark_pr_ready:2".to_string()));
         assert!(calls.contains(&"mark_pr_ready:3".to_string()));
+    }
+
+    // --- wait_for_bookmark stub + tests ---
+
+    /// Jj stub for wait_for_bookmark. `appear_after` controls how many
+    /// `get_my_bookmarks` calls return empty before the bookmark appears.
+    /// `get_changes_to_commit` always reports the bookmark's change_id in
+    /// ancestry, so once the bookmark surfaces, `infer_target_bookmark` returns it.
+    struct WaitJj {
+        bookmark_name: String,
+        bookmark_change_id: String,
+        bookmark_commit_id: String,
+        wc_commit_id: String,
+        appear_after: u32,
+        calls: Mutex<u32>,
+    }
+
+    impl WaitJj {
+        fn new(name: &str, appear_after: u32) -> Self {
+            Self {
+                bookmark_name: name.to_string(),
+                bookmark_change_id: format!("change_{name}"),
+                bookmark_commit_id: format!("commit_{name}"),
+                wc_commit_id: "wc_commit".to_string(),
+                appear_after,
+                calls: Mutex::new(0),
+            }
+        }
+
+        fn log_entry_for_bookmark(&self) -> LogEntry {
+            LogEntry {
+                commit_id: self.bookmark_commit_id.clone(),
+                change_id: self.bookmark_change_id.clone(),
+                author_name: "Test".to_string(),
+                author_email: "test@test.com".to_string(),
+                description: "test".to_string(),
+                description_first_line: "test".to_string(),
+                parents: vec![],
+                local_bookmarks: vec![self.bookmark_name.clone()],
+                remote_bookmarks: vec![],
+                is_working_copy: false,
+                conflict: false,
+                empty: false,
+            }
+        }
+    }
+
+    impl Jj for WaitJj {
+        fn git_fetch(&self) -> Result<()> { Ok(()) }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            let mut n = self.calls.lock().expect("poisoned");
+            *n += 1;
+            if *n > self.appear_after {
+                Ok(vec![Bookmark {
+                    name: self.bookmark_name.clone(),
+                    commit_id: self.bookmark_commit_id.clone(),
+                    change_id: self.bookmark_change_id.clone(),
+                    has_remote: false,
+                    is_synced: false,
+                }])
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
+            // Ancestry contains the bookmark's change_id, so once
+            // `get_my_bookmarks` surfaces it, inference will find an overlap.
+            Ok(vec![self.log_entry_for_bookmark()])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+        fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+        fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok(self.wc_commit_id.clone())
+        }
+        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
+            Ok(vec!["dummy".to_string()])
+        }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+    }
+
+    #[test]
+    fn wait_for_bookmark_returns_when_bookmark_appears() {
+        let jj = WaitJj::new("auth", 1);
+        let shutdown = AtomicBool::new(false);
+
+        let result = wait_for_bookmark(
+            &jj,
+            None,
+            Duration::from_millis(1),
+            &shutdown,
+        ).unwrap();
+
+        assert_eq!(result.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn wait_for_bookmark_respects_shutdown() {
+        // Bookmark never appears; pre-set shutdown so the loop exits on the
+        // first iteration via the top-of-loop shutdown check.
+        let jj = WaitJj::new("auth", u32::MAX);
+        let shutdown = AtomicBool::new(true);
+
+        let start = Instant::now();
+        let result = wait_for_bookmark(
+            &jj,
+            None,
+            Duration::from_secs(60),
+            &shutdown,
+        ).unwrap();
+
+        assert!(result.is_none());
+        // Should return immediately without waiting on the 60s poll.
+        assert!(start.elapsed() < Duration::from_secs(1),
+            "expected immediate return, took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn wait_for_bookmark_respects_timeout() {
+        // Bookmark never appears; deadline expires after one poll iteration.
+        let jj = WaitJj::new("auth", u32::MAX);
+        let shutdown = AtomicBool::new(false);
+
+        let result = wait_for_bookmark(
+            &jj,
+            Some(Duration::from_millis(10)),
+            Duration::from_millis(1),
+            &shutdown,
+        ).unwrap();
+
+        assert!(result.is_none());
     }
 }
