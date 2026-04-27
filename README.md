@@ -69,8 +69,10 @@ That's it. `jjpr watch` runs in a loop (Ctrl+C to exit) and manages the full lif
 ```
 jjpr watch                            # Watch and auto-manage the stack
 jjpr watch --timeout 60               # Stop watching after 60 minutes
-jjpr                                  # Show stacks with CI/review/mergeability status
-jjpr status                           # Same as above (alias for discoverability)
+jjpr                                  # Show the current stack (inferred from working copy)
+jjpr status                           # Same as above
+jjpr status auth                      # Scope to the stack containing the 'auth' bookmark
+jjpr status --all                     # Show every local stack
 jjpr submit                           # Push bookmarks and create/update PRs
 jjpr submit --reviewer alice,bob      # Request reviewers on all PRs
 jjpr submit --draft                   # Create new PRs as drafts
@@ -126,7 +128,7 @@ Use `--timeout <MINUTES>` to set a maximum wait time. Press Ctrl+C to exit at an
 
 ### Stack overview
 
-Run `jjpr` (or `jjpr status`) with no arguments to see your current stacks and their PR/MR status. This is read-only — it fetches the latest state but doesn't push or modify anything.
+Run `jjpr` (or `jjpr status`) to see the stack containing your working copy and its PR/MR status. This is read-only — it fetches the latest state but doesn't push or modify anything. Pass a bookmark name to scope to a different stack, or `--all` to see every local stack at once.
 
 Each PR shows its mergeability, CI status, and review state:
 
@@ -144,7 +146,7 @@ Draft PRs show a simplified status:
     — draft
 ```
 
-When you have multiple independent stacks, they're labeled:
+With `--all`, multiple independent stacks are labeled:
 
 ```
 Stack 1:
