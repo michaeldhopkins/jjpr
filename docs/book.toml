@@ -1,0 +1,15 @@
+[book]
+title = "jjpr"
+description = "Multi-forge stacked pull requests for Jujutsu"
+authors = ["Michael Hopkins"]
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+site-url = "/docs/jjpr/"
+git-repository-url = "https://github.com/michaeldhopkins/jjpr"
+additional-css = ["src/custom.css"]
+additional-js = ["src/version-footer.js"]

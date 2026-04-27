@@ -55,4 +55,7 @@ Every push must pass these steps. CI runs `cargo check --locked`, `cargo test`, 
 3. **`cargo test`** — all tests must pass.
 4. **`cargo clippy --tests`** — must be clean (warnings are errors in CI).
 5. **`cargo install --path .`** — install the updated binary locally.
-6. **Update README.md** when adding features, commands, or changing usage patterns.
+6. **Review and regenerate the docs.** Any change to commands, flags, output, behavior, configuration fields, or forge support must be reviewed against `docs/src/` and the page(s) updated in the same commit. **Every time you edit anything under `docs/src/` (or anything that should change the rendered site), run `./generate-docs.sh` immediately afterwards.** That rebuilds `docs/book/` and mirrors it into `~/projects/michaeldhopkins.com/public/docs/jjpr/`. Don't batch edits and skip the rebuild — running the script is part of the same task as the edit. Commit the source changes in jjpr and the rendered changes in `michaeldhopkins.com` separately.
+   - The README is intentionally minimal — only the title, install snippet, and a pointer to the docs site. Don't grow it back into the main reference; behavior and option docs go in `docs/src/`.
+   - The doc pages are hand-edited prose. The only auto-generated artifact is `docs/src/version-footer.js`, synced from `Cargo.toml` by `generate-docs.sh`. Don't edit it by hand; bump `Cargo.toml` and re-run the script.
+   - When in doubt about which page a change belongs in, consult `docs/src/SUMMARY.md` for the navigation map.
