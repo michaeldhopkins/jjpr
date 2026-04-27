@@ -204,6 +204,23 @@ fn build_stacks(
     stacks
 }
 
+/// Find the stack that contains a bookmark with the given name.
+///
+/// Returns `None` if no stack has a segment with that bookmark. Used by the
+/// `status` command to scope output to a single stack when the user
+/// supplies an explicit bookmark.
+pub fn find_stack_with_bookmark<'a>(
+    graph: &'a ChangeGraph,
+    bookmark: &str,
+) -> Option<&'a BranchStack> {
+    graph.stacks.iter().find(|stack| {
+        stack
+            .segments
+            .iter()
+            .any(|seg| seg.bookmarks.iter().any(|b| b.name == bookmark))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,5 +667,83 @@ mod tests {
         assert_eq!(graph.stacks.len(), 1);
         assert_eq!(graph.stacks[0].segments.len(), 1);
         assert_eq!(graph.stacks[0].segments[0].bookmarks[0].name, "top");
+    }
+
+    fn graph_with_stacks(stacks: Vec<Vec<&str>>) -> ChangeGraph {
+        let stacks: Vec<BranchStack> = stacks
+            .into_iter()
+            .map(|names| BranchStack {
+                segments: names
+                    .into_iter()
+                    .map(|n| BookmarkSegment {
+                        bookmarks: vec![make_bookmark(n, &format!("commit_{n}"), &format!("change_{n}"))],
+                        changes: vec![],
+                        merge_source_names: vec![],
+                    })
+                    .collect(),
+                base_branch: None,
+            })
+            .collect();
+        ChangeGraph {
+            bookmarks: HashMap::new(),
+            bookmark_to_change_id: HashMap::new(),
+            adjacency_list: HashMap::new(),
+            change_id_to_segment: HashMap::new(),
+            stack_leafs: HashSet::new(),
+            stack_roots: HashSet::new(),
+            stacks,
+        }
+    }
+
+    #[test]
+    fn find_stack_with_bookmark_returns_containing_stack() {
+        let graph = graph_with_stacks(vec![
+            vec!["auth", "profile"],
+            vec!["payments"],
+        ]);
+
+        let stack = find_stack_with_bookmark(&graph, "profile")
+            .expect("expected stack containing profile");
+
+        assert_eq!(stack.segments.len(), 2);
+        assert_eq!(stack.segments[0].bookmarks[0].name, "auth");
+        assert_eq!(stack.segments[1].bookmarks[0].name, "profile");
+    }
+
+    #[test]
+    fn find_stack_with_bookmark_returns_none_for_unknown() {
+        let graph = graph_with_stacks(vec![vec!["auth"]]);
+
+        assert!(find_stack_with_bookmark(&graph, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_stack_with_bookmark_picks_correct_stack_when_multiple() {
+        let graph = graph_with_stacks(vec![
+            vec!["auth"],
+            vec!["payments", "checkout"],
+            vec!["docs"],
+        ]);
+
+        let stack = find_stack_with_bookmark(&graph, "checkout")
+            .expect("expected stack containing checkout");
+
+        assert_eq!(stack.segments.len(), 2);
+        assert_eq!(stack.segments[0].bookmarks[0].name, "payments");
+    }
+
+    #[test]
+    fn find_stack_with_bookmark_matches_mid_stack_segment() {
+        // Guards against regressions that scope the lookup to leaves only —
+        // `jjpr status auth` should find the stack [auth -> profile] even
+        // though "auth" is the root, not the leaf.
+        let graph = graph_with_stacks(vec![vec!["auth", "profile"]]);
+
+        let stack = find_stack_with_bookmark(&graph, "auth")
+            .expect("expected stack containing auth");
+
+        assert_eq!(stack.segments.len(), 2);
+        assert_eq!(stack.segments[0].bookmarks[0].name, "auth");
+        assert_eq!(stack.segments[1].bookmarks[0].name, "profile");
     }
 }

@@ -108,8 +108,11 @@ affects PRs where the reviewer isn't already requested.")]
     #[command(long_about = "\
 Show your stacks with detailed CI, review, and mergeability status.
 
-This is the same output as running `jjpr` with no arguments. The `status` \
-subcommand exists for discoverability — both forms are identical.
+By default, scopes to the stack containing your working copy (matches \
+`submit`/`merge`/`watch`). Pass a bookmark to scope to a specific stack, \
+or `--all` to see every local stack.
+
+Bare `jjpr` is shorthand for `jjpr status` with no arguments.
 
 Example output:
     $ jjpr status
@@ -117,7 +120,14 @@ Example output:
         ✓ mergeable  ✓ CI passing  ✓ 1 approval
       profile (2 changes, #43 open, needs push)
         ✗ CI pending  ✗ 0/1 approvals")]
-    Status {},
+    Status {
+        /// Bookmark to scope to (inferred from working copy if omitted)
+        bookmark: Option<String>,
+
+        /// Show every local stack instead of just the current one
+        #[arg(long, conflicts_with = "bookmark")]
+        all: bool,
+    },
     /// Merge a stack of PRs from the bottom up
     #[command(long_about = "\
 Merge a stack of PRs from the bottom up.

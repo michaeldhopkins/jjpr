@@ -52,7 +52,9 @@ fn main() -> Result<()> {
                 base_override: base.as_deref(),
             })
         }
-        Some(Commands::Status { .. }) => cmd_stack_overview(cli.no_fetch),
+        Some(Commands::Status { bookmark, all }) => {
+            cmd_stack_overview(bookmark.as_deref(), all, cli.no_fetch)
+        }
         Some(Commands::Merge {
             bookmark,
             merge_method,
@@ -145,7 +147,7 @@ fn main() -> Result<()> {
                 }
             }
         },
-        None => cmd_stack_overview(cli.no_fetch),
+        None => cmd_stack_overview(None, false, cli.no_fetch),
     }
 }
 
@@ -288,7 +290,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
+fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Result<()> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path.clone())?;
     let cfg = config::load_config_with_repo(Some(&repo_path))?;
@@ -305,6 +307,20 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
         return Ok(());
     }
 
+    let stacks_to_show = match analyze::select_stacks_to_show(&graph, bookmark, all, &jj)? {
+        analyze::StackScope::Show(stacks) => stacks,
+        analyze::StackScope::NoTarget => {
+            println!("No bookmark in working copy ancestry.");
+            println!("Use `jjpr status --all` to see every local stack, or `jj bookmark set <name>` to mark one.");
+            return Ok(());
+        }
+        analyze::StackScope::Unknown(name) => {
+            println!("Bookmark '{name}' not found in any stack.");
+            println!("Run `jjpr status --all` to see every local stack.");
+            return Ok(());
+        }
+    };
+
     // Try to resolve forge remote for PR info
     let info = try_load_pr_info(&jj, &cfg, &graph).unwrap_or(PrInfoResult {
         forge_kind: ForgeKind::GitHub,
@@ -316,7 +332,7 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
     // Fetch status for each PR that has forge access
     let mut status_map: HashMap<String, SegmentDisplayStatus> = HashMap::new();
     if let (Some(forge), Some(repo_info)) = (&info.forge, &info.repo_info) {
-        for stack in &graph.stacks {
+        for stack in &stacks_to_show {
             for segment in &stack.segments {
                 if let Some(bookmark) = segment.bookmarks.first()
                     && let Some(pr) = info.pr_map.get(&bookmark.name)
@@ -330,8 +346,8 @@ fn cmd_stack_overview(no_fetch: bool) -> Result<()> {
         }
     }
 
-    let multi = graph.stacks.len() > 1;
-    for (i, stack) in graph.stacks.iter().enumerate() {
+    let multi = stacks_to_show.len() > 1;
+    for (i, stack) in stacks_to_show.iter().enumerate() {
         if i > 0 {
             println!();
         }

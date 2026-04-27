@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
+use crate::graph::change_graph::find_stack_with_bookmark;
 use crate::graph::ChangeGraph;
-use crate::jj::types::BookmarkSegment;
+use crate::jj::types::{BookmarkSegment, BranchStack};
 use crate::jj::Jj;
 
 /// The result of analyzing which segments need to be submitted.
@@ -54,29 +55,87 @@ pub fn analyze_submission_graph(
     )
 }
 
-/// Infer the target bookmark from the working copy's position in the graph.
+/// Find the stack the working copy belongs to.
 ///
-/// Queries `trunk()..@` to find which stack the working copy belongs to,
-/// then returns the leaf (topmost) bookmark of that stack.
-pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<Option<String>> {
+/// Queries `trunk()..@` and returns the first stack whose segments overlap
+/// the working copy's ancestry. Returns `None` if no stack overlaps.
+pub fn infer_target_stack<'a>(
+    graph: &'a ChangeGraph,
+    jj: &dyn Jj,
+) -> Result<Option<&'a BranchStack>> {
     let wc_commit_id = jj.get_working_copy_commit_id()?;
     let wc_ancestry = jj.get_changes_to_commit(&wc_commit_id)?;
-    let wc_change_ids: HashSet<String> = wc_ancestry.iter()
-        .map(|e| e.change_id.clone()).collect();
+    let wc_change_ids: HashSet<String> = wc_ancestry
+        .iter()
+        .map(|e| e.change_id.clone())
+        .collect();
 
-    for stack in &graph.stacks {
-        let overlaps = stack.segments.iter().any(|seg|
-            seg.bookmarks.iter().any(|b| wc_change_ids.contains(&b.change_id))
-        );
-        if overlaps {
-            let leaf = stack.segments.last()
-                .and_then(|s| s.bookmarks.first())
-                .ok_or_else(|| anyhow::anyhow!("stack has no bookmarks"))?;
-            return Ok(Some(leaf.name.clone()));
-        }
+    Ok(graph.stacks.iter().find(|stack| {
+        stack.segments.iter().any(|seg| {
+            seg.bookmarks
+                .iter()
+                .any(|b| wc_change_ids.contains(&b.change_id))
+        })
+    }))
+}
+
+/// Infer the target bookmark from the working copy's position in the graph.
+///
+/// Returns the leaf (topmost) bookmark of the inferred stack, or `None`.
+/// Submit/merge/watch use this when the user omits the positional bookmark.
+pub fn infer_target_bookmark(graph: &ChangeGraph, jj: &dyn Jj) -> Result<Option<String>> {
+    let Some(stack) = infer_target_stack(graph, jj)? else {
+        return Ok(None);
+    };
+    let leaf = stack
+        .segments
+        .last()
+        .and_then(|s| s.bookmarks.first())
+        .ok_or_else(|| anyhow::anyhow!("stack has no bookmarks"))?;
+    Ok(Some(leaf.name.clone()))
+}
+
+/// Outcome of scoping the `status` view to a subset of stacks.
+#[derive(Debug)]
+pub enum StackScope<'a> {
+    /// Display these stacks. Always non-empty when returned.
+    Show(Vec<&'a BranchStack>),
+    /// `--all` was not passed and no target bookmark could be resolved
+    /// (none provided and inference returned `None`).
+    NoTarget,
+    /// A target bookmark was provided but no stack contains it.
+    Unknown(String),
+}
+
+/// Decide which stacks `status` should display.
+///
+/// - `all = true`: every stack in the graph.
+/// - `bookmark = Some(name)`: the stack containing that bookmark, or
+///   `Unknown(name)` if none.
+/// - both `None`: the stack inferred from the working copy's ancestry,
+///   or `NoTarget` if none.
+///
+/// Walks `graph.stacks` at most once: either via `find_stack_with_bookmark`
+/// (user-supplied target) or via `infer_target_stack` (working-copy target).
+pub fn select_stacks_to_show<'a>(
+    graph: &'a ChangeGraph,
+    bookmark: Option<&str>,
+    all: bool,
+    jj: &dyn Jj,
+) -> Result<StackScope<'a>> {
+    if all {
+        return Ok(StackScope::Show(graph.stacks.iter().collect()));
     }
-
-    Ok(None)
+    if let Some(bookmark) = bookmark {
+        return Ok(match find_stack_with_bookmark(graph, bookmark) {
+            Some(stack) => StackScope::Show(vec![stack]),
+            None => StackScope::Unknown(bookmark.to_string()),
+        });
+    }
+    Ok(match infer_target_stack(graph, jj)? {
+        Some(stack) => StackScope::Show(vec![stack]),
+        None => StackScope::NoTarget,
+    })
 }
 
 #[cfg(test)]
@@ -310,5 +369,113 @@ mod tests {
 
         let analysis = analyze_submission_graph(&graph, "feature").unwrap();
         assert!(analysis.base_branch.is_none());
+    }
+
+    fn make_graph_multi(stacks: Vec<Vec<(&str, &str)>>) -> ChangeGraph {
+        let stacks: Vec<BranchStack> = stacks
+            .into_iter()
+            .map(|seg_specs| BranchStack {
+                segments: seg_specs
+                    .into_iter()
+                    .map(|(name, ch)| make_segment(name, ch))
+                    .collect(),
+                base_branch: None,
+            })
+            .collect();
+        ChangeGraph {
+            bookmarks: HashMap::new(),
+            bookmark_to_change_id: HashMap::new(),
+            adjacency_list: HashMap::new(),
+            change_id_to_segment: HashMap::new(),
+            stack_leafs: HashSet::new(),
+            stack_roots: HashSet::new(),
+            stacks,
+        }
+    }
+
+    #[test]
+    fn select_stacks_all_returns_every_stack() {
+        let graph = make_graph_multi(vec![
+            vec![("auth", "ch1")],
+            vec![("payments", "ch2")],
+        ]);
+        let jj = StubJj {
+            wc_commit_id: "wc".to_string(),
+            branch_changes: vec![],
+        };
+
+        match select_stacks_to_show(&graph, None, true, &jj).unwrap() {
+            StackScope::Show(stacks) => assert_eq!(stacks.len(), 2),
+            other => panic!("expected Show, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_stacks_explicit_bookmark_returns_one_stack() {
+        let graph = make_graph_multi(vec![
+            vec![("auth", "ch1")],
+            vec![("payments", "ch2"), ("checkout", "ch3")],
+        ]);
+        let jj = StubJj {
+            wc_commit_id: "wc".to_string(),
+            branch_changes: vec![],
+        };
+
+        match select_stacks_to_show(&graph, Some("checkout"), false, &jj).unwrap() {
+            StackScope::Show(stacks) => {
+                assert_eq!(stacks.len(), 1);
+                assert_eq!(stacks[0].segments[0].bookmarks[0].name, "payments");
+            }
+            other => panic!("expected Show, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_stacks_unknown_bookmark_returns_unknown() {
+        let graph = make_graph_multi(vec![vec![("auth", "ch1")]]);
+        let jj = StubJj {
+            wc_commit_id: "wc".to_string(),
+            branch_changes: vec![],
+        };
+
+        match select_stacks_to_show(&graph, Some("missing"), false, &jj).unwrap() {
+            StackScope::Unknown(name) => assert_eq!(name, "missing"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_stacks_inferred_from_working_copy() {
+        let graph = make_graph_multi(vec![
+            vec![("auth", "ch1")],
+            vec![("payments", "ch2"), ("checkout", "ch3")],
+        ]);
+        // wc ancestry includes ch2 → matches the second stack
+        let jj = StubJj {
+            wc_commit_id: "commit_ch2".to_string(),
+            branch_changes: vec![make_log_entry("ch2")],
+        };
+
+        match select_stacks_to_show(&graph, None, false, &jj).unwrap() {
+            StackScope::Show(stacks) => {
+                assert_eq!(stacks.len(), 1);
+                assert_eq!(stacks[0].segments[0].bookmarks[0].name, "payments");
+            }
+            other => panic!("expected Show, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_stacks_no_target_when_inference_fails() {
+        let graph = make_graph_multi(vec![vec![("auth", "ch1")]]);
+        let jj = StubJj {
+            wc_commit_id: "wc".to_string(),
+            branch_changes: vec![make_log_entry("ch_other")],
+        };
+
+        match select_stacks_to_show(&graph, None, false, &jj).unwrap() {
+            StackScope::NoTarget => {}
+            other => panic!("expected NoTarget, got {other:?}"),
+        }
     }
 }
