@@ -6,6 +6,11 @@ them, and syncs the stack on GitHub, GitLab, and Forgejo.
 
 See [Installation](installation.md) to get started.
 
+> Stacked PRs are chains of small pull requests that branch off of
+> each other. They are better structured and easier to review than
+> one large PR, and they let the developer focus on one feature by
+> working ahead of the reviewer.
+
 ## Commands
 
 `jjpr submit` and `jjpr watch` are what most users want. `submit`
