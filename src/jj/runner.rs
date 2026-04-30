@@ -57,7 +57,13 @@ impl Jj for JjRunner {
             "--template",
             BOOKMARK_TEMPLATE,
         ])?;
-        templates::parse_bookmark_output(&output)
+        let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
+        for name in warnings {
+            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit — typically after a squash merge on the forge)");
+            eprintln!("    To clean up the stale local bookmark:");
+            eprintln!("      jj bookmark forget {name} && jj git push --deleted");
+        }
+        Ok(bookmarks)
     }
 
     fn get_changes_to_commit(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {

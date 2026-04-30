@@ -67,61 +67,85 @@ struct RawBookmark {
 /// the local target and one for the remote target. We filter out remote-only
 /// entries (empty `localBookmarks`) to avoid the remote entry overwriting the
 /// local one in downstream HashMaps.
-pub fn parse_bookmark_output(output: &str) -> Result<Vec<Bookmark>> {
-    let mut warned_names: HashSet<String> = HashSet::new();
-    output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| {
-            // Conflicted or stale bookmarks produce unparseable JSON
-            // (e.g., `<Error: No Commit available>` for missing commits).
-            // Skip them — they're not relevant to current stack operations.
-            let raw: RawBookmark = match serde_json::from_str(line) {
-                Ok(r) => r,
-                Err(_) => {
-                    // Try to extract the name for a helpful message
-                    let name = extract_name_from_malformed_json(line);
-                    if let Some(name) = name {
-                        if warned_names.insert(name.clone()) {
-                            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit — typically after a squash merge on the forge)");
-                            eprintln!("    To clean up the stale local bookmark:");
-                            eprintln!("      jj bookmark forget {name} && jj git push --deleted");
-                        }
-                    } else {
-                        eprintln!("  Warning: skipping unparseable bookmark entry");
-                    }
-                    return None;
+///
+/// Returns `(bookmarks, warnings)` where `warnings` is the list of bookmark
+/// names whose every entry was unparseable. Names with at least one good
+/// entry (e.g., a healthy local target plus a stale `@origin` target) must
+/// not appear in `warnings` — the bookmark is being kept, not skipped.
+pub fn parse_bookmark_output(output: &str) -> Result<(Vec<Bookmark>, Vec<String>)> {
+    let mut bookmarks = Vec::new();
+    let mut parsed_names: HashSet<String> = HashSet::new();
+    let mut malformed_names: Vec<String> = Vec::new();
+    let mut seen_unknown_malformed = false;
+
+    // First pass: parse every line. Track which names had at least one
+    // good entry. Divergent bookmarks emit one line per target (local +
+    // @origin), so a healthy local entry can coexist with a stale @origin
+    // entry that fails to parse — in that case we keep the bookmark and
+    // suppress the warning.
+    for line in output.lines().filter(|l| !l.trim().is_empty()) {
+        let raw: RawBookmark = match serde_json::from_str(line) {
+            Ok(r) => r,
+            Err(_) => {
+                match extract_name_from_malformed_json(line) {
+                    Some(name) => malformed_names.push(name),
+                    None => seen_unknown_malformed = true,
                 }
-            };
-
-            let non_git_remotes: Vec<&String> = raw
-                .remote_bookmarks
-                .iter()
-                .filter(|rb| !rb.is_empty() && !rb.ends_with("@git"))
-                .collect();
-
-            let has_remote = !non_git_remotes.is_empty();
-
-            // Synced if a remote bookmark with the same name exists (excluding @git).
-            // For the local target, @origin only appears when both point to the same commit.
-            let is_synced = non_git_remotes
-                .iter()
-                .any(|rb| rb.starts_with(&format!("{}@", raw.name)));
-
-            // Skip remote-only entries
-            if raw.local_bookmarks.is_empty() {
-                return None;
+                continue;
             }
+        };
 
-            Some(Ok(Bookmark {
-                name: raw.name,
-                commit_id: raw.commit_id,
-                change_id: raw.change_id,
-                has_remote,
-                is_synced,
-            }))
-        })
-        .collect()
+        let non_git_remotes: Vec<&String> = raw
+            .remote_bookmarks
+            .iter()
+            .filter(|rb| !rb.is_empty() && !rb.ends_with("@git"))
+            .collect();
+
+        let has_remote = !non_git_remotes.is_empty();
+
+        // Synced if a remote bookmark with the same name exists (excluding @git).
+        // For the local target, @origin only appears when both point to the same commit.
+        let is_synced = non_git_remotes
+            .iter()
+            .any(|rb| rb.starts_with(&format!("{}@", raw.name)));
+
+        // Track every parseable line — including remote-only ones — so a
+        // bookmark whose @origin target parses but local target doesn't
+        // (or vice versa) is still recognized as having a good entry.
+        parsed_names.insert(raw.name.clone());
+
+        // Skip remote-only entries from the returned bookmarks list.
+        if raw.local_bookmarks.is_empty() {
+            continue;
+        }
+
+        bookmarks.push(Bookmark {
+            name: raw.name,
+            commit_id: raw.commit_id,
+            change_id: raw.change_id,
+            has_remote,
+            is_synced,
+        });
+    }
+
+    // Only warn for names whose every entry was malformed. Dedupe so a
+    // bookmark with multiple bad entries doesn't repeat.
+    let mut seen_warning: HashSet<String> = HashSet::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for name in malformed_names {
+        if parsed_names.contains(&name) {
+            continue;
+        }
+        if seen_warning.insert(name.clone()) {
+            warnings.push(name);
+        }
+    }
+
+    if seen_unknown_malformed {
+        eprintln!("  Warning: skipping unparseable bookmark entry");
+    }
+
+    Ok((bookmarks, warnings))
 }
 
 /// Raw log entry JSON as returned by jj's log template.
@@ -185,7 +209,7 @@ mod tests {
     #[test]
     fn test_parse_bookmark_no_remote() {
         let output = r#"{"name":"feature","commitId":"abc123","changeId":"xyz789","localBookmarks":["feature"],"remoteBookmarks":[]}"#;
-        let bookmarks = parse_bookmark_output(output).unwrap();
+        let (bookmarks, _warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1);
         assert_eq!(bookmarks[0].name, "feature");
         assert_eq!(bookmarks[0].commit_id, "abc123");
@@ -196,7 +220,7 @@ mod tests {
     #[test]
     fn test_parse_bookmark_with_synced_remote() {
         let output = r#"{"name":"feature","commitId":"abc123","changeId":"xyz789","localBookmarks":["feature"],"remoteBookmarks":["feature@origin"]}"#;
-        let bookmarks = parse_bookmark_output(output).unwrap();
+        let (bookmarks, _warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1);
         assert!(bookmarks[0].has_remote);
         assert!(bookmarks[0].is_synced);
@@ -205,7 +229,7 @@ mod tests {
     #[test]
     fn test_parse_bookmark_with_git_remote_only() {
         let output = r#"{"name":"feature","commitId":"abc123","changeId":"xyz789","localBookmarks":["feature"],"remoteBookmarks":["feature@git"]}"#;
-        let bookmarks = parse_bookmark_output(output).unwrap();
+        let (bookmarks, _warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1);
         assert!(!bookmarks[0].has_remote, "@git remotes should be excluded");
         assert!(!bookmarks[0].is_synced);
@@ -219,7 +243,7 @@ mod tests {
             r#"{"name":"profile","commitId":"bbb","changeId":"222","localBookmarks":["profile"],"remoteBookmarks":[]}"#,
             "\n",
         );
-        let bookmarks = parse_bookmark_output(output).unwrap();
+        let (bookmarks, _warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 2);
         assert_eq!(bookmarks[0].name, "auth");
         assert!(bookmarks[0].is_synced);
@@ -237,7 +261,7 @@ mod tests {
             r#"{"name":"feature","commitId":"old222","changeId":"ch1","localBookmarks":[],"remoteBookmarks":["feature@origin"]}"#,
             "\n",
         );
-        let bookmarks = parse_bookmark_output(output).unwrap();
+        let (bookmarks, _warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1, "should filter out remote-only entry");
         assert_eq!(bookmarks[0].commit_id, "new111", "should keep local target");
         assert!(!bookmarks[0].is_synced, "divergent bookmark is not synced");
@@ -255,9 +279,100 @@ mod tests {
             r#"{"name":"feat/good","commitId":"abc123","changeId":"xyz789","localBookmarks":["feat/good"],"remoteBookmarks":["feat/good@origin"]}"#,
             "\n",
         );
-        let bookmarks = parse_bookmark_output(output).unwrap();
+        let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1, "should skip unparseable bookmark");
         assert_eq!(bookmarks[0].name, "feat/good");
+        assert_eq!(
+            warnings,
+            vec!["feat/stale".to_string()],
+            "fully-unparseable bookmark must produce a warning"
+        );
+    }
+
+    /// Regression test for false-positive "skipping" warning observed on
+    /// MerchantsBonding/beancounter PR #1875: jjpr warned that
+    /// `feat/mbc-users-cache-table` was being skipped, then the same submit
+    /// successfully pushed it. Cause: the bookmark had a healthy local
+    /// target plus a stale `@origin` target whose commit had been abandoned,
+    /// so the @origin line failed to parse and tripped the warning even
+    /// though the local entry was kept and used.
+    #[test]
+    fn test_parse_bookmark_no_warning_when_local_entry_parses() {
+        // Healthy local entry first, then a malformed @origin entry for the
+        // same bookmark name (commit was abandoned remotely or after a
+        // local rewrite).
+        let output = concat!(
+            r#"{"name":"feature","commitId":"good_local","changeId":"ch1","localBookmarks":["feature"],"remoteBookmarks":["feature@git"]}"#,
+            "\n",
+            r#"{"name":"feature","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":[],"remoteBookmarks":["feature@origin"]}"#,
+            "\n",
+        );
+        let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
+        assert_eq!(bookmarks.len(), 1, "local target should be returned");
+        assert_eq!(bookmarks[0].name, "feature");
+        assert_eq!(bookmarks[0].commit_id, "good_local");
+        assert!(
+            warnings.is_empty(),
+            "no warning when bookmark has a healthy entry; got {warnings:?}"
+        );
+    }
+
+    /// Same as above, but order reversed: malformed line first, healthy
+    /// entry second. The fix must look at the whole batch, not just the
+    /// first occurrence per name.
+    #[test]
+    fn test_parse_bookmark_no_warning_when_good_entry_comes_after_bad() {
+        let output = concat!(
+            r#"{"name":"feature","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":[],"remoteBookmarks":["feature@origin"]}"#,
+            "\n",
+            r#"{"name":"feature","commitId":"good_local","changeId":"ch1","localBookmarks":["feature"],"remoteBookmarks":["feature@git"]}"#,
+            "\n",
+        );
+        let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
+        assert_eq!(bookmarks.len(), 1, "local target should still be returned");
+        assert_eq!(bookmarks[0].commit_id, "good_local");
+        assert!(
+            warnings.is_empty(),
+            "ordering must not affect warning suppression; got {warnings:?}"
+        );
+    }
+
+    /// Mixed scenario: one fully-broken bookmark and one bookmark with a
+    /// healthy local entry plus a stale @origin entry. Only the
+    /// fully-broken one should produce a warning.
+    #[test]
+    fn test_parse_bookmark_warns_only_for_fully_unparseable() {
+        let output = concat!(
+            r#"{"name":"feat/stale","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":[<Error: No Commit available>],"remoteBookmarks":[<Error: No Commit available>]}"#,
+            "\n",
+            r#"{"name":"feat/healthy","commitId":"good","changeId":"ch","localBookmarks":["feat/healthy"],"remoteBookmarks":["feat/healthy@git"]}"#,
+            "\n",
+            r#"{"name":"feat/healthy","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":[],"remoteBookmarks":["feat/healthy@origin"]}"#,
+            "\n",
+        );
+        let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].name, "feat/healthy");
+        assert_eq!(
+            warnings,
+            vec!["feat/stale".to_string()],
+            "warning list must contain only the fully-unparseable bookmark"
+        );
+    }
+
+    /// A bookmark whose every entry is malformed must produce exactly one
+    /// warning, not one per malformed line.
+    #[test]
+    fn test_parse_bookmark_dedupes_warning_for_multiple_bad_entries() {
+        let output = concat!(
+            r#"{"name":"feat/dead","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":["feat/dead"],"remoteBookmarks":[]}"#,
+            "\n",
+            r#"{"name":"feat/dead","commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"localBookmarks":[],"remoteBookmarks":["feat/dead@origin"]}"#,
+            "\n",
+        );
+        let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
+        assert!(bookmarks.is_empty());
+        assert_eq!(warnings, vec!["feat/dead".to_string()]);
     }
 
     #[test]
@@ -273,8 +388,9 @@ mod tests {
 
     #[test]
     fn test_parse_bookmark_empty_output() {
-        let bookmarks = parse_bookmark_output("").unwrap();
+        let (bookmarks, warnings) = parse_bookmark_output("").unwrap();
         assert!(bookmarks.is_empty());
+        assert!(warnings.is_empty());
     }
 
     #[test]
