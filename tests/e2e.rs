@@ -305,3 +305,157 @@ fn test_submit_creates_stacked_prs() {
         "profile PR should have stack comment"
     );
 }
+
+/// Verifies that once the bottom PR of a stack is merged on the forge and
+/// the local bookmark is cleaned up, a re-submit places the merged PR in
+/// the `<details>` fossil block of the remaining open PR's comment, with
+/// strikethrough rendering and no icon. Exercises the full data flow:
+/// previous JJPR_DATA → classify_stack_entries → generate_comment_body.
+#[test]
+fn test_merged_bottom_renders_in_fossil_details_block() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+    if !common::jj_available() {
+        println!("Skipping E2E test (jj not available)");
+        return;
+    }
+
+    let ctx = E2eContext::new();
+    let bottom_name = ctx.bookmark_name("bottom");
+    let top_name = ctx.bookmark_name("top");
+    let full_repo = format!("{OWNER}/{REPO}");
+
+    // Build a 2-bookmark stack
+    ctx.write_file(&format!("{bottom_name}.rs"), "// bottom module\n");
+    ctx.commit("Add bottom\n\nBottom of the stack");
+    ctx.set_bookmark(&bottom_name);
+
+    ctx.write_file(&format!("{top_name}.rs"), "// top module\n");
+    ctx.commit("Add top\n\nTop of the stack");
+    ctx.set_bookmark(&top_name);
+
+    let jj = ctx.runner();
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let github = || {
+        let client = ForgeClient::new(
+            "https://api.github.com",
+            token.clone(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
+        GitHubForge::new(client)
+    };
+    let repo_info = RepoInfo {
+        owner: OWNER.to_string(),
+        repo: REPO.to_string(),
+    };
+    let opts = || plan::SubmitOptions {
+        draft: false,
+        ready: false,
+        reviewers: &[],
+        stack_base: None,
+        stack_nav: jjpr::config::StackNavMode::Comment,
+    };
+
+    // First submit: both PRs created, both should have stack comments.
+    {
+        let graph = change_graph::build_change_graph(&jj).unwrap();
+        let analysis =
+            analyze::analyze_submission_graph(&graph, &top_name).unwrap();
+        let segments = resolve::resolve_bookmark_selections(
+            &analysis.relevant_segments,
+            false,
+        )
+        .unwrap();
+        let plan = plan::create_submission_plan(
+            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub,
+            "main", &opts(),
+        )
+        .unwrap();
+        execute::execute_submission_plan(&jj, &github(), &plan, &[], false)
+            .unwrap();
+    }
+
+    let bottom_pr = find_pr(&bottom_name).expect("bottom PR exists");
+    let top_pr = find_pr(&top_name).expect("top PR exists");
+    let bottom_number = bottom_pr["number"].as_u64().unwrap();
+    let top_number = top_pr["number"].as_u64().unwrap();
+
+    // Squash-merge the bottom PR. --admin bypasses required-review rules
+    // on the test repo. We deliberately leave the remote branch in place
+    // so PR #top keeps its base ref valid; that's the realistic end state
+    // a user lands in before re-running submit.
+    let merge_status = Command::new("gh")
+        .args([
+            "pr", "merge", &bottom_number.to_string(),
+            "--repo", &full_repo,
+            "--squash", "--admin",
+        ])
+        .status()
+        .expect("gh pr merge");
+    assert!(merge_status.success(), "gh pr merge should succeed");
+
+    // Refresh local state so plan.create_submission_plan sees the merged
+    // status when it queries the forge.
+    run_jj(ctx.repo_path.as_path(), &["git", "fetch"]);
+
+    // Second submit: top is now standalone. The previous comment had
+    // [bottom, top]; classify must recognize bottom as a fossil and
+    // render it in the <details> block.
+    {
+        let graph = change_graph::build_change_graph(&jj).unwrap();
+        let analysis =
+            analyze::analyze_submission_graph(&graph, &top_name).unwrap();
+        let segments = resolve::resolve_bookmark_selections(
+            &analysis.relevant_segments,
+            false,
+        )
+        .unwrap();
+        let plan = plan::create_submission_plan(
+            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub,
+            "main", &opts(),
+        )
+        .unwrap();
+        execute::execute_submission_plan(&jj, &github(), &plan, &[], false)
+            .unwrap();
+    }
+
+    // Inspect top's stack comment.
+    let top_comments = list_comments(top_number);
+    let stack_comment = top_comments
+        .iter()
+        .find(|c| {
+            c["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<!-- jjpr:stack-info -->")
+        })
+        .expect("top PR should still have a stack comment");
+    let body = stack_comment["body"].as_str().unwrap();
+
+    assert!(
+        body.contains("<details>"),
+        "expected fossil <details> block, body was:\n{body}"
+    );
+    assert!(
+        body.contains("earlier closed/merged"),
+        "expected fossil summary text, body was:\n{body}"
+    );
+    assert!(
+        body.contains(&format!("~~[`{bottom_name}`]")),
+        "expected strikethrough fossil link for {bottom_name}, body was:\n{body}"
+    );
+    // No icon — fossils render as plain strikethrough now.
+    assert!(
+        !body.contains(":white_check_mark:"),
+        "fossil rendering must not include the old white_check_mark icon: \n{body}"
+    );
+    // Top is still live; should not be strikethrough'd.
+    assert!(
+        !body.contains(&format!("~~[`{top_name}`]")),
+        "top PR is still live and should not be strikethrough"
+    );
+}

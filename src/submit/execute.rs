@@ -280,66 +280,96 @@ fn report_partial_failure(completed: &[String]) {
 
 /// Visible for testing only — not part of the public API.
 /// A stack entry with its merged status, used as intermediate representation.
+#[derive(Clone)]
 struct EntryData {
     name: String,
     url: Option<String>,
     number: Option<u64>,
     is_merged: bool,
+    /// ISO-8601 timestamp from the forge marking when the PR became
+    /// non-open. Sourced from `find_merged_pr` for current entries and
+    /// inherited from the previous comment for entries no longer in the
+    /// local stack.
+    closed_at: Option<String>,
 }
 
-/// Merge current entries with previous comment data so links are never lost.
+/// Classify entries for rendering, returning `(live, fossils)`.
 ///
-/// Strategy: iterate previous items in order, replacing with current data when
-/// the bookmark still exists. Items not in current are preserved as merged.
-/// New current items not in previous are appended at the end.
-fn merge_with_previous_entries(
+/// Live entries are open PRs in the current local stack, ordered base→top
+/// to match the live jj graph. Fossils are closed/merged PRs (either
+/// still in the local stack as merged, or known only from the previous
+/// comment); they are sorted by `closed_at` descending — most recent
+/// first — and rendered inside a collapsible block at the bottom.
+///
+/// Entries appearing only in `previous` (no longer in the local jj
+/// graph) are inherited as fossils with `is_merged: true`. Their
+/// `closed_at` comes from the persisted JJPR_DATA payload, so a
+/// developer running submit after another developer keeps the same
+/// chronology without needing to re-query the forge.
+fn classify_stack_entries(
     current: &[EntryData],
     previous: &[comment::StackCommentItem],
-) -> Vec<EntryData> {
+) -> (Vec<EntryData>, Vec<EntryData>) {
     use std::collections::HashSet;
 
-    let current_by_name: HashMap<&str, &EntryData> = current
+    let previous_by_name: HashMap<&str, &comment::StackCommentItem> = previous
         .iter()
-        .map(|e| (e.name.as_str(), e))
+        .map(|p| (p.bookmark_name.as_str(), p))
         .collect();
 
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut result = Vec::new();
+    let mut live = Vec::new();
+    let mut fossils = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
 
-    // Previous items in their original order
-    for prev in previous {
-        seen.insert(&prev.bookmark_name);
-        if let Some(cur) = current_by_name.get(prev.bookmark_name.as_str()) {
-            result.push(EntryData {
-                name: cur.name.clone(),
-                url: cur.url.clone(),
-                number: cur.number,
-                is_merged: cur.is_merged,
+    // Walk current_entries in graph order. Live entries take their position
+    // from the current local graph; fossils are deferred to the fossil
+    // bucket and sorted later by timestamp.
+    for entry in current {
+        seen.insert(entry.name.clone());
+        if entry.is_merged {
+            // Backfill closed_at from previous if the current EntryData is
+            // missing it (e.g., transient forge error or the bookmark was
+            // marked merged in a prior submit).
+            let closed_at = entry.closed_at.clone().or_else(|| {
+                previous_by_name
+                    .get(entry.name.as_str())
+                    .and_then(|p| p.closed_at.clone())
+            });
+            fossils.push(EntryData {
+                closed_at,
+                ..entry.clone()
             });
         } else {
-            // Not in current segments — preserve as merged
-            result.push(EntryData {
-                name: prev.bookmark_name.clone(),
-                url: Some(prev.pr_url.clone()),
-                number: Some(prev.pr_number),
-                is_merged: true,
-            });
+            live.push(entry.clone());
         }
     }
 
-    // Append new entries not in previous
-    for cur in current {
-        if !seen.contains(cur.name.as_str()) {
-            result.push(EntryData {
-                name: cur.name.clone(),
-                url: cur.url.clone(),
-                number: cur.number,
-                is_merged: cur.is_merged,
-            });
+    // Previous entries no longer in the local graph become fossils.
+    for prev in previous {
+        if seen.contains(&prev.bookmark_name) {
+            continue;
         }
+        fossils.push(EntryData {
+            name: prev.bookmark_name.clone(),
+            url: Some(prev.pr_url.clone()),
+            number: Some(prev.pr_number),
+            is_merged: true,
+            closed_at: prev.closed_at.clone(),
+        });
     }
 
-    result
+    // Sort fossils by closed_at descending. Entries with a timestamp sort
+    // before timestampless ones; within timestamped, newer first; within
+    // timestampless, preserve insertion order (a stable sort plus None
+    // comparing equal handles this).
+    fossils.sort_by(|a, b| match (&a.closed_at, &b.closed_at) {
+        (Some(a_t), Some(b_t)) => b_t.cmp(a_t),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    (live, fossils)
 }
 
 pub(crate) fn update_stack_comments(
@@ -379,6 +409,7 @@ pub(crate) fn update_stack_comments(
                     url: Some(pr.html_url.clone()),
                     number: Some(pr.number),
                     is_merged: false,
+                    closed_at: None,
                 }
             } else if let Some(merged) = merged_prs.get(b.name.as_str()) {
                 EntryData {
@@ -386,6 +417,7 @@ pub(crate) fn update_stack_comments(
                     url: Some(merged.html_url.clone()),
                     number: Some(merged.pr_number),
                     is_merged: true,
+                    closed_at: merged.merged_at.clone(),
                 }
             } else {
                 EntryData {
@@ -393,6 +425,7 @@ pub(crate) fn update_stack_comments(
                     url: None,
                     number: None,
                     is_merged: false,
+                    closed_at: None,
                 }
             }
         })
@@ -413,8 +446,8 @@ pub(crate) fn update_stack_comments(
             let previous_items = previous_data
                 .map(|d| d.stack.as_slice())
                 .unwrap_or_default();
-            let merged = merge_with_previous_entries(&current_entries, previous_items);
-            merged
+            let (live_data, fossil_data) = classify_stack_entries(&current_entries, previous_items);
+            let live = live_data
                 .iter()
                 .map(|e| StackEntry {
                     bookmark_name: e.name.clone(),
@@ -422,8 +455,23 @@ pub(crate) fn update_stack_comments(
                     pr_number: e.number,
                     is_current: e.name == bookmark_name,
                     is_merged: e.is_merged,
+                    closed_at: e.closed_at.clone(),
                 })
-                .collect()
+                .collect();
+            let fossils = fossil_data
+                .iter()
+                .map(|e| StackEntry {
+                    bookmark_name: e.name.clone(),
+                    pr_url: e.url.clone(),
+                    pr_number: e.number,
+                    // The current PR can never be a fossil — its bookmark is
+                    // by definition still live since we're commenting on it.
+                    is_current: false,
+                    is_merged: e.is_merged,
+                    closed_at: e.closed_at.clone(),
+                })
+                .collect();
+            (live, fossils)
         })?;
 
         if did_update {
@@ -1576,6 +1624,7 @@ mod tests {
                 bookmark: make_bookmark("auth"),
                 pr_number: 1,
                 html_url: "https://github.com/o/r/pull/1".to_string(),
+                merged_at: Some("2026-01-01T00:00:00Z".to_string()),
             }],
             existing_prs: HashMap::from([("profile".to_string(), profile_pr)]),
             remote_name: "origin".to_string(),
@@ -1722,101 +1771,350 @@ mod tests {
         assert!(result.is_ok(), "comment failure should not abort: {result:?}");
     }
 
+    // ----- classify_stack_entries unit tests -----
+    //
+    // Every test below uses `classify_stack_entries(current, previous)` and
+    // unpacks the returned `(live, fossils)`. Live entries follow the
+    // current local graph order (base→top); fossils are sorted by
+    // `closed_at` descending (most recent first), with timestampless
+    // entries trailing in stable insertion order.
+
+    fn live(name: &str, num: u64) -> EntryData {
+        EntryData {
+            name: name.into(),
+            url: Some(format!("url_{name}")),
+            number: Some(num),
+            is_merged: false,
+            closed_at: None,
+        }
+    }
+
+    fn fossil(name: &str, num: u64, closed_at: &str) -> EntryData {
+        EntryData {
+            name: name.into(),
+            url: Some(format!("url_{name}")),
+            number: Some(num),
+            is_merged: true,
+            closed_at: Some(closed_at.into()),
+        }
+    }
+
+    fn prev_item(name: &str, num: u64, is_merged: bool) -> comment::StackCommentItem {
+        comment::StackCommentItem {
+            bookmark_name: name.into(),
+            pr_url: format!("url_{name}"),
+            pr_number: num,
+            is_merged,
+            closed_at: None,
+        }
+    }
+
+    fn prev_fossil(name: &str, num: u64, closed_at: &str) -> comment::StackCommentItem {
+        comment::StackCommentItem {
+            bookmark_name: name.into(),
+            pr_url: format!("url_{name}"),
+            pr_number: num,
+            is_merged: true,
+            closed_at: Some(closed_at.into()),
+        }
+    }
+
+    fn names(entries: &[EntryData]) -> Vec<&str> {
+        entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    // -- Live ordering --
+
+    /// New bottom-of-stack PR (real-world beancounter #1875 scenario):
+    /// must render at position 0, not appended.
     #[test]
-    fn test_merge_previous_entries_preserves_removed() {
-        // Previous: [A, B, C], Current: [B, C] → [A(merged), B, C]
-        let current = vec![
-            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
-            EntryData { name: "C".into(), url: Some("url_c".into()), number: Some(3), is_merged: false },
-        ];
+    fn test_classify_inserts_new_bottom_at_position_zero() {
+        let current = vec![live("X", 1875), live("A", 1864), live("B", 1862)];
+        let previous = vec![prev_item("A", 1864, false), prev_item("B", 1862, false)];
+
+        let (live_out, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(names(&live_out), vec!["X", "A", "B"]);
+        assert!(fossils_out.is_empty());
+    }
+
+    /// New PR inserted in the middle of the stack appears in its current
+    /// position, not appended.
+    #[test]
+    fn test_classify_inserts_new_middle_in_correct_position() {
+        let current = vec![live("A", 1), live("X", 2), live("B", 3)];
+        let previous = vec![prev_item("A", 1, false), prev_item("B", 3, false)];
+
+        let (live_out, _) = classify_stack_entries(&current, &previous);
+        assert_eq!(names(&live_out), vec!["A", "X", "B"]);
+    }
+
+    /// When the order of shared bookmarks differs between previous and
+    /// current (e.g., after a base swap), current order must win.
+    #[test]
+    fn test_classify_uses_current_order_when_previous_disagrees() {
+        let current = vec![live("A", 1), live("B", 2), live("C", 3)];
         let previous = vec![
-            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
-            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "url_b".into(), pr_number: 2, is_merged: false },
-            comment::StackCommentItem { bookmark_name: "C".into(), pr_url: "url_c".into(), pr_number: 3, is_merged: false },
+            prev_item("B", 2, false),
+            prev_item("A", 1, false),
+            prev_item("C", 3, false),
         ];
 
-        let result = merge_with_previous_entries(&current, &previous);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].name, "A");
-        assert!(result[0].is_merged, "A should be marked merged");
-        assert_eq!(result[1].name, "B");
-        assert!(!result[1].is_merged);
-        assert_eq!(result[2].name, "C");
-        assert!(!result[2].is_merged);
+        let (live_out, _) = classify_stack_entries(&current, &previous);
+        assert_eq!(names(&live_out), vec!["A", "B", "C"]);
+    }
+
+    /// Beancounter PR #1864 bug — every PR's comment must agree on the
+    /// canonical base→top order regardless of its individual previous data.
+    #[test]
+    fn test_classify_real_world_pr_1864_scenario() {
+        let current = vec![
+            live("X", 1875),
+            live("A", 1864),
+            live("B", 1862),
+            live("C", 1863),
+        ];
+        // PR 1864's stale previous comment had A as the base.
+        let previous_for_1864 = vec![
+            prev_item("A", 1864, false),
+            prev_item("B", 1862, false),
+            prev_item("C", 1863, false),
+        ];
+        let (live_1864, fossils_1864) = classify_stack_entries(&current, &previous_for_1864);
+        assert_eq!(names(&live_1864), vec!["X", "A", "B", "C"]);
+        assert!(fossils_1864.is_empty());
+
+        // PR 1862's stale previous comment had stale 1861 at the base.
+        let previous_for_1862 = vec![
+            prev_fossil("M", 1861, "2026-04-01T00:00:00Z"),
+            prev_item("A", 1864, false),
+            prev_item("B", 1862, false),
+            prev_item("C", 1863, false),
+        ];
+        let (live_1862, fossils_1862) = classify_stack_entries(&current, &previous_for_1862);
+        assert_eq!(names(&live_1862), vec!["X", "A", "B", "C"]);
+        assert_eq!(fossils_1862.len(), 1);
+        assert_eq!(fossils_1862[0].name, "M");
+    }
+
+    /// New base displaces a merged predecessor: X (live, new base) must
+    /// come before A (live, was the previous base); M (merged) goes to
+    /// fossils, not the live list.
+    #[test]
+    fn test_classify_new_base_displaces_merged_predecessor() {
+        let current = vec![live("X", 1875), live("A", 1862), live("B", 1863)];
+        let previous = vec![
+            prev_fossil("M", 1861, "2026-04-01T00:00:00Z"),
+            prev_item("A", 1862, false),
+            prev_item("B", 1863, false),
+        ];
+
+        let (live_out, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(
+            names(&live_out),
+            vec!["X", "A", "B"],
+            "live list is just the live local stack"
+        );
+        assert_eq!(names(&fossils_out), vec!["M"], "M moves to fossils");
+    }
+
+    /// A bookmark whose URL/number changed between submits reflects the
+    /// *current* metadata, not the stale previous one.
+    #[test]
+    fn test_classify_prefers_current_metadata_for_shared_bookmarks() {
+        let current = vec![EntryData {
+            name: "A".into(),
+            url: Some("new_url_a".into()),
+            number: Some(99),
+            is_merged: false,
+            closed_at: None,
+        }];
+        let previous = vec![comment::StackCommentItem {
+            bookmark_name: "A".into(),
+            pr_url: "old_url_a".into(),
+            pr_number: 1,
+            is_merged: false,
+            closed_at: None,
+        }];
+
+        let (live_out, _) = classify_stack_entries(&current, &previous);
+        assert_eq!(live_out.len(), 1);
+        assert_eq!(live_out[0].url.as_deref(), Some("new_url_a"));
+        assert_eq!(live_out[0].number, Some(99));
     }
 
     #[test]
-    fn test_merge_previous_entries_appends_new() {
-        // Previous: [A, B], Current: [B, C] → [A(merged), B, C]
-        let current = vec![
-            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
-            EntryData { name: "C".into(), url: Some("url_c".into()), number: Some(3), is_merged: false },
-        ];
-        let previous = vec![
-            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
-            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "url_b".into(), pr_number: 2, is_merged: false },
-        ];
-
-        let result = merge_with_previous_entries(&current, &previous);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0].name, "A");
-        assert!(result[0].is_merged);
-        assert_eq!(result[1].name, "B");
-        assert!(!result[1].is_merged);
-        assert_eq!(result[2].name, "C");
-        assert!(!result[2].is_merged);
+    fn test_classify_empty_inputs() {
+        let (live_out, fossils_out) = classify_stack_entries(&[], &[]);
+        assert!(live_out.is_empty());
+        assert!(fossils_out.is_empty());
     }
 
     #[test]
-    fn test_merge_previous_entries_empty_previous() {
-        // Previous: [], Current: [A, B] → [A, B]
-        let current = vec![
-            EntryData { name: "A".into(), url: Some("url_a".into()), number: Some(1), is_merged: false },
-            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
-        ];
-
-        let result = merge_with_previous_entries(&current, &[]);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "A");
-        assert_eq!(result[1].name, "B");
+    fn test_classify_empty_previous() {
+        let current = vec![live("A", 1), live("B", 2)];
+        let (live_out, fossils_out) = classify_stack_entries(&current, &[]);
+        assert_eq!(names(&live_out), vec!["A", "B"]);
+        assert!(fossils_out.is_empty());
     }
 
-    #[test]
-    fn test_merge_previous_entries_current_takes_precedence() {
-        // Current has updated URL for B
-        let current = vec![
-            EntryData { name: "B".into(), url: Some("new_url_b".into()), number: Some(22), is_merged: false },
-        ];
-        let previous = vec![
-            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
-            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "old_url_b".into(), pr_number: 2, is_merged: false },
-        ];
+    // -- Fossil ordering --
 
-        let result = merge_with_previous_entries(&current, &previous);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].name, "A");
-        assert!(result[0].is_merged);
-        assert_eq!(result[1].name, "B");
-        assert_eq!(result[1].url.as_deref(), Some("new_url_b"));
-        assert_eq!(result[1].number, Some(22));
-        assert!(!result[1].is_merged);
+    /// Fossils sort by closed_at descending (most recent first).
+    #[test]
+    fn test_classify_fossils_sorted_by_recency() {
+        let current = vec![live("live_one", 100)];
+        let previous = vec![
+            prev_fossil("oldest", 1, "2026-01-01T00:00:00Z"),
+            prev_fossil("newest", 3, "2026-03-01T00:00:00Z"),
+            prev_fossil("middle", 2, "2026-02-01T00:00:00Z"),
+        ];
+        let (_, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(names(&fossils_out), vec!["newest", "middle", "oldest"]);
     }
 
+    /// Fossils with no timestamp sort to the end; among them, insertion
+    /// order is preserved (stable sort).
     #[test]
-    fn test_merge_previous_entries_no_change() {
-        // Previous: [A, B], Current: [A, B] → [A, B] (unchanged)
+    fn test_classify_timestampless_fossils_sort_to_end() {
+        let current = vec![live("top", 100)];
+        let previous = vec![
+            comment::StackCommentItem {
+                bookmark_name: "no_ts_first".into(),
+                pr_url: "u1".into(),
+                pr_number: 1,
+                is_merged: true,
+                closed_at: None,
+            },
+            prev_fossil("with_ts", 2, "2026-03-01T00:00:00Z"),
+            comment::StackCommentItem {
+                bookmark_name: "no_ts_second".into(),
+                pr_url: "u3".into(),
+                pr_number: 3,
+                is_merged: true,
+                closed_at: None,
+            },
+        ];
+        let (_, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(
+            names(&fossils_out),
+            vec!["with_ts", "no_ts_first", "no_ts_second"],
+            "timestamped fossils first; then timestampless in insertion order"
+        );
+    }
+
+    /// A current entry marked is_merged with no closed_at backfills its
+    /// timestamp from the previous comment if available.
+    #[test]
+    fn test_classify_backfills_closed_at_from_previous() {
+        // Current sees A as merged but lacks the timestamp (e.g., transient
+        // forge error during this submit).
+        let current = vec![EntryData {
+            name: "A".into(),
+            url: Some("url_a".into()),
+            number: Some(1),
+            is_merged: true,
+            closed_at: None,
+        }];
+        let previous = vec![prev_fossil("A", 1, "2026-04-01T00:00:00Z")];
+
+        let (_, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(fossils_out.len(), 1);
+        assert_eq!(
+            fossils_out[0].closed_at.as_deref(),
+            Some("2026-04-01T00:00:00Z"),
+            "closed_at must inherit from previous when current is missing it"
+        );
+    }
+
+    /// Current's closed_at takes precedence over previous's when both have
+    /// values (current is fresher from the forge).
+    #[test]
+    fn test_classify_current_closed_at_takes_precedence() {
+        let current = vec![fossil("A", 1, "2026-05-01T00:00:00Z")];
+        let previous = vec![prev_fossil("A", 1, "2026-04-01T00:00:00Z")];
+        let (_, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(fossils_out.len(), 1);
+        assert_eq!(
+            fossils_out[0].closed_at.as_deref(),
+            Some("2026-05-01T00:00:00Z")
+        );
+    }
+
+    /// Previous-only fossils (bookmark cleaned up locally) inherit their
+    /// closed_at from JJPR_DATA — the durable shared store.
+    #[test]
+    fn test_classify_previous_only_fossil_keeps_closed_at() {
+        let current: Vec<EntryData> = vec![live("top", 100)];
+        let previous = vec![prev_fossil("gone", 1, "2026-04-30T12:00:00Z")];
+
+        let (_, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(fossils_out.len(), 1);
+        assert_eq!(fossils_out[0].name, "gone");
+        assert_eq!(
+            fossils_out[0].closed_at.as_deref(),
+            Some("2026-04-30T12:00:00Z")
+        );
+    }
+
+    /// All known fossils (current and previous-only) appear in the
+    /// returned list — the cap is enforced at render time, not classify
+    /// time, so that JJPR_DATA preserves the full history.
+    #[test]
+    fn test_classify_does_not_truncate_fossils() {
+        let current = vec![live("top", 100)];
+        let previous: Vec<comment::StackCommentItem> = (1..=12)
+            .map(|i| prev_fossil(&format!("old{i}"), i, &format!("2026-01-{:02}T00:00:00Z", i)))
+            .collect();
+        let (_, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(
+            fossils_out.len(),
+            12,
+            "classify keeps every fossil; the renderer caps display"
+        );
+    }
+
+    /// Beancounter PR #1862's stale comment listed a merged predecessor
+    /// (#1861) and a new base (#1875). Live list must follow current;
+    /// fossil list contains M only.
+    #[test]
+    fn test_classify_beancounter_1862_full_scenario() {
         let current = vec![
-            EntryData { name: "A".into(), url: Some("url_a".into()), number: Some(1), is_merged: false },
-            EntryData { name: "B".into(), url: Some("url_b".into()), number: Some(2), is_merged: false },
+            live("X", 1875),
+            live("A", 1864),
+            live("B", 1862),
+            live("C", 1863),
         ];
         let previous = vec![
-            comment::StackCommentItem { bookmark_name: "A".into(), pr_url: "url_a".into(), pr_number: 1, is_merged: false },
-            comment::StackCommentItem { bookmark_name: "B".into(), pr_url: "url_b".into(), pr_number: 2, is_merged: false },
+            prev_fossil("M", 1861, "2026-04-01T00:00:00Z"),
+            prev_item("A", 1864, false),
+            prev_item("B", 1862, false),
+            prev_item("C", 1863, false),
         ];
+        let (live_out, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(names(&live_out), vec!["X", "A", "B", "C"]);
+        assert_eq!(names(&fossils_out), vec!["M"]);
+    }
 
-        let result = merge_with_previous_entries(&current, &previous);
-        assert_eq!(result.len(), 2);
-        assert!(!result[0].is_merged);
-        assert!(!result[1].is_merged);
+    /// Mix of current-merged, previous-only-merged, and live entries.
+    #[test]
+    fn test_classify_mixed_live_and_fossil() {
+        let current = vec![
+            live("live1", 1),
+            fossil("recent_merge", 2, "2026-04-15T00:00:00Z"),
+            live("live2", 3),
+        ];
+        let previous = vec![
+            prev_fossil("ancient_gone", 4, "2026-01-01T00:00:00Z"),
+            prev_item("live1", 1, false),
+            prev_fossil("recent_merge", 2, "2026-04-15T00:00:00Z"),
+            prev_item("live2", 3, false),
+        ];
+        let (live_out, fossils_out) = classify_stack_entries(&current, &previous);
+        assert_eq!(names(&live_out), vec!["live1", "live2"]);
+        assert_eq!(
+            names(&fossils_out),
+            vec!["recent_merge", "ancient_gone"],
+            "fossils sorted recent-first regardless of source"
+        );
     }
 }
