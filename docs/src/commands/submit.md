@@ -102,3 +102,52 @@ Error: cannot push — some commits have unresolved conflicts:
 
 To resolve: jj edit pnnmmvmu, fix the conflicts, then re-run jjpr submit.
 ```
+
+## Stack-awareness comment
+
+Multi-PR stacks get a comment on every PR linking the others:
+
+```
+This PR is part of a stack:
+
+1. [`feat/auth`](https://github.com/o/r/pull/41)
+1. **`feat/profile` <-- this PR**
+1. [`feat/settings`](https://github.com/o/r/pull/43)
+```
+
+The list always reflects the current local stack in base-to-top order.
+As you rebase, split, or reorder commits, the order is recomputed every
+submit so each PR's comment stays in sync with the others.
+
+When a PR in the stack is merged or closed and its bookmark is no
+longer in the local graph, it moves into a collapsible history block
+at the bottom of the comment, rendered with strikethrough:
+
+```
+1. **`feat/profile` <-- this PR**
+1. [`feat/settings`](https://github.com/o/r/pull/43)
+
+<details><summary>2 earlier closed/merged PRs</summary>
+
+1. ~~[`feat/foundation`](https://github.com/o/r/pull/39)~~
+1. ~~[`feat/migration`](https://github.com/o/r/pull/40)~~
+
+</details>
+```
+
+Up to seven historical entries are shown, sorted most-recent first by
+the forge's merge timestamp. Older entries past the cap stay in the
+embedded data (so future submits can reconstruct full history) but
+aren't displayed:
+
+```
+<summary>7 earlier closed/merged PRs (+3 older entries hidden)</summary>
+```
+
+The comment also embeds a base64-encoded JSON payload of the stack
+state inside an HTML comment marker. jjpr reads this on the next
+submit to inherit fossil metadata (PR numbers, merge timestamps) for
+PRs whose local bookmarks have been cleaned up. Don't edit it; jjpr
+rewrites the whole comment on every submit.
+
+Single-PR stacks don't get a comment.

@@ -196,18 +196,9 @@ fn reconcile_forge_state(
         let seg_name = seg.bookmark.name.clone();
         let result = nav.update(forge, owner, repo, pr, &|previous_data| {
             let Some(data) = previous_data else {
-                return vec![];
+                return (vec![], vec![]);
             };
-            data.stack
-                .iter()
-                .map(|item| comment::StackEntry {
-                    bookmark_name: item.bookmark_name.clone(),
-                    pr_url: Some(item.pr_url.clone()),
-                    pr_number: Some(item.pr_number),
-                    is_current: item.bookmark_name == seg_name,
-                    is_merged: item.is_merged || merged_names.contains(item.bookmark_name.as_str()),
-                })
-                .collect()
+            partition_after_merge(&data.stack, &merged_names, &seg_name)
         });
         if let Err(e) = result {
             warnings.push(LocalDivergenceWarning {
@@ -217,6 +208,44 @@ fn reconcile_forge_state(
     }
 
     (Some(fresh_map), warnings)
+}
+
+/// Split a stack-info comment's previous payload into `(live, fossils)`
+/// after a forge merge. Items in `merged_names` move to fossils;
+/// previously-merged items stay as fossils; live items keep their stored
+/// metadata. Newly-merged items inherit `closed_at: None` until the next
+/// `jjpr submit` queries the forge to populate the real merge timestamp.
+///
+/// Order matches the input: live entries follow stack position; fossils
+/// preserve the original comment's order, which under jjpr's existing
+/// rendering means just-merged entries (formerly live, listed first in
+/// `data.stack`) naturally appear above older fossils — matching the
+/// "most recent first" sort that the next submit will produce.
+fn partition_after_merge(
+    items: &[comment::StackCommentItem],
+    merged_names: &std::collections::HashSet<&str>,
+    current_seg_name: &str,
+) -> (Vec<comment::StackEntry>, Vec<comment::StackEntry>) {
+    let mut live = Vec::new();
+    let mut fossils = Vec::new();
+    for item in items {
+        let is_merged =
+            item.is_merged || merged_names.contains(item.bookmark_name.as_str());
+        let entry = comment::StackEntry {
+            bookmark_name: item.bookmark_name.clone(),
+            pr_url: Some(item.pr_url.clone()),
+            pr_number: Some(item.pr_number),
+            is_current: item.bookmark_name == current_seg_name && !is_merged,
+            is_merged,
+            closed_at: item.closed_at.clone(),
+        };
+        if is_merged {
+            fossils.push(entry);
+        } else {
+            live.push(entry);
+        }
+    }
+    (live, fossils)
 }
 
 /// Run both local and forge reconciliation after a successful merge.
@@ -2464,5 +2493,137 @@ mod tests {
 
         // Should have local warnings
         assert!(!result.local_warnings.is_empty());
+    }
+
+    // --- partition_after_merge unit tests ---
+    //
+    // The reconcile-after-merge path rewrites the stack-info comment on
+    // each remaining open PR to reflect that some segments just merged.
+    // These tests cover the partition logic in isolation since the
+    // full-flow tests use mocks that return empty comments and never
+    // exercise the rewrite.
+
+    fn item(name: &str, num: u64, is_merged: bool) -> comment::StackCommentItem {
+        comment::StackCommentItem {
+            bookmark_name: name.into(),
+            pr_url: format!("u_{name}"),
+            pr_number: num,
+            is_merged,
+            closed_at: None,
+        }
+    }
+
+    fn fossil_item(name: &str, num: u64, closed_at: &str) -> comment::StackCommentItem {
+        comment::StackCommentItem {
+            bookmark_name: name.into(),
+            pr_url: format!("u_{name}"),
+            pr_number: num,
+            is_merged: true,
+            closed_at: Some(closed_at.into()),
+        }
+    }
+
+    #[test]
+    fn test_partition_moves_newly_merged_to_fossils() {
+        // Previous comment had A, B, C all live. Merge command merged A.
+        // A moves to fossils; B and C stay live.
+        let items = vec![item("A", 1, false), item("B", 2, false), item("C", 3, false)];
+        let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
+        let (live, fossils) = partition_after_merge(&items, &merged, "C");
+        assert_eq!(
+            live.iter().map(|e| e.bookmark_name.as_str()).collect::<Vec<_>>(),
+            vec!["B", "C"]
+        );
+        assert_eq!(
+            fossils.iter().map(|e| e.bookmark_name.as_str()).collect::<Vec<_>>(),
+            vec!["A"]
+        );
+        assert!(fossils[0].is_merged, "A must be marked merged");
+    }
+
+    #[test]
+    fn test_partition_keeps_existing_fossils() {
+        // Previous comment had A live, F (already merged in earlier run).
+        // No new merges this round.
+        let items = vec![item("A", 1, false), fossil_item("F", 2, "2026-04-01T00:00:00Z")];
+        let merged: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let (live, fossils) = partition_after_merge(&items, &merged, "A");
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].bookmark_name, "A");
+        assert_eq!(fossils.len(), 1);
+        assert_eq!(fossils[0].bookmark_name, "F");
+        // Older fossils preserve their timestamp so the next submit's
+        // recency sort stays stable.
+        assert_eq!(
+            fossils[0].closed_at.as_deref(),
+            Some("2026-04-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn test_partition_newly_merged_appears_above_older_fossils() {
+        // Layout in previous comment (data.stack order): live entries
+        // first in graph order, then fossils sorted by recency. After
+        // marking the bottom (A) as merged in this run, the rendered
+        // fossil block should naturally show A first (most recent merge),
+        // F1 second, F2 third — matching what the next submit will
+        // produce when it queries the forge for A's merged_at.
+        let items = vec![
+            item("A", 1, false),
+            item("B", 2, false),
+            item("C", 3, false),
+            fossil_item("F1", 10, "2026-03-15T00:00:00Z"),
+            fossil_item("F2", 11, "2026-02-01T00:00:00Z"),
+        ];
+        let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
+        let (_, fossils) = partition_after_merge(&items, &merged, "C");
+        assert_eq!(
+            fossils.iter().map(|e| e.bookmark_name.as_str()).collect::<Vec<_>>(),
+            vec!["A", "F1", "F2"],
+            "newly-merged A should land at the top of the fossil block"
+        );
+        // A has no timestamp yet — next submit will populate from forge.
+        assert!(fossils[0].closed_at.is_none());
+        // Older fossils keep their stored timestamps unchanged.
+        assert_eq!(fossils[1].closed_at.as_deref(), Some("2026-03-15T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_partition_marks_current_pr_only_among_live() {
+        let items = vec![item("A", 1, false), item("B", 2, false), item("C", 3, false)];
+        let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
+        let (live, fossils) = partition_after_merge(&items, &merged, "B");
+        let by_name: HashMap<&str, &comment::StackEntry> = live
+            .iter()
+            .chain(fossils.iter())
+            .map(|e| (e.bookmark_name.as_str(), e))
+            .collect();
+        assert!(by_name["B"].is_current, "B is the current PR");
+        assert!(!by_name["A"].is_current, "A is a fossil, never current");
+        assert!(!by_name["C"].is_current);
+    }
+
+    #[test]
+    fn test_partition_does_not_mark_just_merged_as_current() {
+        // Edge case: somehow the segment we're commenting on was itself
+        // marked merged (shouldn't normally happen since reconcile only
+        // iterates remaining-open PRs, but be defensive).
+        let items = vec![item("A", 1, false)];
+        let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
+        let (live, fossils) = partition_after_merge(&items, &merged, "A");
+        assert!(live.is_empty());
+        assert_eq!(fossils.len(), 1);
+        assert!(
+            !fossils[0].is_current,
+            "merged entry must not be flagged as the current PR"
+        );
+    }
+
+    #[test]
+    fn test_partition_empty_input() {
+        let merged: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let (live, fossils) = partition_after_merge(&[], &merged, "anything");
+        assert!(live.is_empty());
+        assert!(fossils.is_empty());
     }
 }

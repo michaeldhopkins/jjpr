@@ -53,6 +53,9 @@ pub struct MergedBookmark {
     pub bookmark: Bookmark,
     pub pr_number: u64,
     pub html_url: String,
+    /// ISO-8601 timestamp from the forge marking when the PR became
+    /// non-open. Used for fossil ordering in the stack-info comment.
+    pub merged_at: Option<String>,
 }
 
 /// The full submission plan.
@@ -228,6 +231,7 @@ pub fn create_submission_plan(
                         bookmark: bookmark.clone(),
                         pr_number: merged_pr.number,
                         html_url: merged_pr.html_url,
+                        merged_at: merged_pr.merged_at,
                     });
                     // Don't advance effective_base — this branch is deleted
                     continue;
