@@ -46,12 +46,16 @@ jj edit <change-id>                   # the change ID is in the error message
 jjpr submit
 ```
 
-## "local state is out of sync with the forge"
+## "Local sync failed"
 
-After a merge, jjpr couldn't push or rebase locally. The most common
-cause is local commits that diverged from the remote, for example
-from a `jj rebase` while jjpr was running. The forge state is
-correct. Only your local repo is out of date.
+jjpr couldn't push or rebase locally after a merge, so it stopped
+before merging the next PR. Common causes: a `jj rebase` while jjpr
+was running, divergent change IDs from concurrent editing, or a
+conflicted push.
+
+The just-merged PR is fine on the forge. The remaining open PRs are
+still open with their bases retargeted; only their local branches are
+out of date.
 
 To accept the forge state:
 
@@ -68,6 +72,18 @@ jj rebase -s <change-id> -d main
 # resolve any conflicts
 jjpr submit
 ```
+
+Then re-run `jjpr merge` to continue. `jjpr watch` retries
+automatically on the next poll once you fix things.
+
+## "Forge reconcile failed"
+
+The forge merge succeeded but a follow-up API call (refresh PR list,
+retarget the next base, update stack-info comments) returned an error.
+Local state is fine; only the post-merge bookkeeping didn't complete.
+
+Retry with `jjpr merge`. If it keeps failing, check `jjpr auth test`
+for token issues, then forge status / network connectivity.
 
 ## Authentication errors
 

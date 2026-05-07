@@ -25,7 +25,7 @@ pub fn execute_submission_plan(
     // Report merged bookmarks
     for item in &plan.bookmarks_already_merged {
         println!(
-            "  Skipping '{}' — {} already merged",
+            "  Skipping '{}': {} already merged",
             item.bookmark.name, fk.format_ref(item.pr_number)
         );
     }

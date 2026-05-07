@@ -14,7 +14,7 @@ pub fn resolve_bookmark_selections(
             let bookmark = if segment.bookmarks.len() == 1 {
                 segment.bookmarks[0].clone()
             } else if segment.bookmarks.is_empty() {
-                anyhow::bail!("segment has no bookmarks — this is an internal error");
+                anyhow::bail!("segment has no bookmarks (internal error)");
             } else if interactive {
                 select_bookmark_interactive(&segment.bookmarks)?
             } else {
@@ -39,7 +39,7 @@ fn select_bookmark_interactive(bookmarks: &[Bookmark]) -> Result<Bookmark> {
     let names: Vec<&str> = bookmarks.iter().map(|b| b.name.as_str()).collect();
 
     let selection = dialoguer::Select::new()
-        .with_prompt("Multiple bookmarks on this change — select one for the PR")
+        .with_prompt("Multiple bookmarks on this change. Select one for the PR")
         .items(&names)
         .default(0)
         .interact()

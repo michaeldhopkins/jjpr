@@ -45,6 +45,16 @@ type = "external_admin_merge"
 bookmark = "auth"
 method = "squash"
 
+# Wait until GitHub finishes computing profile's mergeability after the
+# auto-retarget. Without this, evaluate_segment's first call can return
+# MergeabilityUnknown, which would block profile for a different reason
+# than the local-sync failure we're actually trying to test. With the
+# wait, the gate is the only thing standing between the merge loop and
+# a forge-API merge of profile.
+[[setup]]
+type = "wait_for_mergeable"
+bookmark = "profile"
+
 [[setup]]
 type = "set_git_config"
 key = "core.sshCommand"
