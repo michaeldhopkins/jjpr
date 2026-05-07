@@ -1,0 +1,74 @@
+name = "reviewer-scope-bottom"
+description = """
+Locks the wiring of --reviewer + --reviewer-scope through the CLI to
+plan-time scope filtering. Approach:
+
+  1. Setup: `jjpr submit` creates a 3-stack of open PRs (no reviewers).
+  2. Run: `jjpr submit --reviewer octocat --reviewer-scope bottom --dry-run`.
+     Dry-run prints "Would request reviewers on <PR> ('<bookmark>')" for
+     each existing PR that scope picks. With scope=bottom, only the
+     bottommost PR appears in that output.
+  3. Assert: stdout names the bottom bookmark and does NOT name middle
+     or top.
+
+Using --dry-run + an existing-PR path because new-PR reviewer requests
+are skipped in dry-run output, and we don't have a second collaborator
+account in the testing repo to actually request a real reviewer against.
+"""
+
+[[stack]]
+bookmark = "bottom"
+file = "bottom.rs"
+content = "// bottom module\n"
+message = "Add bottom"
+
+[[stack]]
+bookmark = "middle"
+file = "middle.rs"
+content = "// middle module\n"
+message = "Add middle"
+
+[[stack]]
+bookmark = "top"
+file = "top.rs"
+content = "// top module\n"
+message = "Add top"
+
+# Setup: create the three PRs first, no reviewers.
+[[setup]]
+type = "submit"
+
+[run]
+command = "submit"
+extra_args = [
+    "--reviewer", "octocat",
+    "--reviewer-scope", "bottom",
+    "--dry-run",
+]
+
+[expect]
+exit_status = "success"
+# The reviewer-request dry-run line uses the unique '<bookmark>')
+# pattern (single-quote, name, single-quote, closing paren) — checking
+# that pattern reliably distinguishes a request-reviewer print from
+# generic "Submitting stack for 'top'..." style output.
+stdout_contains = [
+    "Would request reviewers",
+    "'{{bookmark:bottom}}')",
+]
+stdout_not_contains = [
+    "'{{bookmark:middle}}')",
+    "'{{bookmark:top}}')",
+]
+
+[[expect.pr]]
+bookmark = "bottom"
+state = "open"
+
+[[expect.pr]]
+bookmark = "middle"
+state = "open"
+
+[[expect.pr]]
+bookmark = "top"
+state = "open"

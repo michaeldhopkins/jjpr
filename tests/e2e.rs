@@ -239,8 +239,12 @@ fn test_submit_creates_stacked_prs() {
     let submission_plan = plan::create_submission_plan(
         &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main",
         &plan::SubmitOptions {
-            draft: false, ready: false, reviewers: &[], stack_base: None,
+            draft_mode: plan::DraftMode::Default,
+            reviewers: &[],
+            reviewer_scope: jjpr::forge::types::ReviewerScope::Bottom,
+            stack_base: None,
             stack_nav: jjpr::config::StackNavMode::Comment,
+            dry_run: false,
         },
     )
     .unwrap();
@@ -253,10 +257,7 @@ fn test_submit_creates_stacked_prs() {
         auth_name
     );
 
-    execute::execute_submission_plan(
-        &jj, &github, &submission_plan, &[], false,
-    )
-    .unwrap();
+    execute::execute_submission_plan(&jj, &github, &submission_plan).unwrap();
 
     // Verify PRs exist with correct bases
     let auth_pr = find_pr(&auth_name);
@@ -353,11 +354,12 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
         repo: REPO.to_string(),
     };
     let opts = || plan::SubmitOptions {
-        draft: false,
-        ready: false,
+        draft_mode: plan::DraftMode::Default,
         reviewers: &[],
+        reviewer_scope: jjpr::forge::types::ReviewerScope::Bottom,
         stack_base: None,
         stack_nav: jjpr::config::StackNavMode::Comment,
+        dry_run: false,
     };
 
     // First submit: both PRs created, both should have stack comments.
@@ -375,7 +377,7 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
             "main", &opts(),
         )
         .unwrap();
-        execute::execute_submission_plan(&jj, &github(), &plan, &[], false)
+        execute::execute_submission_plan(&jj, &github(), &plan)
             .unwrap();
     }
 
@@ -419,7 +421,7 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
             "main", &opts(),
         )
         .unwrap();
-        execute::execute_submission_plan(&jj, &github(), &plan, &[], false)
+        execute::execute_submission_plan(&jj, &github(), &plan)
             .unwrap();
     }
 

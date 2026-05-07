@@ -6,7 +6,9 @@ creates or updates PRs on the forge. Use it when you don't want the
 
 ```
 jjpr submit                           # push and update everything in the stack
-jjpr submit --reviewer alice,bob      # request reviewers on every PR
+jjpr submit --reviewer alice,bob      # request reviewers on the bottom PR (default scope)
+jjpr submit --reviewer alice --reviewer-scope all   # request on every PR
+jjpr submit --reviewer alice --reviewer-scope leaf  # request on the topmost PR
 jjpr submit --draft                   # create new PRs as drafts
 jjpr submit --ready                   # mark existing draft PRs as ready
 jjpr submit --base coworker-feat      # override auto-detected base branch
@@ -37,6 +39,7 @@ submits up to the topmost bookmark.
 | Flag | Effect |
 |---|---|
 | `--reviewer <users>` | Comma-separated list of reviewers to request |
+| `--reviewer-scope <scope>` | Which PRs receive requests: `bottom` (default), `leaf`, or `all` |
 | `--draft` | Create new PRs as drafts |
 | `--ready` | Mark existing draft PRs as ready |
 | `--base <branch>` | Override auto-detected base branch |
@@ -70,9 +73,17 @@ The two flags are mutually exclusive.
 
 ## Reviewers
 
-`--reviewer alice,bob` requests reviewers on every PR in the stack,
-new and existing. Idempotent: a reviewer who's already on a PR isn't
-re-requested.
+`--reviewer alice,bob` requests reviewers. By default the request lands
+only on the **bottom** PR (the one closest to your default branch),
+because that's where review attention is needed first in a stack. As
+the bottom merges, the next iteration of `submit` (or `watch`) targets
+whichever PR is now lowest. `--reviewer-scope leaf` requests on the
+topmost PR; `--reviewer-scope all` requests on every PR.
+
+In `0.20.x` and earlier, requests went to every PR by default. If you
+relied on that, pass `--reviewer-scope all` explicitly.
+
+Idempotent: a reviewer who's already on a PR isn't re-requested.
 
 ## Stacking on someone else's branch
 

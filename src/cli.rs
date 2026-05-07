@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 use crate::config::ReconcileStrategy;
-use crate::forge::types::MergeMethod;
+use crate::forge::types::{MergeMethod, ReviewerScope};
 
 #[derive(Parser)]
 #[command(name = "jjpr")]
@@ -80,9 +80,16 @@ affects PRs where the reviewer isn't already requested.")]
         /// Bookmark to submit (inferred from working copy if omitted)
         bookmark: Option<String>,
 
-        /// Request reviewers on all PRs in the stack (comma-separated)
+        /// Reviewers to request (comma-separated). Scope controlled by
+        /// --reviewer-scope; default is the bottom-most live PR.
         #[arg(long, value_delimiter = ',')]
         reviewer: Vec<String>,
+
+        /// Which PRs in the stack receive reviewer requests:
+        /// `bottom` (default) only the bottommost live PR;
+        /// `leaf` only the topmost; `all` every PR.
+        #[arg(long, value_enum, default_value_t = ReviewerScope::Bottom)]
+        reviewer_scope: ReviewerScope,
 
         /// Git remote name
         #[arg(long)]
@@ -217,6 +224,9 @@ the stack has 2 or more PRs. A single-PR stack looks like a normal PR.
 
 Press Ctrl+C to exit. Use --timeout to set a maximum watch duration.
 
+--dry-run is not supported with watch; the loop is always live. Use \
+`jjpr submit --dry-run` for a one-shot preview.
+
 Examples:
     jjpr watch                          # watch the stack under your working copy
     jjpr watch auth                     # watch the stack ending at bookmark 'auth'
@@ -225,6 +235,24 @@ Examples:
     Watch {
         /// Bookmark to watch (inferred from working copy if omitted)
         bookmark: Option<String>,
+
+        /// Reviewers to request (comma-separated). Watch will request on
+        /// the segment selected by --reviewer-scope. As the stack drains,
+        /// the next iteration's bottom (or leaf) gets the request.
+        #[arg(long, value_delimiter = ',')]
+        reviewer: Vec<String>,
+
+        /// Which PRs in the stack receive reviewer requests:
+        /// `bottom` (default) only the bottommost live PR;
+        /// `leaf` only the topmost; `all` every PR.
+        #[arg(long, value_enum, default_value_t = ReviewerScope::Bottom)]
+        reviewer_scope: ReviewerScope,
+
+        /// Create new PRs as ready instead of drafts (skips the
+        /// draft-then-promote step). Useful when CI is fast and you
+        /// don't need a hold-back-from-review window.
+        #[arg(long)]
+        ready: bool,
 
         /// Git remote name
         #[arg(long)]

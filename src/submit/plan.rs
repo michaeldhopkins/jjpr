@@ -13,6 +13,9 @@ pub struct BookmarkNeedingPr {
     pub base_branch: String,
     pub title: String,
     pub body: String,
+    /// Whether this new PR should receive reviewer requests after
+    /// creation. Determined at plan time from SubmitOptions.reviewer_scope.
+    pub request_reviewers_on_create: bool,
 }
 
 /// What needs to happen for a bookmark whose PR has the wrong base.
@@ -66,6 +69,9 @@ pub struct SubmissionPlan {
     pub bookmarks_needing_base_update: Vec<BookmarkNeedingBaseUpdate>,
     pub bookmarks_needing_body_update: Vec<BookmarkNeedingBodyUpdate>,
     pub bookmarks_needing_ready: Vec<BookmarkNeedingReady>,
+    /// Existing PRs that should receive reviewer requests. Already
+    /// filtered by the SubmitOptions reviewer_scope at plan time, so
+    /// execute can iterate without re-deriving scope.
     pub bookmarks_needing_reviewers: Vec<(Bookmark, u64)>,
     pub bookmarks_with_title_drift: Vec<TitleDrift>,
     pub bookmarks_already_merged: Vec<MergedBookmark>,
@@ -77,6 +83,10 @@ pub struct SubmissionPlan {
     pub default_branch: String,
     pub draft: bool,
     pub stack_nav: crate::config::StackNavMode,
+    /// Carried from SubmitOptions so execute_submission_plan can stay
+    /// in sync with plan-time decisions without re-passing them.
+    pub reviewers: Vec<String>,
+    pub dry_run: bool,
 }
 
 impl SubmissionPlan {
@@ -168,13 +178,34 @@ fn replace_managed_body(pr_body: &str, new_commit_body: &str) -> String {
     format!("{before}{DESCRIPTION_START}\n{new_commit_body}\n{DESCRIPTION_END}{after}")
 }
 
-/// Options for building a submission plan.
+/// How `submit` should treat the draft/ready lifecycle. Mutually
+/// exclusive states; encoded as an enum so callers can't accidentally
+/// set both `draft` and `ready` at once.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DraftMode {
+    /// Create new PRs as ready; leave existing draft PRs as drafts.
+    /// jjpr's default if neither --draft nor --ready is passed.
+    #[default]
+    Default,
+    /// Create new PRs as drafts. Existing draft PRs unchanged.
+    NewAsDraft,
+    /// Mark existing draft PRs as ready. New PRs created as ready.
+    MarkExistingReady,
+}
+
+/// Options for building and executing a submission plan.
+///
+/// Carries the full user-facing surface for `jjpr submit` and the
+/// submit phase of `jjpr watch`. Both commands construct identical
+/// options for matching CLI flags so the underlying primitives can't
+/// drift between commands.
 pub struct SubmitOptions<'a> {
-    pub draft: bool,
-    pub ready: bool,
+    pub draft_mode: DraftMode,
     pub reviewers: &'a [String],
+    pub reviewer_scope: crate::forge::types::ReviewerScope,
     pub stack_base: Option<&'a str>,
     pub stack_nav: crate::config::StackNavMode,
+    pub dry_run: bool,
 }
 
 /// Build a submission plan by comparing local state with forge state.
@@ -187,11 +218,13 @@ pub fn create_submission_plan(
     default_branch: &str,
     opts: &SubmitOptions<'_>,
 ) -> Result<SubmissionPlan> {
-    let draft = opts.draft;
-    let ready = opts.ready;
+    let draft = matches!(opts.draft_mode, DraftMode::NewAsDraft);
+    let ready = matches!(opts.draft_mode, DraftMode::MarkExistingReady);
     let reviewers = opts.reviewers;
+    let reviewer_scope = opts.reviewer_scope;
     let stack_base = opts.stack_base;
     let stack_nav = opts.stack_nav;
+    let dry_run = opts.dry_run;
     // Batch: one API call for all open PRs instead of one per bookmark
     let all_open_prs = github
         .list_open_prs(&repo_info.owner, &repo_info.repo)
@@ -209,6 +242,11 @@ pub fn create_submission_plan(
     let mut bookmarks_already_merged = Vec::new();
     let mut existing_prs: HashMap<String, PullRequest> = HashMap::new();
     let mut all_bookmarks = Vec::new();
+
+    // Tracks bookmark names of segments that will have a PR after this
+    // plan executes. Used to apply reviewer_scope filtering at the end:
+    // bottom-most, leaf-most, or all live bookmarks get reviewers.
+    let mut live_bookmarks_in_order: Vec<String> = Vec::new();
 
     // Track the effective base: starts at the stack base (or default branch),
     // advances to each live segment's bookmark name. Merged segments don't
@@ -267,6 +305,10 @@ pub fn create_submission_plan(
             continue;
         }
 
+        // This segment will have a PR (existing or new). Track it for
+        // reviewer_scope filtering after the loop.
+        live_bookmarks_in_order.push(bookmark.name.clone());
+
         // Check if bookmark needs push (after merged check to avoid recreating deleted branches)
         if !bookmark.is_synced {
             bookmarks_needing_push.push(bookmark.clone());
@@ -315,7 +357,9 @@ pub fn create_submission_plan(
                 });
             }
 
-            // Track reviewers needed on existing PRs
+            // Track reviewers needed on existing PRs. Filtered by
+            // reviewer_scope after the main loop, once we know which
+            // bookmarks are bottom/leaf.
             if !reviewers.is_empty() {
                 bookmarks_needing_reviewers.push((bookmark.clone(), pr.number));
             }
@@ -329,7 +373,34 @@ pub fn create_submission_plan(
                 base_branch,
                 title,
                 body: wrap_managed_body(&body),
+                // Set after the loop, once reviewer_scope can be resolved.
+                request_reviewers_on_create: false,
             });
+        }
+    }
+
+    // Apply reviewer_scope. Filters who actually receives reviewer requests:
+    // bottom = first live bookmark, leaf = last live bookmark, all = every
+    // live bookmark. Empty reviewers list means no requests regardless.
+    let scoped: std::collections::HashSet<String> = if reviewers.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        match reviewer_scope {
+            crate::forge::types::ReviewerScope::Bottom => {
+                live_bookmarks_in_order.first().cloned().into_iter().collect()
+            }
+            crate::forge::types::ReviewerScope::Leaf => {
+                live_bookmarks_in_order.last().cloned().into_iter().collect()
+            }
+            crate::forge::types::ReviewerScope::All => {
+                live_bookmarks_in_order.iter().cloned().collect()
+            }
+        }
+    };
+    bookmarks_needing_reviewers.retain(|(b, _)| scoped.contains(&b.name));
+    for needs_pr in &mut bookmarks_needing_pr {
+        if scoped.contains(&needs_pr.bookmark.name) {
+            needs_pr.request_reviewers_on_create = true;
         }
     }
 
@@ -350,13 +421,15 @@ pub fn create_submission_plan(
         default_branch: default_branch.to_string(),
         draft,
         stack_nav,
+        reviewers: reviewers.to_vec(),
+        dry_run,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef, ReviewSummary};
+    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef, ReviewSummary, ReviewerScope};
     use crate::jj::types::LogEntry;
 
     struct StubGitHub {
@@ -472,7 +545,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_push.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
@@ -494,7 +567,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_needing_push.is_empty());
         assert!(plan.bookmarks_needing_pr.is_empty());
         assert!(plan.bookmarks_needing_base_update.is_empty());
@@ -516,7 +589,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_base_update.len(), 1);
         assert_eq!(
             plan.bookmarks_needing_base_update[0].expected_base,
@@ -539,7 +612,7 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
         assert_eq!(plan.bookmarks_needing_pr[2].base_branch, "profile");
@@ -558,7 +631,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -573,7 +646,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_with_title_drift.len(), 1);
         assert_eq!(plan.bookmarks_with_title_drift[0].current_title, "Old title");
         assert_eq!(plan.bookmarks_with_title_drift[0].expected_title, "Add feature");
@@ -588,9 +661,250 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
         let reviewers = ["alice".to_string()];
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &reviewers, stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &reviewers, reviewer_scope: ReviewerScope::All, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
         assert_eq!(plan.bookmarks_needing_reviewers[0].1, 1); // pr number
+    }
+
+    // --- reviewer_scope tests ---
+    //
+    // Lock the contract that scope filtering happens at plan time and
+    // submit and watch get the same answer for the same scope.
+
+    fn three_segment_stack() -> Vec<NarrowedSegment> {
+        vec![
+            make_segment("auth", false),
+            make_segment("profile", false),
+            make_segment("settings", false),
+        ]
+    }
+
+    #[test]
+    fn scope_bottom_targets_only_first_live_segment_existing_prs() {
+        let gh = StubGitHub {
+            prs: HashMap::from([
+                ("auth".to_string(), make_pr("auth", "main")),
+                ("profile".to_string(), make_pr("profile", "auth")),
+                ("settings".to_string(), make_pr("settings", "profile")),
+            ]),
+        };
+        let segments = three_segment_stack();
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let reviewers = ["alice".to_string()];
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_needing_reviewers.len(), 1, "scope=bottom must pick one existing PR");
+        assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "auth");
+    }
+
+    #[test]
+    fn scope_leaf_targets_only_topmost_live_segment_existing_prs() {
+        let gh = StubGitHub {
+            prs: HashMap::from([
+                ("auth".to_string(), make_pr("auth", "main")),
+                ("profile".to_string(), make_pr("profile", "auth")),
+                ("settings".to_string(), make_pr("settings", "profile")),
+            ]),
+        };
+        let segments = three_segment_stack();
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let reviewers = ["alice".to_string()];
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::Leaf,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
+        assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "settings");
+    }
+
+    #[test]
+    fn scope_all_targets_every_live_segment_existing_prs() {
+        let gh = StubGitHub {
+            prs: HashMap::from([
+                ("auth".to_string(), make_pr("auth", "main")),
+                ("profile".to_string(), make_pr("profile", "auth")),
+                ("settings".to_string(), make_pr("settings", "profile")),
+            ]),
+        };
+        let segments = three_segment_stack();
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let reviewers = ["alice".to_string()];
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::All,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_needing_reviewers.len(), 3);
+        let names: Vec<&str> = plan.bookmarks_needing_reviewers
+            .iter().map(|(b, _)| b.name.as_str()).collect();
+        assert_eq!(names, vec!["auth", "profile", "settings"]);
+    }
+
+    #[test]
+    fn scope_marks_request_reviewers_on_create_for_new_prs() {
+        // Mixed: bottom has existing PR, top is new.
+        let gh = StubGitHub {
+            prs: HashMap::from([("auth".to_string(), make_pr("auth", "main"))]),
+        };
+        let segments = vec![
+            make_segment("auth", false),
+            make_segment("profile", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let reviewers = ["alice".to_string()];
+
+        // Bottom: only auth (existing) gets request.
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+        assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
+        assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "auth");
+        // The new PR for profile must NOT be flagged for reviewer request.
+        let profile = plan.bookmarks_needing_pr.iter()
+            .find(|p| p.bookmark.name == "profile").unwrap();
+        assert!(!profile.request_reviewers_on_create);
+
+        // Leaf: only profile (the new one) gets the flag, no existing-PR
+        // requests since auth isn't the leaf.
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::Leaf,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+        assert!(plan.bookmarks_needing_reviewers.is_empty(),
+            "leaf scope shouldn't request on auth (it's the bottom)");
+        let profile = plan.bookmarks_needing_pr.iter()
+            .find(|p| p.bookmark.name == "profile").unwrap();
+        assert!(profile.request_reviewers_on_create,
+            "leaf scope must flag the new top PR for reviewer request");
+    }
+
+    #[test]
+    fn scope_skips_already_merged_segments_when_picking_bottom() {
+        // bottom (auth) is externally merged. The "live bottom" should be
+        // profile, not auth, since auth's branch is gone.
+        struct StubWithMerged {
+            open_prs: HashMap<String, PullRequest>,
+            merged_prs: HashMap<String, PullRequest>,
+        }
+        impl Forge for StubWithMerged {
+            fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+                Ok(self.open_prs.values().cloned().collect())
+            }
+            fn find_merged_pr(&self, _: &str, _: &str, head: &str) -> Result<Option<PullRequest>> {
+                Ok(self.merged_prs.get(head).cloned())
+            }
+            fn create_pr(&self, _: &str, _: &str, _: &str, _: &str, _: &str, _: &str, _: bool) -> Result<PullRequest> { unimplemented!() }
+            fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { unimplemented!() }
+            fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { unimplemented!() }
+            fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> { unimplemented!() }
+            fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> { unimplemented!() }
+            fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
+            fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> { unimplemented!() }
+            fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { unimplemented!() }
+            fn get_authenticated_user(&self) -> Result<String> { Ok("test".into()) }
+            fn merge_pr(&self, _: &str, _: &str, _: u64, _: MergeMethod) -> Result<()> { unimplemented!() }
+            fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> { unimplemented!() }
+            fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> { unimplemented!() }
+            fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
+                Ok(PrState { merged: false, state: "open".into() })
+            }
+        }
+
+        let mut open_prs = HashMap::new();
+        open_prs.insert("profile".to_string(), make_pr("profile", "main"));
+        open_prs.insert("settings".to_string(), make_pr("settings", "profile"));
+        let mut merged_prs = HashMap::new();
+        merged_prs.insert("auth".to_string(), {
+            let mut pr = make_pr("auth", "main");
+            pr.merged_at = Some("2026-05-01T00:00:00Z".to_string());
+            pr
+        });
+        let gh = StubWithMerged { open_prs, merged_prs };
+        let segments = three_segment_stack();
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let reviewers = ["alice".to_string()];
+
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+
+        assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
+        assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "profile",
+            "bottom skips already-merged auth");
+    }
+
+    #[test]
+    fn empty_reviewers_skips_scope_entirely() {
+        let gh = StubGitHub {
+            prs: HashMap::from([
+                ("auth".to_string(), make_pr("auth", "main")),
+                ("profile".to_string(), make_pr("profile", "auth")),
+            ]),
+        };
+        let segments = vec![
+            make_segment("auth", false),
+            make_segment("profile", false),
+        ];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        // Even with scope=All, no reviewers means no requests.
+        let plan = create_submission_plan(
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default, reviewers: &[],
+                reviewer_scope: ReviewerScope::All,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        ).unwrap();
+        assert!(plan.bookmarks_needing_reviewers.is_empty());
     }
 
     #[test]
@@ -604,7 +918,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         // The new body should contain the updated managed section
         assert!(extract_managed_body(&plan.bookmarks_needing_body_update[0].new_body)
@@ -622,7 +936,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -641,7 +955,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         let new_body = &plan.bookmarks_needing_body_update[0].new_body;
         assert!(new_body.starts_with("User notes above"));
@@ -661,7 +975,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -765,7 +1079,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &GitHubWithMergedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &GitHubWithMergedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
@@ -833,7 +1147,7 @@ mod tests {
 
         let plan = create_submission_plan(
             &GitHubTwoMerged, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 2);
@@ -910,7 +1224,7 @@ mod tests {
 
         let plan = create_submission_plan(
             &GitHubOneMergedOneLive, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1, "auth should be merged");
@@ -956,7 +1270,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &GitHubWithClosedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &GitHubWithClosedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         // A closed-but-not-merged PR should NOT be treated as merged
@@ -1013,7 +1327,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &GitHubWithMergedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &GitHubWithMergedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
@@ -1032,7 +1346,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_with_title_drift.is_empty());
     }
 
@@ -1062,7 +1376,7 @@ mod tests {
         let segments = vec![segment];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(
             plan.bookmarks_with_title_drift.is_empty(),
             "multi-commit segments should not report title drift"
@@ -1077,7 +1391,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_needing_reviewers.is_empty());
     }
 
@@ -1094,11 +1408,11 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         // With ready=false, no bookmarks_needing_ready
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert!(plan.bookmarks_needing_ready.is_empty());
 
         // With ready=true, draft PR is identified
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: true, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::MarkExistingReady, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         assert_eq!(plan.bookmarks_needing_ready.len(), 1);
         assert_eq!(plan.bookmarks_needing_ready[0].pr_number, 1);
     }
@@ -1114,7 +1428,7 @@ mod tests {
         let segments = vec![make_segment("feature", false)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
 
         // Fork PR should be filtered out — treated as if no PR exists
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
@@ -1132,7 +1446,7 @@ mod tests {
         let segments = vec![make_segment("feature", true)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
 
         // Empty label (e.g. from test stubs) should pass through the filter
         assert!(plan.bookmarks_needing_pr.is_empty());
@@ -1168,7 +1482,7 @@ mod tests {
         let segments = vec![make_segment("feature", false)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let err = create_submission_plan(&FailingGitHub, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment })
+        let err = create_submission_plan(&FailingGitHub, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false })
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("jjpr auth test"), "error should hint at auth: {msg}");
@@ -1207,7 +1521,7 @@ mod tests {
 
         // Should succeed (not abort) and plan a PR despite merged check failing
         let plan = create_submission_plan(
-            &MergedCheckFailsGitHub, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &MergedCheckFailsGitHub, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert!(plan.bookmarks_already_merged.is_empty());
@@ -1225,7 +1539,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: Some("coworker-feat"), stack_nav: crate::config::StackNavMode::Comment },
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: Some("coworker-feat"), stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "coworker-feat");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
@@ -1241,7 +1555,7 @@ mod tests {
         let segments = vec![segment];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         let body = &plan.bookmarks_needing_pr[0].body;
         assert!(body.contains("**Merge note:**"), "body should contain merge note: {body}");
         assert!(body.contains("`feat-d`"), "body should reference the merge source: {body}");
@@ -1255,7 +1569,7 @@ mod tests {
         let segments = vec![make_segment("feature", false)];
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment }).unwrap();
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
         let body = &plan.bookmarks_needing_pr[0].body;
         assert!(!body.contains("Merge note"), "linear segment should have no merge note: {body}");
     }
@@ -1294,7 +1608,7 @@ mod tests {
         let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
     }
@@ -1360,7 +1674,7 @@ mod tests {
 
         let plan = create_submission_plan(
             &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         assert!(plan.bookmarks_needing_push.is_empty(), "should not push empty bookmark");
@@ -1377,7 +1691,7 @@ mod tests {
 
         let plan = create_submission_plan(
             &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         assert!(plan.bookmarks_needing_push.is_empty());
@@ -1397,7 +1711,7 @@ mod tests {
 
         let plan = create_submission_plan(
             &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft: false, ready: false, reviewers: &[], stack_base: None, stack_nav: crate::config::StackNavMode::Comment },
+            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
         ).unwrap();
 
         // profile should base on "auth" (the empty segment), not "main"

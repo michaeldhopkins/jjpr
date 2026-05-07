@@ -10,16 +10,21 @@ use crate::jj::Jj;
 use super::plan::SubmissionPlan;
 
 /// Execute the submission plan: push, create PRs, update bases, manage comments.
+///
+/// All user-facing options live on the plan (carried through from
+/// `SubmitOptions` at plan-build time). This keeps submit and the watch
+/// inner submit phase from drifting on options like `reviewers` or
+/// `dry_run` — there's only one way to construct an executable plan.
 pub fn execute_submission_plan(
     jj: &dyn Jj,
     github: &dyn Forge,
     plan: &SubmissionPlan,
-    reviewers: &[String],
-    dry_run: bool,
 ) -> Result<()> {
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
     let fk = plan.forge_kind;
+    let reviewers = plan.reviewers.as_slice();
+    let dry_run = plan.dry_run;
     let mut completed_actions: Vec<String> = Vec::new();
 
     // Report merged bookmarks
@@ -97,8 +102,10 @@ pub fn execute_submission_plan(
         println!("    {}", pr.html_url);
         completed_actions.push(format!("Created {} for '{}'", fk.format_ref(pr.number), item.bookmark.name));
 
-        // Request reviewers on new PRs
-        if !reviewers.is_empty()
+        // Request reviewers on new PRs only when this bookmark is in the
+        // resolved reviewer scope (computed at plan time).
+        if item.request_reviewers_on_create
+            && !reviewers.is_empty()
             && let Err(e) = github.request_reviewers(owner, repo, pr.number, reviewers)
         {
             report_partial_failure(&completed_actions);
@@ -683,6 +690,7 @@ mod tests {
                 base_branch: "main".to_string(),
                 title: "Add auth".to_string(),
                 body: "Auth body".to_string(),
+                request_reviewers_on_create: false,
             }],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -701,6 +709,8 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         }
     }
 
@@ -708,9 +718,10 @@ mod tests {
     fn test_dry_run_produces_no_side_effects() {
         let jj = RecordingJj::new();
         let github = RecordingGitHub::new();
-        let plan = make_plan();
+        let mut plan = make_plan();
+        plan.dry_run = true;
 
-        execute_submission_plan(&jj, &github, &plan, &[], true).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(jj.pushes().is_empty(), "dry run should not push");
         assert!(
@@ -725,7 +736,7 @@ mod tests {
         let github = RecordingGitHub::new();
         let plan = make_plan();
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert_eq!(jj.pushes(), vec!["auth:origin"]);
         assert!(github.calls().iter().any(|c| c == "create_pr:auth:main"));
@@ -735,15 +746,42 @@ mod tests {
     fn test_requests_reviewers_on_new_prs() {
         let jj = RecordingJj::new();
         let github = RecordingGitHub::new();
-        let plan = make_plan();
+        let mut plan = make_plan();
+        plan.reviewers = vec!["alice".to_string(), "bob".to_string()];
+        // Plan-time scope decision: this segment is in scope.
+        plan.bookmarks_needing_pr[0].request_reviewers_on_create = true;
 
-        let reviewers = vec!["alice".to_string(), "bob".to_string()];
-        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(github
             .calls()
             .iter()
             .any(|c| c == "request_reviewers:#42:alice,bob"));
+    }
+
+    /// B: even with reviewers populated, a new PR whose plan-time scope
+    /// decision was "not in scope" must NOT receive a reviewer request.
+    /// Locks the contract that request_reviewers_on_create=false is the
+    /// off switch for new-PR reviewer requests.
+    #[test]
+    fn test_no_reviewer_request_when_not_in_scope_for_new_pr() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        let mut plan = make_plan();
+        plan.reviewers = vec!["alice".to_string()];
+        // Default for BookmarkNeedingPr is request_reviewers_on_create=false,
+        // which is what the scope filter sets when this segment is out of
+        // scope. Be explicit here so future refactors don't silently flip
+        // the default.
+        plan.bookmarks_needing_pr[0].request_reviewers_on_create = false;
+
+        execute_submission_plan(&jj, &github, &plan).unwrap();
+
+        assert!(
+            !github.calls().iter().any(|c| c.starts_with("request_reviewers")),
+            "out-of-scope new PR must not trigger request_reviewers: {:?}",
+            github.calls()
+        );
     }
 
     #[test]
@@ -752,7 +790,7 @@ mod tests {
         let github = RecordingGitHub::new();
         let plan = make_plan();
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(
             !github
@@ -769,7 +807,7 @@ mod tests {
         let github = RecordingGitHub::new();
         let plan = make_plan();
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(
             !github
@@ -793,9 +831,10 @@ mod tests {
             base_branch: "auth".to_string(),
             title: "Add profile".to_string(),
             body: "Profile body".to_string(),
+            request_reviewers_on_create: false,
         });
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         let comment_calls: Vec<_> = github
             .calls()
@@ -922,9 +961,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         let calls = github.calls.lock().expect("poisoned");
         assert_eq!(calls.len(), 1);
@@ -973,9 +1014,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(github.calls().iter().any(|c| c == "update_base:#5:auth"));
     }
@@ -1020,9 +1063,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(
             github.calls().iter().any(|c| c == "update_pr_body:#10"),
@@ -1056,9 +1101,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: true,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], true).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(
             !github.calls().iter().any(|c| c.starts_with("update_pr_body")),
@@ -1074,7 +1121,7 @@ mod tests {
         let mut plan = make_plan();
         plan.draft = true;
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(
             github.calls().iter().any(|c| c.starts_with("create_draft_pr:")),
@@ -1108,9 +1155,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(
             github.calls().iter().any(|c| c == "mark_pr_ready:#10"),
@@ -1141,10 +1190,12 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
         let reviewers = vec!["alice".to_string()];
-        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+        { let mut plan = plan; plan.reviewers = reviewers.clone(); execute_submission_plan(&jj, &github, &plan).unwrap(); };
 
         assert!(
             github.calls().iter().any(|c| c == "request_reviewers:#10:alice"),
@@ -1188,10 +1239,12 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
         let reviewers = vec!["alice".to_string(), "bob".to_string()];
-        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+        { let mut plan = plan; plan.reviewers = reviewers.clone(); execute_submission_plan(&jj, &github, &plan).unwrap(); };
 
         assert!(
             github.calls().iter().any(|c| c == "request_reviewers:#10:alice,bob"),
@@ -1235,10 +1288,12 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
         let reviewers = vec!["alice".to_string(), "bob".to_string()];
-        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+        { let mut plan = plan; plan.reviewers = reviewers.clone(); execute_submission_plan(&jj, &github, &plan).unwrap(); };
 
         assert!(
             !github.calls().iter().any(|c| c.starts_with("request_reviewers")),
@@ -1282,10 +1337,12 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
         let reviewers = vec!["alice".to_string()];
-        execute_submission_plan(&jj, &github, &plan, &reviewers, false).unwrap();
+        { let mut plan = plan; plan.reviewers = reviewers.clone(); execute_submission_plan(&jj, &github, &plan).unwrap(); };
 
         assert!(
             !github.calls().iter().any(|c| c.starts_with("request_reviewers")),
@@ -1337,9 +1394,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        let err = execute_submission_plan(&FailingJj, &github, &plan, &[], false).unwrap_err();
+        let err = execute_submission_plan(&FailingJj, &github, &plan).unwrap_err();
         assert!(err.to_string().contains("push failed for profile"));
     }
 
@@ -1365,10 +1424,12 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
         let reviewers = vec!["alice".to_string()];
-        execute_submission_plan(&jj, &github, &plan, &reviewers, true).unwrap();
+        { let mut plan = plan; plan.reviewers = reviewers.clone(); plan.dry_run = true; execute_submission_plan(&jj, &github, &plan).unwrap(); };
 
         assert!(
             github.calls().is_empty(),
@@ -1399,9 +1460,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         assert!(jj.pushes().is_empty());
         assert!(github.calls().is_empty());
@@ -1426,6 +1489,8 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
         assert!(!plan.has_actions());
     }
@@ -1449,6 +1514,8 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
         assert!(plan.has_actions());
     }
@@ -1542,9 +1609,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         // Should create comments for "auth" and "profile", not for "main"
         let calls = github.calls.lock().expect("poisoned");
@@ -1634,9 +1703,11 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
-        execute_submission_plan(&jj, &github, &plan, &[], false).unwrap();
+        execute_submission_plan(&jj, &github, &plan).unwrap();
 
         let bodies = github.comment_bodies.lock().expect("poisoned");
         assert_eq!(bodies.len(), 1, "should create comment on profile PR");
@@ -1764,10 +1835,12 @@ mod tests {
             default_branch: "main".to_string(),
             draft: false,
             stack_nav: crate::config::StackNavMode::Comment,
+            reviewers: Vec::new(),
+            dry_run: false,
         };
 
         // Comment creation fails, but submission should still succeed
-        let result = execute_submission_plan(&jj, &CommentFailsGitHub, &plan, &[], false);
+        let result = execute_submission_plan(&jj, &CommentFailsGitHub, &plan);
         assert!(result.is_ok(), "comment failure should not abort: {result:?}");
     }
 

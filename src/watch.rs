@@ -21,6 +21,61 @@ use crate::merge::watch::{
 };
 use crate::submit::{analyze, plan, execute, resolve};
 
+/// Submit-phase options for the watch loop. Mirrors the relevant
+/// surface of `submit::plan::SubmitOptions` so watch and submit can't
+/// drift on user-visible knobs. Owned (no lifetimes) so the watch loop
+/// can hold it across the long-running poll.
+///
+/// `draft_mode` is the same enum submit uses. Watch's CLI exposes a
+/// boolean `--ready` flag and translates it to the appropriate
+/// `DraftMode` variant at command-dispatch time.
+#[derive(Debug, Clone)]
+pub struct WatchSubmitOptions {
+    /// Reviewers to request on each iteration's newly-created or
+    /// existing PRs that match `reviewer_scope`. Empty = no requests.
+    pub reviewers: Vec<String>,
+    /// Which segments receive reviewer requests this iteration.
+    pub reviewer_scope: crate::forge::types::ReviewerScope,
+    /// Lifecycle mode for new PRs and existing drafts. Watch's natural
+    /// state is `NewAsDraft` (create as draft, promote when CI passes).
+    /// `MarkExistingReady` is `--ready`'s mapping (treat the stack as
+    /// ready: mark existing drafts and create new as ready). `Default`
+    /// is rarely useful from watch but accepted for consistency.
+    pub draft_mode: crate::submit::plan::DraftMode,
+}
+
+impl Default for WatchSubmitOptions {
+    fn default() -> Self {
+        Self {
+            reviewers: Vec::new(),
+            reviewer_scope: crate::forge::types::ReviewerScope::Bottom,
+            draft_mode: crate::submit::plan::DraftMode::NewAsDraft,
+        }
+    }
+}
+
+impl WatchSubmitOptions {
+    /// Construct from the watch CLI's flag surface. The `ready` flag
+    /// is a single bool exposed at the CLI; this conversion mirrors
+    /// `submit --ready`'s semantics so the two commands behave the
+    /// same way for the same flag.
+    pub fn from_cli(
+        reviewers: Vec<String>,
+        reviewer_scope: crate::forge::types::ReviewerScope,
+        ready: bool,
+    ) -> Self {
+        Self {
+            reviewers,
+            reviewer_scope,
+            draft_mode: if ready {
+                crate::submit::plan::DraftMode::MarkExistingReady
+            } else {
+                crate::submit::plan::DraftMode::NewAsDraft
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CreatedPr {
     pub bookmark_name: String,
@@ -448,6 +503,7 @@ pub fn run_watch_loop(
     remote_name: &str,
     default_branch: &str,
     merge_options: &MergeOptions,
+    submit_opts: &WatchSubmitOptions,
     target_bookmark: &str,
     stack_base: Option<&str>,
     stack_nav: crate::config::StackNavMode,
@@ -580,7 +636,7 @@ pub fn run_watch_loop(
         }
 
         // --- Phase 2: Submit (push + create draft PRs) ---
-        let bookmarks_being_created = match run_submit_phase(jj, forge, &segments, remote_name, repo_info, forge_kind, default_branch, stack_base, stack_nav) {
+        let bookmarks_being_created = match run_submit_phase(jj, forge, &segments, remote_name, repo_info, forge_kind, default_branch, stack_base, stack_nav, submit_opts) {
             Ok(names) => {
                 consecutive_errors = 0;
                 names
@@ -914,6 +970,7 @@ fn rediscover_segments(
 /// Returns the names of bookmarks that had new PRs created. The caller resolves
 /// PR numbers from the PR map (which is refreshed immediately after this phase),
 /// avoiding an extra list_open_prs API call.
+#[allow(clippy::too_many_arguments)]
 fn run_submit_phase(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -924,6 +981,7 @@ fn run_submit_phase(
     default_branch: &str,
     stack_base: Option<&str>,
     stack_nav: crate::config::StackNavMode,
+    submit_opts: &WatchSubmitOptions,
 ) -> Result<Vec<String>> {
     let submission_plan = plan::create_submission_plan(
         forge,
@@ -933,11 +991,14 @@ fn run_submit_phase(
         forge_kind,
         default_branch,
         &plan::SubmitOptions {
-            draft: true,
-            ready: false,
-            reviewers: &[],
+            draft_mode: submit_opts.draft_mode,
+            reviewers: &submit_opts.reviewers,
+            reviewer_scope: submit_opts.reviewer_scope,
             stack_base,
             stack_nav,
+            // dry_run is meaningless inside an infinite watch loop;
+            // `cmd_watch` rejects --dry-run at command entry.
+            dry_run: false,
         },
     )?;
 
@@ -951,7 +1012,7 @@ fn run_submit_phase(
         .map(|b| b.bookmark.name.clone())
         .collect();
 
-    execute::execute_submission_plan(jj, forge, &submission_plan, &[], false)?;
+    execute::execute_submission_plan(jj, forge, &submission_plan)?;
 
     Ok(creating)
 }
@@ -1082,6 +1143,31 @@ mod tests {
     }
 
     // --- Reviewer hint tests ---
+
+    /// A: watch's --ready maps to MarkExistingReady so existing drafts
+    /// get marked ready alongside new PRs being created as ready. Without
+    /// this, --ready leaves existing drafts as drafts (relying on the
+    /// promote phase + CI), which surprises users coming from `submit
+    /// --ready` semantics.
+    #[test]
+    fn watch_submit_options_from_cli_with_ready_marks_existing() {
+        let opts = WatchSubmitOptions::from_cli(
+            vec!["alice".into()],
+            crate::forge::types::ReviewerScope::Bottom,
+            true, // --ready
+        );
+        assert_eq!(opts.draft_mode, crate::submit::plan::DraftMode::MarkExistingReady);
+    }
+
+    #[test]
+    fn watch_submit_options_from_cli_without_ready_uses_new_as_draft() {
+        let opts = WatchSubmitOptions::from_cli(
+            Vec::new(),
+            crate::forge::types::ReviewerScope::Bottom,
+            false,
+        );
+        assert_eq!(opts.draft_mode, crate::submit::plan::DraftMode::NewAsDraft);
+    }
 
     #[test]
     fn test_reviewer_hint_shown_when_no_reviewers() {
