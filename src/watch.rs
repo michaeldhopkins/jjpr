@@ -491,36 +491,7 @@ pub fn run_watch_loop(
         repo_info, forge_kind, default_branch, remote_name, merge_options, stack_base, stack_nav,
     );
 
-    // Print initial status so the user knows what watch is working with
-    if let Ok(initial_prs) = forge.list_open_prs(owner, repo) {
-        let pr_map = crate::forge::build_pr_map(initial_prs, owner);
-        let segments = rediscover_segments(jj, target_bookmark).unwrap_or_default();
-        let with_pr: Vec<_> = segments.iter()
-            .filter(|s| pr_map.contains_key(&s.bookmark.name))
-            .collect();
-        let without_pr: Vec<_> = segments.iter()
-            .filter(|s| !pr_map.contains_key(&s.bookmark.name))
-            .collect();
-        if !with_pr.is_empty() || !without_pr.is_empty() {
-            println!("  {} bookmark{} in stack{}",
-                segments.len(),
-                if segments.len() == 1 { "" } else { "s" },
-                if !with_pr.is_empty() {
-                    format!(", {} with existing PR{}",
-                        with_pr.len(),
-                        if with_pr.len() == 1 { "" } else { "s" })
-                } else {
-                    String::new()
-                },
-            );
-            if !without_pr.is_empty() {
-                let names: Vec<_> = without_pr.iter().map(|s| s.bookmark.name.as_str()).collect();
-                println!("  Will create draft PRs for: {}\n", names.join(", "));
-            } else {
-                println!();
-            }
-        }
-    }
+    print_initial_watch_status(jj, forge, owner, repo, target_bookmark);
 
     if merge_options.required_approvals == 0 {
         anyhow::bail!(
@@ -572,39 +543,8 @@ pub fn run_watch_loop(
         };
 
         if segments.is_empty() {
-            // Final check: any open PRs we didn't process?
             clear_dot_line(&mut dots_on_line);
-            if let Ok(pr_map) = refresh_pr_map(forge, owner, repo)
-                && let Ok(my_bookmarks) = jj.get_my_bookmarks()
-            {
-                let orphaned: Vec<_> = my_bookmarks
-                    .iter()
-                    .filter(|b| pr_map.contains_key(&b.name))
-                    .filter(|b| !merged.iter().any(|m| m.bookmark_name == b.name))
-                    .filter(|b| {
-                        !skipped_merged
-                            .iter()
-                            .any(|s| s.bookmark_name == b.name)
-                    })
-                    .collect();
-                if !orphaned.is_empty() {
-                    println!(
-                        "\n  Note: {} open PR{} still exist for your bookmarks:",
-                        orphaned.len(),
-                        if orphaned.len() == 1 { "" } else { "s" }
-                    );
-                    for b in &orphaned {
-                        if let Some(pr) = pr_map.get(&b.name) {
-                            println!(
-                                "    - '{}' ({})",
-                                b.name,
-                                forge_kind.format_ref(pr.number)
-                            );
-                        }
-                    }
-                    println!("  These may need manual attention.");
-                }
-            }
+            report_orphaned_prs(jj, forge, owner, repo, &merged, &skipped_merged, forge_kind);
             break;
         }
 
@@ -808,6 +748,79 @@ pub fn run_watch_loop(
             local_warnings: state.warnings,
         },
     })
+}
+
+/// One-time pre-loop summary so the user knows what watch is working
+/// with. Best-effort: silently skip if the forge or jj queries fail.
+fn print_initial_watch_status(
+    jj: &dyn Jj,
+    forge: &dyn Forge,
+    owner: &str,
+    repo: &str,
+    target_bookmark: &str,
+) {
+    let Ok(initial_prs) = forge.list_open_prs(owner, repo) else {
+        return;
+    };
+    let pr_map = crate::forge::build_pr_map(initial_prs, owner);
+    let segments = rediscover_segments(jj, target_bookmark).unwrap_or_default();
+    let with_pr: Vec<_> = segments.iter()
+        .filter(|s| pr_map.contains_key(&s.bookmark.name))
+        .collect();
+    let without_pr: Vec<_> = segments.iter()
+        .filter(|s| !pr_map.contains_key(&s.bookmark.name))
+        .collect();
+    if with_pr.is_empty() && without_pr.is_empty() {
+        return;
+    }
+    let plural = if segments.len() == 1 { "" } else { "s" };
+    let with_pr_suffix = if !with_pr.is_empty() {
+        format!(", {} with existing PR{}",
+            with_pr.len(), if with_pr.len() == 1 { "" } else { "s" })
+    } else {
+        String::new()
+    };
+    println!("  {} bookmark{plural} in stack{with_pr_suffix}", segments.len());
+    if !without_pr.is_empty() {
+        let names: Vec<_> = without_pr.iter().map(|s| s.bookmark.name.as_str()).collect();
+        println!("  Will create draft PRs for: {}\n", names.join(", "));
+    } else {
+        println!();
+    }
+}
+
+/// When the change graph has no segments but we have local bookmarks
+/// pointing at open PRs we never processed, name them so the user knows
+/// what's still in flight. Called only when watch is exiting because
+/// the target bookmark vanished from the graph.
+fn report_orphaned_prs(
+    jj: &dyn Jj,
+    forge: &dyn Forge,
+    owner: &str,
+    repo: &str,
+    merged: &[MergedPr],
+    skipped: &[SkippedMergedPr],
+    fk: ForgeKind,
+) {
+    let Ok(pr_map) = refresh_pr_map(forge, owner, repo) else { return };
+    let Ok(my_bookmarks) = jj.get_my_bookmarks() else { return };
+    let orphaned: Vec<_> = my_bookmarks
+        .iter()
+        .filter(|b| pr_map.contains_key(&b.name))
+        .filter(|b| !merged.iter().any(|m| m.bookmark_name == b.name))
+        .filter(|b| !skipped.iter().any(|s| s.bookmark_name == b.name))
+        .collect();
+    if orphaned.is_empty() {
+        return;
+    }
+    let plural = if orphaned.len() == 1 { "" } else { "s" };
+    println!("\n  Note: {} open PR{plural} still exist for your bookmarks:", orphaned.len());
+    for b in &orphaned {
+        if let Some(pr) = pr_map.get(&b.name) {
+            println!("    - '{}' ({})", b.name, fk.format_ref(pr.number));
+        }
+    }
+    println!("  These may need manual attention.");
 }
 
 /// Print the warnings and recovery hints when reconcile fails inside a
