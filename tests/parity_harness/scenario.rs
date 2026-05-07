@@ -46,6 +46,15 @@ pub enum SetupStep {
         bookmark: String,
         method: AdminMergeMethod,
     },
+    /// Repoint a git remote to a different URL. Be aware: this also
+    /// changes the owner/repo jjpr derives for forge API calls, so for
+    /// most "break-the-fetch" scenarios prefer `set_git_config` instead.
+    SetRemoteUrl { remote: String, url: String },
+    /// Set a key in the repo-local git config, e.g.
+    /// `core.sshCommand = "/bin/false"` to deterministically break
+    /// SSH-backed git fetch/push without touching the remote URL.
+    /// The forge API path is unaffected (it uses GITHUB_TOKEN over HTTPS).
+    SetGitConfig { key: String, value: String },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -108,6 +117,14 @@ pub struct Expectations {
     /// Substrings forbidden in stderr (none must be present).
     #[serde(default)]
     pub stderr_not_contains: Vec<String>,
+
+    /// Substrings expected in stdout (each must be present).
+    #[serde(default)]
+    pub stdout_contains: Vec<String>,
+
+    /// Substrings forbidden in stdout (none must be present).
+    #[serde(default)]
+    pub stdout_not_contains: Vec<String>,
 
     /// PR-level expectations, keyed by bookmark.
     #[serde(default, rename = "pr")]

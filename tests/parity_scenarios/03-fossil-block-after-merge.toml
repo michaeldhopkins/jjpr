@@ -1,0 +1,57 @@
+name = "fossil-block-after-merge"
+description = """
+Stack-comment fossil rendering after the bottom of a stack is merged.
+
+After admin-merging the bottom PR externally and re-running jjpr submit,
+the still-open top PR's stack-info comment must contain the fossil block
+(<details>, "earlier closed/merged" summary text, and a strikethrough link
+to the merged bottom). The merged entry must NOT carry the legacy
+:white_check_mark: icon.
+
+This is a port of tests/e2e.rs::test_merged_bottom_renders_in_fossil_details_block
+into the scenario harness. Keeping it data-driven makes it the canonical
+parity reference for fossil behavior across submit/merge/watch.
+"""
+
+[[stack]]
+bookmark = "bottom"
+file = "bottom.rs"
+content = "// bottom module\n"
+message = "Add bottom"
+
+[[stack]]
+bookmark = "top"
+file = "top.rs"
+content = "// top module\n"
+message = "Add top"
+
+[[setup]]
+type = "submit"
+
+[[setup]]
+type = "external_admin_merge"
+bookmark = "bottom"
+method = "squash"
+
+[run]
+command = "submit"
+
+[expect]
+exit_status = "success"
+
+[[expect.pr]]
+bookmark = "bottom"
+state = "merged"
+
+[[expect.pr]]
+bookmark = "top"
+state = "open"
+
+[[expect.comment]]
+bookmark = "top"
+contains = [
+    "<details>",
+    "earlier closed/merged",
+    "~~[`{{bookmark:bottom}}`]",
+]
+not_contains = [":white_check_mark:"]
