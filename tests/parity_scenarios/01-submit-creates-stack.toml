@@ -1,0 +1,48 @@
+name = "submit-creates-stack"
+description = """
+Baseline: jjpr submit on a fresh 2-bookmark stack pushes both, opens both
+PRs with the right bases (auth → main, profile → auth), and posts a
+stack-info comment on each.
+
+This is the parity reference for higher-level scenarios that exercise the
+shared submit/reconcile path through merge or watch.
+"""
+
+[[stack]]
+bookmark = "auth"
+file = "auth.rs"
+content = "// auth module\n"
+message = "Add authentication"
+
+[[stack]]
+bookmark = "profile"
+file = "profile.rs"
+content = "// profile module\n"
+message = "Add user profile"
+
+# No setup — submit runs cold.
+setup = []
+
+[run]
+command = "submit"
+
+[expect]
+exit_status = "success"
+
+[[expect.pr]]
+bookmark = "auth"
+state = "open"
+base = "main"
+
+[[expect.pr]]
+bookmark = "profile"
+state = "open"
+base = "auth"
+
+[[expect.comment]]
+bookmark = "auth"
+contains = ["<!-- jjpr:stack-info -->"]
+
+[[expect.comment]]
+bookmark = "profile"
+contains = ["<!-- jjpr:stack-info -->"]

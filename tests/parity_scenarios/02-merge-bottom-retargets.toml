@@ -1,0 +1,62 @@
+name = "merge-bottom-retargets-next"
+description = """
+Regression guard for the bloated-diff bug.
+
+Setup: build a 2-bookmark stack (auth, profile), submit both PRs, then
+admin-merge auth externally (simulating a maintainer landing the bottom
+of the stack out-of-band). Run jjpr merge afterwards.
+
+Expected behavior:
+  - auth: skipped — merge sees AlreadyMerged.
+  - reconcile_after_merge: local rebase syncs profile onto main; the
+    rebased bookmark is pushed; profile's PR base is retargeted to main.
+  - profile: blocks on InsufficientApprovals (default required = 1) so
+    we keep the PR open and can inspect its post-reconcile state.
+
+Crucially, profile's PR diff after reconcile must contain ONLY profile's
+own changes, not auth's. If reconcile silently fails, the PR will show
+both files (~2 commits, large diff) — that's the bug we're guarding
+against.
+
+--no-ci-check is set because the testing repo doesn't have CI configured;
+without it, the merge would block on ChecksPending before reaching the
+reconcile path.
+"""
+
+[[stack]]
+bookmark = "auth"
+file = "auth.rs"
+content = "// auth module\n"
+message = "Add authentication"
+
+[[stack]]
+bookmark = "profile"
+file = "profile.rs"
+content = "// profile module\n"
+message = "Add user profile"
+
+[[setup]]
+type = "submit"
+
+[[setup]]
+type = "external_admin_merge"
+bookmark = "auth"
+method = "squash"
+
+[run]
+command = "merge"
+extra_args = ["--no-ci-check"]
+
+[expect]
+exit_status = "success"
+
+[[expect.pr]]
+bookmark = "auth"
+state = "merged"
+
+[[expect.pr]]
+bookmark = "profile"
+state = "open"
+base = "main"
+commit_count_max = 1
+diff_lines_max = 5
