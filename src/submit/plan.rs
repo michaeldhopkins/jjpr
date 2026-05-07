@@ -195,7 +195,7 @@ pub fn create_submission_plan(
     // Batch: one API call for all open PRs instead of one per bookmark
     let all_open_prs = github
         .list_open_prs(&repo_info.owner, &repo_info.repo)
-        .context("failed to list open PRs — check `jjpr auth test`")?;
+        .context("failed to list open PRs (try `jjpr auth test`)")?;
 
     let pr_map = crate::forge::build_pr_map(all_open_prs, &repo_info.owner);
 

@@ -88,6 +88,12 @@ pub fn run_setup(ctx: &ParityContext, scenario: &Scenario) -> Result<()> {
                     ));
                 }
             }
+            SetupStep::WaitForMergeable { bookmark, timeout_secs } => {
+                let prefixed = resolve_bookmark(ctx, bookmark);
+                let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60));
+                wait_for_mergeable(&prefixed, timeout)
+                    .map_err(|e| anyhow!("setup step #{i} (wait_for_mergeable {bookmark}): {e}"))?;
+            }
         }
     }
     Ok(())
@@ -128,4 +134,41 @@ fn invoke_jjpr(ctx: &ParityContext, args: &[String]) -> RunOutput {
         .output()
         .expect("invoke jjpr binary");
     RunOutput::from_output(out)
+}
+
+/// Poll `gh pr view --json mergeable` for the named (prefixed) bookmark
+/// until the field is non-null. GitHub computes mergeability asynchronously
+/// after operations like base retargeting, so without this poll an
+/// evaluate_segment call can transiently report MergeabilityUnknown.
+fn wait_for_mergeable(prefixed_head: &str, timeout: std::time::Duration) -> Result<()> {
+    use super::context::{find_pr_by_head, OWNER, REPO};
+
+    let pr = find_pr_by_head(prefixed_head)
+        .ok_or_else(|| anyhow!("no PR for head '{prefixed_head}'"))?;
+    let number = pr["number"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("PR for '{prefixed_head}' has no number"))?;
+    let full_repo = format!("{OWNER}/{REPO}");
+    let deadline = std::time::Instant::now() + timeout;
+
+    while std::time::Instant::now() < deadline {
+        let out = Command::new("gh")
+            .args([
+                "pr", "view", &number.to_string(),
+                "--repo", &full_repo,
+                "--json", "mergeable",
+                "-q", ".mergeable",
+            ])
+            .output()
+            .expect("gh pr view");
+        if out.status.success() {
+            let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            // GitHub's GraphQL returns MERGEABLE / CONFLICTING / UNKNOWN.
+            if value != "UNKNOWN" && !value.is_empty() {
+                return Ok(());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    Err(anyhow!("PR #{number} mergeable stayed UNKNOWN beyond {timeout:?}"))
 }

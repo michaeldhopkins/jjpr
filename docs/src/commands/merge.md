@@ -54,11 +54,18 @@ Merge API calls retry automatically on transient HTTP errors (502,
 polls the PR state for up to 30 seconds to confirm completion. No
 user action needed; this is transparent in normal operation.
 
-## Local divergence
+## Reconcile failures
 
-If your local commits have diverged from the remote (after a local
-`jj rebase`, for example), jjpr continues merging PRs on the forge and
-reports local issues at the end:
+After each merge, jjpr reconciles two things: local state (fetch, rebase,
+push the remaining stack) and forge state (refresh PR list, retarget the
+next base, update stack-info comments). If either fails, jjpr stops at
+the next PR rather than merging it. Merging without a local rebase would
+mix in the previous PR's changes; merging against stale forge state can
+target the wrong base.
+
+### Local sync failed
+
+Failed fetch, failed rebase, conflicted push, or a divergent change ID.
 
 ```
   Merging 'auth' (#42, squash)...
@@ -66,10 +73,11 @@ reports local issues at the end:
   Rebasing remaining stack onto main...
   Pushing 'profile'...
   Warning: failed to push 'profile': conflicted commits
-  Skipping local sync (local state already diverged)
-  Merging 'profile' (#43, squash)...
+  Updating #43 base to 'main'...
+  Blocked at 'profile' (#43):
+    - Local sync failed
 
-Done — 2 PRs merged.
+Run `jjpr merge` again once the issue is resolved.
 
 Note: local state is out of sync with the forge:
   Failed to push 'profile': conflicted commits
@@ -79,12 +87,34 @@ To accept the forge state (discard local divergence):
   jj bookmark set profile -r profile@origin
 
 Or to fix local state and push it to the forge:
-  jj git fetch && jj rebase -s kpqxywzy -d main
+  jj git fetch && jj rebase -s <root-change-id> -d main
   # resolve any conflicts, then:
   jjpr submit
 ```
 
-Divergent change IDs (multiple commits sharing the same ID, often
-from editing sessions) are handled the same way: as local warnings
-rather than fatal errors. jjpr merges on the forge and reports the
-divergence for you to resolve locally.
+`<root-change-id>` is the oldest commit in the next segment (jjpr fills
+this in for you). Using the bookmark tip's change ID rebases only the
+tip and strands earlier commits under the old base.
+
+The forge-side parts of reconcile (next PR's base retarget, stack-info
+comment update) still run before jjpr stops. Only the merge itself waits.
+
+### Forge reconcile failed
+
+The forge merge succeeded but a follow-up API call (list_open_prs,
+update_pr_base, comment update) returned an error. Recovery is usually
+to retry; persistent failures point at network or permission issues.
+
+```
+  Blocked at 'profile' (#43):
+    - Forge reconcile failed
+
+Note: forge reconcile failed:
+  Failed to retarget #43 base to 'main': 502 bad gateway
+
+Retry with `jjpr merge` (or wait for `jjpr watch` to retry).
+```
+
+`jjpr watch` keeps polling through both kinds of failure and resumes
+automatically once the next reconcile succeeds, so persistent watch
+sessions self-heal.

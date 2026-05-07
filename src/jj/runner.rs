@@ -59,7 +59,7 @@ impl Jj for JjRunner {
         ])?;
         let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
         for name in warnings {
-            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit — typically after a squash merge on the forge)");
+            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)");
             eprintln!("    To clean up the stale local bookmark:");
             eprintln!("      jj bookmark forget {name} && jj git push --deleted");
         }

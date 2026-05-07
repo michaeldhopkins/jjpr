@@ -255,7 +255,7 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
             .map(|c| (seg.bookmark.name.as_str(), c.change_id.as_str(), c.description_first_line.as_str())))
         .collect();
     if !conflicted.is_empty() {
-        eprintln!("Error: cannot push — some commits have unresolved conflicts:\n");
+        eprintln!("Error: cannot push; some commits have unresolved conflicts:\n");
         for (bookmark, change_id, desc) in &conflicted {
             eprintln!("  {change_id} ({bookmark}): {desc}");
         }
@@ -476,7 +476,7 @@ fn fetch_segment_status(
 
 fn format_status_line(status: &SegmentDisplayStatus, is_draft: bool) -> String {
     if is_draft {
-        return "    \u{2014} draft".to_string();
+        return "    draft".to_string();
     }
 
     let mut parts = Vec::new();
@@ -485,7 +485,7 @@ fn format_status_line(status: &SegmentDisplayStatus, is_draft: bool) -> String {
         match m.mergeable {
             Some(true) => parts.push("\u{2713} mergeable".to_string()),
             Some(false) => parts.push("\u{2717} conflicts".to_string()),
-            None => parts.push("\u{2014} mergeability computing".to_string()),
+            None => parts.push("? mergeability computing".to_string()),
         }
     }
 
@@ -697,7 +697,27 @@ fn print_watch_summary(result: &jjpr::watch::WatchResult) {
         let n = result.prs_promoted.len();
         println!("  Promoted {n} PR{} to ready.", if n == 1 { "" } else { "s" });
     }
-    print_merge_summary(mr);
+
+    if mr.merged.is_empty() && mr.skipped_merged.is_empty() && mr.blocked_at.is_none() {
+        println!("\nWatch ended without merging anything in this stack.");
+    } else if let Some(ref blocked) = mr.blocked_at {
+        if blocked.reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
+            println!("\nRun `jjpr submit` to create PRs, then re-run `jjpr watch`.");
+        } else {
+            // LocalSyncFailed / ForgeReconcileFailed don't normally reach
+            // here because watch keeps iterating through them. Anything
+            // else here is fatal and rerunning watch is the right action.
+            println!("\nRun `jjpr watch` again once the issue is resolved.");
+        }
+    } else if mr.merged.is_empty() && !mr.skipped_merged.is_empty() {
+        println!("\nAll PRs in this stack are already merged.");
+    } else {
+        println!(
+            "\nDone. {} PR{} merged.",
+            mr.merged.len(),
+            if mr.merged.len() == 1 { "" } else { "s" }
+        );
+    }
 }
 
 fn print_merge_summary(result: &merge::execute::MergeResult) {
@@ -714,7 +734,11 @@ fn print_merge_summary(result: &merge::execute::MergeResult) {
     } else if result.merged.is_empty() && !result.skipped_merged.is_empty() {
         println!("\nAll PRs in this stack are already merged.");
     } else {
-        println!("\nDone \u{2014} {} PR{} merged.", result.merged.len(), if result.merged.len() == 1 { "" } else { "s" });
+        println!(
+            "\nDone. {} PR{} merged.",
+            result.merged.len(),
+            if result.merged.len() == 1 { "" } else { "s" }
+        );
     }
 }
 
@@ -724,14 +748,10 @@ fn print_local_warnings(
     stack_base: Option<&str>,
     default_branch: &str,
 ) -> Result<()> {
+    use merge::execute::DivergenceKind;
+
     if result.local_warnings.is_empty() {
         return Ok(());
-    }
-
-    println!();
-    println!("Note: local state is out of sync with the forge:");
-    for w in &result.local_warnings {
-        println!("  {}", w.message);
     }
 
     let merged_names: std::collections::HashSet<&str> = result.merged.iter()
@@ -742,21 +762,51 @@ fn print_local_warnings(
         .filter(|s| !merged_names.contains(s.bookmark.name.as_str()))
         .collect();
 
-    println!();
-    println!("To accept the forge state (discard local divergence):");
-    println!("  jj git fetch");
-    for seg in &unmerged {
-        println!("  jj bookmark set {} -r {}@origin", seg.bookmark.name, seg.bookmark.name);
+    let local_msgs: Vec<&str> = result.local_warnings.iter()
+        .filter(|w| w.kind == DivergenceKind::Local)
+        .map(|w| w.message.as_str())
+        .collect();
+    let forge_msgs: Vec<&str> = result.local_warnings.iter()
+        .filter(|w| w.kind == DivergenceKind::Forge)
+        .map(|w| w.message.as_str())
+        .collect();
+
+    if !local_msgs.is_empty() {
+        println!();
+        println!("Note: local state is out of sync with the forge:");
+        for m in &local_msgs {
+            println!("  {m}");
+        }
+        println!();
+        println!("To accept the forge state (discard local divergence):");
+        println!("  jj git fetch");
+        for seg in &unmerged {
+            println!("  jj bookmark set {} -r {}@origin", seg.bookmark.name, seg.bookmark.name);
+        }
+        if let Some(first_unmerged) = unmerged.first() {
+            println!();
+            println!("Or to fix local state and push it to the forge:");
+            let base = stack_base.unwrap_or(default_branch);
+            // rebase_root: the OLDEST commit in the segment, so multi-commit
+            // segments don't strand earlier commits under the old base.
+            println!(
+                "  jj git fetch && jj rebase -s {} -d {base}",
+                merge::execute::rebase_root(first_unmerged)
+            );
+            println!("  # resolve any conflicts, then:");
+            println!("  jjpr submit");
+        }
     }
 
-    if let Some(first_unmerged) = unmerged.first() {
+    if !forge_msgs.is_empty() {
         println!();
-        println!("Or to fix local state and push it to the forge:");
-        let base = stack_base.unwrap_or(default_branch);
-        println!("  jj git fetch && jj rebase -s {} -d {base}",
-            first_unmerged.bookmark.change_id);
-        println!("  # resolve any conflicts, then:");
-        println!("  jjpr submit");
+        println!("Note: forge reconcile failed:");
+        for m in &forge_msgs {
+            println!("  {m}");
+        }
+        println!();
+        println!("Retry with `jjpr merge` (or wait for `jjpr watch` to retry).");
+        println!("Persistent failures may indicate a network or forge-permission issue.");
     }
 
     Ok(())

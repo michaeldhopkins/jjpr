@@ -11,8 +11,8 @@ use crate::graph::change_graph;
 use crate::jj::types::NarrowedSegment;
 use crate::jj::Jj;
 use crate::merge::execute::{
-    format_block_reason, merge_with_retry, reconcile_after_merge, BlockedPr,
-    LocalDivergenceWarning, MergeResult, MergedPr, SkippedMergedPr,
+    format_block_reason, merge_with_retry, rebase_root, reconcile_after_merge, BlockedPr,
+    DivergenceKind, MergeResult, MergedPr, ReconcileState, SkippedMergedPr,
 };
 use crate::merge::plan::{evaluate_segment, BlockReason, MergeOptions, PrMergeStatus};
 use crate::merge::watch::{
@@ -143,6 +143,62 @@ struct MergePhaseOutcome {
     all_done: bool,
 }
 
+/// What the outer watch loop should do after a merge phase, given the
+/// reconcile state and whether we were already in a degraded state.
+/// Pure function of inputs; the loop dispatches the side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostMergeAction {
+    /// State is clean and we weren't previously degraded: proceed with
+    /// no-progress checks, all_done handling, and the normal sleep.
+    Continue,
+    /// State just recovered from a previously-reported failure. Print the
+    /// recovery message, clear `prev_reconcile_block`, then proceed as
+    /// `Continue` would.
+    Recovered,
+    /// State is degraded with a different set of reasons than last time
+    /// (or the first time we hit this in the session). Print the full
+    /// recovery hints, then sleep and retry.
+    NewFailure,
+    /// State is degraded with the same reasons as last time, and the
+    /// heartbeat interval has elapsed. Print a one-line heartbeat, then
+    /// sleep and retry.
+    Heartbeat,
+    /// State is degraded with the same reasons as last time, before the
+    /// heartbeat interval. Print a dot and sleep and retry.
+    Dot,
+}
+
+impl PostMergeAction {
+    /// Whether the loop should sleep and `continue` after handling this
+    /// action. True for any degraded action; false for clean ones.
+    fn waits(self) -> bool {
+        matches!(self, Self::NewFailure | Self::Heartbeat | Self::Dot)
+    }
+}
+
+fn classify_post_merge(
+    state: &ReconcileState,
+    prev_reconcile_block: &Option<Vec<BlockReason>>,
+    last_heartbeat_elapsed: Duration,
+    heartbeat_interval: Duration,
+) -> PostMergeAction {
+    if !state.degraded() {
+        return if prev_reconcile_block.is_some() {
+            PostMergeAction::Recovered
+        } else {
+            PostMergeAction::Continue
+        };
+    }
+    let current = state.block_reasons();
+    if prev_reconcile_block.as_ref() != Some(&current) {
+        PostMergeAction::NewFailure
+    } else if last_heartbeat_elapsed >= heartbeat_interval {
+        PostMergeAction::Heartbeat
+    } else {
+        PostMergeAction::Dot
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_merge_phase(
     jj: &dyn Jj,
@@ -155,8 +211,7 @@ fn run_merge_phase(
     prev_reasons: &mut Option<Vec<BlockReason>>,
     consecutive_errors: &mut u32,
     last_heartbeat: &mut Instant,
-    local_degraded: &mut bool,
-    local_warnings: &mut Vec<LocalDivergenceWarning>,
+    state: &mut ReconcileState,
     dots_on_line: &mut bool,
 ) -> Result<MergePhaseOutcome> {
     let owner = &merge_plan.repo_info.owner;
@@ -196,7 +251,7 @@ fn run_merge_phase(
                 clear_dot_line(dots_on_line);
                 if prev_reasons.is_some() {
                     println!(
-                        "  {bookmark_name}: Merged externally ({}) \u{2014} moving on",
+                        "  {bookmark_name}: Merged externally ({}); moving on",
                         forge_kind.format_ref(pr_number)
                     );
                 } else {
@@ -254,6 +309,10 @@ fn run_merge_phase(
             } => {
                 if reasons.iter().any(|r| matches!(r, BlockReason::NoPr)) {
                     clear_dot_line(dots_on_line);
+                    // Match execute_merge_plan's UX: name the bookmark so
+                    // the user knows where the stack stopped.
+                    println!("\n  Blocked at '{bookmark_name}':");
+                    println!("    - {}", format_block_reason(&BlockReason::NoPr, forge_kind));
                     return Ok(MergePhaseOutcome {
                         merged,
                         skipped,
@@ -313,17 +372,20 @@ fn run_merge_phase(
         // Reconcile after advancing
         if seg_idx > prev_seg_idx && seg_idx < segments.len() {
             let fresh = reconcile_after_merge(
-                jj,
-                forge,
-                segments,
-                prev_seg_idx,
-                merge_plan,
-                forge_kind,
-                local_degraded,
-                local_warnings,
+                jj, forge, segments, prev_seg_idx, merge_plan, forge_kind, state,
             );
             if let Some(fresh_map) = fresh {
                 pr_map = fresh_map;
+            }
+
+            // Stop the merge phase if reconcile produced any failures.
+            // The outer watch loop reads `state.degraded()` and decides
+            // whether to print recovery hints, sleep, and retry. Watch
+            // is persistent: when the user fixes local state, the next
+            // iteration's reconcile gets a fresh chance and we resume.
+            if state.degraded() {
+                clear_dot_line(dots_on_line);
+                break;
             }
         }
     }
@@ -402,9 +464,22 @@ pub fn run_watch_loop(
     let mut merged: Vec<MergedPr> = Vec::new();
     let mut blocked_at: Option<BlockedPr> = None;
     let mut skipped_merged: Vec<SkippedMergedPr> = Vec::new();
-    let mut local_warnings: Vec<LocalDivergenceWarning> = Vec::new();
-    let mut local_degraded = false;
 
+    // Reconcile state is reset at the top of each outer-loop iteration so
+    // a transient sync failure on iteration N doesn't disable sync on
+    // iteration N+1. This is what lets watch resume cleanly after the
+    // user fixes local state.
+    let mut state = ReconcileState::default();
+    let mut prev_reconcile_block: Option<Vec<BlockReason>> = None;
+
+    // prev_reasons persists across outer iterations on purpose: report_status_changes
+    // suppresses reprints when the same segment is still blocked on the same
+    // reasons. The 60s heartbeat keeps the user informed by name+reason even
+    // when the first-time header doesn't reprint, so the leak across iterations
+    // (same reasons surfacing on a different segment) only delays a fresh
+    // header by at most one heartbeat. Resetting it would cause "Waiting for
+    // X: ..." to reprint every poll, which is what the deduplication exists
+    // to prevent in the first place.
     let mut prev_reasons: Option<Vec<BlockReason>> = None;
     let mut consecutive_errors: u32 = 0;
     let mut last_heartbeat = Instant::now();
@@ -452,7 +527,7 @@ pub fn run_watch_loop(
             "jjpr watch requires at least 1 approval to merge (required_approvals is 0).\n\
              \n\
              With 0 required approvals, watch would auto-merge PRs the moment CI \n\
-             passes — no human review. Set required_approvals = 1 in your config \n\
+             passes, with no human review. Set required_approvals = 1 in your config \n\
              or pass --required-approvals 1.\n\
              \n\
              If you need to merge without approvals, use `jjpr merge` instead."
@@ -470,15 +545,23 @@ pub fn run_watch_loop(
             break;
         }
 
+        // Reset reconcile state at the top of each iteration. If the user
+        // fixed local divergence since the last failure, this is what gives
+        // reconcile_after_merge a fresh chance.
+        state.reset();
+
         // --- Phase 1: Re-discover segments ---
         let segments = match rediscover_segments(jj, target_bookmark) {
-            Ok(segs) => segs,
+            Ok(segs) => {
+                consecutive_errors = 0;
+                segs
+            }
             Err(e) => {
                 consecutive_errors += 1;
                 let now = local_time_hhmm();
                 eprintln!("  [{now}] Graph scan error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}");
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    eprintln!("  Too many consecutive errors \u{2014} giving up.");
+                    eprintln!("  Too many consecutive errors; giving up.");
                     break;
                 }
                 if interruptible_sleep(poll_interval, &shutdown) {
@@ -526,6 +609,15 @@ pub fn run_watch_loop(
         }
 
         // --- Phase 1b: Check for conflicts ---
+        //
+        // This and the submit/refresh error paths below `continue` before
+        // reaching the classify_post_merge dispatch. That means: if the
+        // previous iteration was reconcile-degraded, the "Local sync
+        // recovered. Resuming." message is deferred until a later iteration
+        // makes it all the way through the merge phase. Intentional: a
+        // "recovered" announcement next to a fresh "waiting for conflict
+        // resolution" would be confusing. prev_reconcile_block stays Some
+        // and the eventual recovery still announces.
         let has_conflicts = segments.iter().any(|seg|
             seg.changes.iter().any(|c| c.conflict)
         );
@@ -615,8 +707,7 @@ pub fn run_watch_loop(
         let merge_outcome = run_merge_phase(
             jj, forge, &segments, &pr_map, merge_options, &merge_plan,
             forge_kind, &mut prev_reasons, &mut consecutive_errors,
-            &mut last_heartbeat, &mut local_degraded, &mut local_warnings,
-            &mut dots_on_line,
+            &mut last_heartbeat, &mut state, &mut dots_on_line,
         )?;
 
         let total_before = merged.len() + skipped_merged.len();
@@ -635,13 +726,52 @@ pub fn run_watch_loop(
             break;
         }
 
+        // Classify the post-merge state and dispatch. The classification
+        // is pure (see classify_post_merge); the side effects live here.
+        let action = classify_post_merge(
+            &state, &prev_reconcile_block,
+            last_heartbeat.elapsed(), HEARTBEAT_INTERVAL,
+        );
+        match action {
+            PostMergeAction::Continue => {}
+            PostMergeAction::Recovered => {
+                clear_dot_line(&mut dots_on_line);
+                println!("  Local sync recovered. Resuming.");
+                prev_reconcile_block = None;
+            }
+            PostMergeAction::NewFailure => {
+                clear_dot_line(&mut dots_on_line);
+                report_reconcile_failure(&state, &segments, &merged, &skipped_merged,
+                    stack_base, default_branch, forge_kind);
+                prev_reconcile_block = Some(state.block_reasons());
+                last_heartbeat = Instant::now();
+            }
+            PostMergeAction::Heartbeat => {
+                clear_dot_line(&mut dots_on_line);
+                let now = local_time_hhmm();
+                println!("  [{now}] Still waiting for local sync to recover");
+                last_heartbeat = Instant::now();
+            }
+            PostMergeAction::Dot => {
+                print!(".");
+                let _ = std::io::stdout().flush();
+                dots_on_line = true;
+            }
+        }
+        if action.waits() {
+            if interruptible_sleep(poll_interval, &shutdown) {
+                break;
+            }
+            continue;
+        }
+
         // No-progress safety valve: must run even when all_done fires, because
         // rediscover_segments might keep returning the same already-merged segments.
         if total_after == total_before && !created_or_promoted {
             no_progress_count += 1;
             if no_progress_count >= 5 {
                 clear_dot_line(&mut dots_on_line);
-                println!("\n  No progress after {no_progress_count} consecutive iterations \u{2014} exiting.");
+                println!("\n  No progress after {no_progress_count} consecutive iterations; exiting.");
                 println!("  Remaining bookmarks may need manual intervention.");
                 break;
             }
@@ -662,6 +792,12 @@ pub fn run_watch_loop(
         }
     }
 
+    // local_warnings reflects only the LAST iteration's warnings, because
+    // state.reset() at the top of each iteration wipes earlier ones. Earlier
+    // failures were already announced inline by report_reconcile_failure;
+    // the summary should not double-print them. If an exit condition fires
+    // outside of report_reconcile_failure (timeout, shutdown, no_progress)
+    // and state is currently degraded, those warnings surface in the summary.
     Ok(WatchResult {
         prs_created: all_created,
         prs_promoted: all_promoted,
@@ -669,9 +805,69 @@ pub fn run_watch_loop(
             merged,
             blocked_at,
             skipped_merged,
-            local_warnings,
+            local_warnings: state.warnings,
         },
     })
+}
+
+/// Print the warnings and recovery hints when reconcile fails inside a
+/// watch iteration. Mirrors `print_local_warnings` but tailored for the
+/// inline "watch is going to keep trying" context.
+fn report_reconcile_failure(
+    state: &ReconcileState,
+    segments: &[NarrowedSegment],
+    merged: &[MergedPr],
+    skipped: &[SkippedMergedPr],
+    stack_base: Option<&str>,
+    default_branch: &str,
+    fk: ForgeKind,
+) {
+    let merged_names: std::collections::HashSet<&str> = merged.iter()
+        .map(|m| m.bookmark_name.as_str())
+        .chain(skipped.iter().map(|s| s.bookmark_name.as_str()))
+        .collect();
+    let next_unmerged = segments.iter().find(|s| !merged_names.contains(s.bookmark.name.as_str()));
+
+    let pr_label = next_unmerged
+        .map(|s| format!(" '{}'", s.bookmark.name))
+        .unwrap_or_default();
+
+    let reasons = state.block_reasons();
+    println!();
+    println!("  Stopped before merging next PR{pr_label}:");
+    for reason in &reasons {
+        println!("    - {}", crate::merge::execute::format_block_reason(reason, fk));
+    }
+
+    if state.local_failed {
+        println!();
+        println!("  Local sync warnings:");
+        for w in state.warnings.iter().filter(|w| w.kind == DivergenceKind::Local) {
+            println!("    {}", w.message);
+        }
+        if let Some(seg) = next_unmerged {
+            println!();
+            println!("  To fix locally and continue (watch will resume on the next poll):");
+            let base = stack_base.unwrap_or(default_branch);
+            // rebase_root: oldest commit in the segment so multi-commit
+            // segments don't strand earlier commits.
+            println!("    jj git fetch && jj rebase -s {} -d {base}", rebase_root(seg));
+            println!("  Or to accept the forge state:");
+            println!("    jj git fetch");
+            println!("    jj bookmark set {0} -r {0}@origin", seg.bookmark.name);
+        }
+    }
+
+    if state.forge_failed {
+        println!();
+        println!("  Forge reconcile warnings:");
+        for w in state.warnings.iter().filter(|w| w.kind == DivergenceKind::Forge) {
+            println!("    {}", w.message);
+        }
+        println!();
+        println!("  Watch will retry on the next poll. Persistent failures may indicate");
+        println!("  a network or forge-permission issue.");
+    }
 }
 
 /// Re-discover segments by rebuilding the change graph.
@@ -1135,5 +1331,452 @@ mod tests {
         ).unwrap();
 
         assert!(result.is_none());
+    }
+
+    // --- run_merge_phase gate tests ---
+    //
+    // These cover the path where reconcile_after_merge produces warnings
+    // mid-iteration. The gate must break the inner loop without merging
+    // any subsequent PR, and the ReconcileState must reflect the failure
+    // so the outer watch loop can report it and retry on the next poll.
+
+    use crate::merge::execute::{
+        DivergenceKind, LocalDivergenceWarning, ReconcileState,
+    };
+    use crate::merge::plan::{MergeOptions, MergePlan};
+
+    /// Jj stub whose git_fetch fails. Other ops succeed so reconcile_local_state
+    /// reaches the fetch call before bailing.
+    struct FailFetchJj;
+    impl Jj for FailFetchJj {
+        fn git_fetch(&self) -> Result<()> {
+            anyhow::bail!("ssh: connection refused")
+        }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+        fn get_default_branch(&self) -> Result<String> { Ok("main".into()) }
+        fn push_bookmark(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".into()) }
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> { Ok(vec!["c".into()]) }
+        fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
+    }
+
+    /// Forge stub that records every merge_pr call and serves the given
+    /// PR map for evaluate_segment.
+    struct GateForge {
+        prs: HashMap<String, PullRequest>,
+        merge_calls: std::sync::Mutex<Vec<u64>>,
+    }
+    impl GateForge {
+        fn new(prs: Vec<PullRequest>) -> Self {
+            let map = prs.into_iter().map(|p| (p.head.ref_name.clone(), p)).collect();
+            Self { prs: map, merge_calls: std::sync::Mutex::new(vec![]) }
+        }
+        fn merge_calls(&self) -> Vec<u64> {
+            self.merge_calls.lock().expect("poisoned").clone()
+        }
+    }
+    impl Forge for GateForge {
+        fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+            Ok(self.prs.values().cloned().collect())
+        }
+        fn merge_pr(&self, _: &str, _: &str, n: u64, _: MergeMethod) -> Result<()> {
+            self.merge_calls.lock().expect("poisoned").push(n);
+            Ok(())
+        }
+        fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
+            Ok(PrMergeability { mergeable: Some(true), mergeable_state: "clean".into() })
+        }
+        fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+            Ok(ChecksStatus::Pass)
+        }
+        fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
+            Ok(ReviewSummary { approved_count: 1, changes_requested: false })
+        }
+        fn find_merged_pr(&self, _: &str, _: &str, head: &str) -> Result<Option<PullRequest>> {
+            // For tests where the bottom is "AlreadyMerged", caller arranges
+            // for the bookmark to be in `prs` but with merged state simulated
+            // via missing-from-list_open_prs. Simplify: never report merged.
+            let _ = head;
+            Ok(None)
+        }
+        fn create_pr(&self, _: &str, _: &str, _: &str, _: &str, _: &str, _: &str, _: bool) -> Result<PullRequest> { unimplemented!() }
+        fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> { Ok(()) }
+        fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> { Ok(()) }
+        fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
+        fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> { unimplemented!() }
+        fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn get_authenticated_user(&self) -> Result<String> { Ok("test".into()) }
+        fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
+            Ok(PrState { merged: false, state: "open".into() })
+        }
+    }
+
+    fn gate_test_pr(name: &str, number: u64) -> PullRequest {
+        PullRequest {
+            number,
+            html_url: format!("https://github.com/o/r/pull/{number}"),
+            title: name.into(),
+            body: None,
+            base: PullRequestRef { ref_name: "main".into(), label: String::new(), sha: String::new() },
+            head: PullRequestRef { ref_name: name.into(), label: String::new(), sha: format!("sha_{name}") },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec![],
+        }
+    }
+
+    fn gate_test_segment(name: &str) -> NarrowedSegment {
+        NarrowedSegment {
+            bookmark: Bookmark {
+                name: name.into(),
+                commit_id: format!("c_{name}"),
+                change_id: format!("ch_{name}"),
+                has_remote: true,
+                is_synced: true,
+            },
+            changes: vec![],
+            merge_source_names: vec![],
+        }
+    }
+
+    fn gate_test_plan() -> MergePlan {
+        MergePlan {
+            actions: vec![],
+            repo_info: RepoInfo { owner: "o".into(), repo: "r".into() },
+            forge_kind: ForgeKind::GitHub,
+            options: MergeOptions {
+                merge_method: MergeMethod::Squash,
+                required_approvals: 1,
+                require_ci_pass: true,
+                reconcile_strategy: crate::config::ReconcileStrategy::Rebase,
+                ready: false,
+            },
+            default_branch: "main".into(),
+            remote_name: "origin".into(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        }
+    }
+
+    #[test]
+    fn run_merge_phase_gates_after_failed_reconcile() {
+        // Setup: 2-stack, both mergeable. After auth merges, the next
+        // reconcile fails (FailFetchJj). The gate must break the inner
+        // loop without calling merge_pr on profile, and ReconcileState
+        // must reflect the failure.
+        let forge = GateForge::new(vec![
+            gate_test_pr("auth", 1),
+            gate_test_pr("profile", 2),
+        ]);
+        let segments = vec![gate_test_segment("auth"), gate_test_segment("profile")];
+        let plan = gate_test_plan();
+        let mut state = ReconcileState::default();
+        let mut prev_reasons: Option<Vec<BlockReason>> = None;
+        let mut consecutive_errors = 0u32;
+        let mut last_heartbeat = Instant::now();
+        let mut dots = false;
+
+        let outcome = run_merge_phase(
+            &FailFetchJj, &forge, &segments, &forge.prs, &plan.options,
+            &plan, ForgeKind::GitHub,
+            &mut prev_reasons, &mut consecutive_errors,
+            &mut last_heartbeat, &mut state, &mut dots,
+        ).expect("run_merge_phase should not error");
+
+        // auth merged once; profile must NOT have been merged.
+        assert_eq!(forge.merge_calls(), vec![1],
+            "only auth should merge before the gate fires");
+        assert_eq!(outcome.merged.len(), 1);
+        assert_eq!(outcome.merged[0].pr_number, 1);
+
+        // Gate uses ReconcileState; outer watch loop reads state.degraded()
+        // to decide whether to retry. blocked stays None so the outer loop
+        // iterates rather than exits.
+        assert!(outcome.blocked.is_none(), "gate should not return Blocked; G semantics");
+        assert!(state.degraded(), "reconcile failure must mark state as degraded");
+        assert!(state.local_failed, "fetch failure is a local-side failure");
+        assert!(!state.forge_failed, "forge side did not fail in this scenario");
+        assert!(state.warnings.iter().any(|w| w.kind == DivergenceKind::Local));
+    }
+
+    /// Forge whose list_open_prs fails. Inside run_merge_phase, the only
+    /// list_open_prs call is from reconcile_forge_state, so this triggers
+    /// a forge-side reconcile failure. evaluate_segment uses the pr_map
+    /// passed in, not list_open_prs, so the first segment's evaluation
+    /// still succeeds.
+    struct ListFailForge {
+        prs: HashMap<String, PullRequest>,
+        merge_calls: std::sync::Mutex<Vec<u64>>,
+    }
+    impl ListFailForge {
+        fn new(prs: Vec<PullRequest>) -> Self {
+            let map = prs.into_iter().map(|p| (p.head.ref_name.clone(), p)).collect();
+            Self { prs: map, merge_calls: std::sync::Mutex::new(vec![]) }
+        }
+        fn merge_calls(&self) -> Vec<u64> {
+            self.merge_calls.lock().expect("poisoned").clone()
+        }
+    }
+    impl Forge for ListFailForge {
+        fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+            anyhow::bail!("502 bad gateway")
+        }
+        fn merge_pr(&self, _: &str, _: &str, n: u64, _: MergeMethod) -> Result<()> {
+            self.merge_calls.lock().expect("poisoned").push(n);
+            Ok(())
+        }
+        fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
+            Ok(PrMergeability { mergeable: Some(true), mergeable_state: "clean".into() })
+        }
+        fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+            Ok(ChecksStatus::Pass)
+        }
+        fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
+            Ok(ReviewSummary { approved_count: 1, changes_requested: false })
+        }
+        fn find_merged_pr(&self, _: &str, _: &str, _: &str) -> Result<Option<PullRequest>> { Ok(None) }
+        fn create_pr(&self, _: &str, _: &str, _: &str, _: &str, _: &str, _: &str, _: bool) -> Result<PullRequest> { unimplemented!() }
+        fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> { Ok(()) }
+        fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> { Ok(()) }
+        fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
+        fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> { unimplemented!() }
+        fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn get_authenticated_user(&self) -> Result<String> { Ok("test".into()) }
+        fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
+            Ok(PrState { merged: false, state: "open".into() })
+        }
+    }
+
+    /// Healthy Jj that lets the local-state side of reconcile pass cleanly.
+    /// Pairs with ListFailForge to isolate the forge-side failure path.
+    struct HealthyJj;
+    impl Jj for HealthyJj {
+        fn git_fetch(&self) -> Result<()> { Ok(()) }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
+        fn get_default_branch(&self) -> Result<String> { Ok("main".into()) }
+        fn push_bookmark(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".into()) }
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> { Ok(vec!["c".into()]) }
+        fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
+    }
+
+    // --- classify_post_merge tests (the persistent-watch state machine) ---
+    //
+    // These cover the exact transition logic in run_watch_loop's outer
+    // loop. classify_post_merge is pure; the loop dispatches its result
+    // to side effects. By testing the classifier exhaustively here, we
+    // lock the persistent-retry behavior promised by jjpr watch:
+    //
+    //   - first time degraded → NewFailure (loud)
+    //   - same failure persists → Heartbeat or Dot (quiet)
+    //   - state recovers → Recovered (announce)
+    //   - clean steady state → Continue (silent)
+
+    fn empty_state() -> ReconcileState {
+        ReconcileState::default()
+    }
+
+    fn local_failure_state() -> ReconcileState {
+        ReconcileState {
+            local_failed: true,
+            forge_failed: false,
+            warnings: vec![LocalDivergenceWarning {
+                kind: DivergenceKind::Local,
+                message: "fetch failed".into(),
+            }],
+        }
+    }
+
+    fn forge_failure_state() -> ReconcileState {
+        ReconcileState {
+            local_failed: false,
+            forge_failed: true,
+            warnings: vec![LocalDivergenceWarning {
+                kind: DivergenceKind::Forge,
+                message: "list_open_prs failed".into(),
+            }],
+        }
+    }
+
+    const HEARTBEAT: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn classify_clean_state_no_prev_is_continue() {
+        let action = classify_post_merge(
+            &empty_state(), &None, Duration::ZERO, HEARTBEAT,
+        );
+        assert_eq!(action, PostMergeAction::Continue);
+        assert!(!action.waits());
+    }
+
+    #[test]
+    fn classify_clean_state_after_failure_is_recovered() {
+        // Iter N degraded → set prev. Iter N+1 clean → must announce recovery.
+        let prev = Some(vec![BlockReason::LocalSyncFailed]);
+        let action = classify_post_merge(&empty_state(), &prev, Duration::ZERO, HEARTBEAT);
+        assert_eq!(action, PostMergeAction::Recovered);
+        assert!(!action.waits());
+    }
+
+    #[test]
+    fn classify_first_degraded_is_new_failure() {
+        let action = classify_post_merge(
+            &local_failure_state(), &None, Duration::ZERO, HEARTBEAT,
+        );
+        assert_eq!(action, PostMergeAction::NewFailure);
+        assert!(action.waits());
+    }
+
+    #[test]
+    fn classify_persistent_same_failure_before_heartbeat_is_dot() {
+        let prev = Some(vec![BlockReason::LocalSyncFailed]);
+        let action = classify_post_merge(
+            &local_failure_state(), &prev, Duration::from_secs(10), HEARTBEAT,
+        );
+        assert_eq!(action, PostMergeAction::Dot);
+        assert!(action.waits());
+    }
+
+    #[test]
+    fn classify_persistent_same_failure_after_heartbeat_is_heartbeat() {
+        let prev = Some(vec![BlockReason::LocalSyncFailed]);
+        let action = classify_post_merge(
+            &local_failure_state(), &prev, Duration::from_secs(120), HEARTBEAT,
+        );
+        assert_eq!(action, PostMergeAction::Heartbeat);
+        assert!(action.waits());
+    }
+
+    #[test]
+    fn classify_failure_kind_change_is_new_failure() {
+        // Iter N had local failure; iter N+1 has a forge failure too.
+        // That's a different reason set, so we must reprint full hints.
+        let prev = Some(vec![BlockReason::LocalSyncFailed]);
+        let mixed = ReconcileState {
+            local_failed: true,
+            forge_failed: true,
+            warnings: vec![],
+        };
+        let action = classify_post_merge(&mixed, &prev, Duration::ZERO, HEARTBEAT);
+        assert_eq!(action, PostMergeAction::NewFailure);
+    }
+
+    #[test]
+    fn classify_local_to_forge_only_is_new_failure() {
+        let prev = Some(vec![BlockReason::LocalSyncFailed]);
+        let action = classify_post_merge(
+            &forge_failure_state(), &prev, Duration::ZERO, HEARTBEAT,
+        );
+        assert_eq!(action, PostMergeAction::NewFailure);
+    }
+
+    /// B's load-bearing scenario: degrade, persist, recover, succeed.
+    /// Drives the classifier through the same sequence the live watch
+    /// loop would walk, asserting each transition. If the gate ever
+    /// silently stops firing or recovery silently stops printing, this
+    /// test catches it deterministically without any forge or jj stubs.
+    #[test]
+    fn classifier_walks_full_recovery_sequence() {
+        let mut prev: Option<Vec<BlockReason>> = None;
+
+        // Iter 1: first degraded poll → NewFailure (full recovery hints).
+        let degraded = local_failure_state();
+        let a1 = classify_post_merge(&degraded, &prev, Duration::ZERO, HEARTBEAT);
+        assert_eq!(a1, PostMergeAction::NewFailure, "iter 1 must announce");
+        prev = Some(degraded.block_reasons());
+
+        // Iter 2: same failure, only 5s elapsed → Dot.
+        let a2 = classify_post_merge(&degraded, &prev, Duration::from_secs(5), HEARTBEAT);
+        assert_eq!(a2, PostMergeAction::Dot, "iter 2 within heartbeat window must be quiet");
+        // prev unchanged
+
+        // Iter 3: same failure, 65s elapsed → Heartbeat.
+        let a3 = classify_post_merge(&degraded, &prev, Duration::from_secs(65), HEARTBEAT);
+        assert_eq!(a3, PostMergeAction::Heartbeat, "iter 3 past heartbeat must surface");
+        // loop resets last_heartbeat when heartbeat fires
+
+        // Iter 4: user fixed it → state clean → Recovered.
+        let clean = empty_state();
+        let a4 = classify_post_merge(&clean, &prev, Duration::ZERO, HEARTBEAT);
+        assert_eq!(a4, PostMergeAction::Recovered, "iter 4 must announce recovery");
+        prev = None;
+
+        // Iter 5: still clean, prev cleared → Continue.
+        let a5 = classify_post_merge(&clean, &prev, Duration::ZERO, HEARTBEAT);
+        assert_eq!(a5, PostMergeAction::Continue, "iter 5 returns to silent steady-state");
+
+        // Iter 6: a fresh failure (different kind this time) → NewFailure.
+        // Verifies we re-announce instead of staying silent.
+        let new_failure = forge_failure_state();
+        let a6 = classify_post_merge(&new_failure, &prev, Duration::ZERO, HEARTBEAT);
+        assert_eq!(a6, PostMergeAction::NewFailure, "fresh failure must reannounce");
+    }
+
+    #[test]
+    fn classifier_does_not_recover_when_already_clean() {
+        // prev=None, state clean: Continue (no spurious "recovered" message).
+        let a = classify_post_merge(&empty_state(), &None, Duration::ZERO, HEARTBEAT);
+        assert_eq!(a, PostMergeAction::Continue);
+    }
+
+    #[test]
+    fn classifier_treats_zero_heartbeat_correctly() {
+        // Edge case: heartbeat_interval = 0. Any persistent failure should
+        // print a heartbeat every iteration. Important if we ever expose
+        // this via a config flag.
+        let prev = Some(vec![BlockReason::LocalSyncFailed]);
+        let a = classify_post_merge(
+            &local_failure_state(), &prev, Duration::ZERO, Duration::ZERO,
+        );
+        assert_eq!(a, PostMergeAction::Heartbeat);
+    }
+
+    #[test]
+    fn run_merge_phase_gates_after_forge_reconcile_failure() {
+        // Mirrors the local-failure test but on the forge side: local
+        // reconcile passes cleanly, then forge-state reconcile fails on
+        // list_open_prs. The gate must still fire and the state must
+        // tag warnings as Forge-kind so users get the right recovery hint.
+        let forge = ListFailForge::new(vec![
+            gate_test_pr("auth", 1),
+            gate_test_pr("profile", 2),
+        ]);
+        let segments = vec![gate_test_segment("auth"), gate_test_segment("profile")];
+        let plan = gate_test_plan();
+        let mut state = ReconcileState::default();
+        let mut prev_reasons: Option<Vec<BlockReason>> = None;
+        let mut consecutive_errors = 0u32;
+        let mut last_heartbeat = Instant::now();
+        let mut dots = false;
+
+        let outcome = run_merge_phase(
+            &HealthyJj, &forge, &segments, &forge.prs, &plan.options,
+            &plan, ForgeKind::GitHub,
+            &mut prev_reasons, &mut consecutive_errors,
+            &mut last_heartbeat, &mut state, &mut dots,
+        ).expect("run_merge_phase should not error");
+
+        assert_eq!(forge.merge_calls(), vec![1], "only auth should merge");
+        assert!(outcome.blocked.is_none(), "gate keeps watch iterating");
+        assert!(state.degraded());
+        assert!(!state.local_failed, "local side was healthy");
+        assert!(state.forge_failed, "list_open_prs failure must set forge_failed");
+        assert!(
+            state.warnings.iter().any(|w| w.kind == DivergenceKind::Forge),
+            "must record a Forge-kind warning"
+        );
     }
 }

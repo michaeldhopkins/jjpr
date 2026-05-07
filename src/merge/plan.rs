@@ -17,6 +17,18 @@ pub enum BlockReason {
     ChangesRequested,
     Conflicted,
     MergeabilityUnknown,
+    /// Local repo state diverged from the forge during the previous
+    /// reconcile: failed fetch, rebase, or push, or a divergent change
+    /// ID. Continuing risks merging the next PR with a bloated diff
+    /// because the local stack was never rebased onto the new base.
+    /// Recovery is local: `jj git fetch && jj rebase ...`, then re-run.
+    LocalSyncFailed,
+    /// Forge-side reconcile failed: list_open_prs, update_pr_base, or
+    /// stack-comment update returned an error. The forge state may be
+    /// stale or incomplete, so we can't safely evaluate the next PR.
+    /// Recovery is usually retry; persistent failures need network or
+    /// permission investigation.
+    ForgeReconcileFailed,
 }
 
 impl BlockReason {

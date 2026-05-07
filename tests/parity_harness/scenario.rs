@@ -55,6 +55,16 @@ pub enum SetupStep {
     /// SSH-backed git fetch/push without touching the remote URL.
     /// The forge API path is unaffected (it uses GITHUB_TOKEN over HTTPS).
     SetGitConfig { key: String, value: String },
+    /// Poll the forge until the named PR's `mergeable` field is no longer
+    /// UNKNOWN. Use after operations that invalidate forge mergeability
+    /// (admin merge of bottom, base auto-retarget) so the run's evaluate
+    /// step doesn't transiently report MergeabilityUnknown.
+    /// Defaults: timeout 60s, poll every 2s.
+    WaitForMergeable {
+        bookmark: String,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]

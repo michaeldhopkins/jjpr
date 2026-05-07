@@ -50,7 +50,7 @@ are grouped into the upper bookmark's PR. If you have 6 commits but only \
 one bookmark, you get one PR containing all 6 commits.
 
 When no bookmark is specified, jjpr infers the target from your working \
-copy — it finds which stack overlaps with `trunk()..@` and submits up to \
+copy: it finds which stack overlaps with `trunk()..@` and submits up to \
 the topmost bookmark. Your working copy must be at or below a bookmarked \
 commit (an empty commit above the stack won't match any bookmark).
 
@@ -60,7 +60,7 @@ Each PR receives a stack navigation comment showing its position:
     1. `profile` <-- this PR
     2. `auth`
 
-Submit is idempotent — run it after rebasing, editing commits, or \
+Submit is idempotent. Run it after rebasing, editing commits, or \
 restacking to push updates, fix PR base branches, and sync descriptions.
 
 Foreign base detection: if your stack builds on a coworker's remote \
@@ -74,7 +74,7 @@ Examples:
     jjpr submit --reviewer alice,bob  # request reviewers on all PRs
     jjpr submit --dry-run    # preview what would happen
 
-Reviewer requests are idempotent — re-running with --reviewer only \
+Reviewer requests are idempotent. Re-running with --reviewer only \
 affects PRs where the reviewer isn't already requested.")]
     Submit {
         /// Bookmark to submit (inferred from working copy if omitted)
@@ -144,7 +144,7 @@ Before merging each PR, jjpr checks:
   - No changes requested
   - No merge conflicts
 
-Idempotent — re-run after CI passes or reviews are approved to continue.
+Idempotent. Re-run after CI passes or reviews are approved to continue.
 
 Examples:
     jjpr merge                        # merge from the bottom up
@@ -277,8 +277,8 @@ Manage jjpr configuration.
 jjpr uses an optional TOML config file for merge settings. Global config \
 lives at ~/.config/jjpr/config.toml (or $XDG_CONFIG_HOME/jjpr/config.toml).
 
-A repo-local config at .jj/jjpr.toml overrides global settings — useful \
-for setting forge type and token env var for self-hosted instances.
+A repo-local config at .jj/jjpr.toml overrides global settings, which \
+is useful for setting forge type and token env var for self-hosted instances.
 
 Use `jjpr config init` to create the global config with defaults, or \
 `jjpr config init --repo` for repo-local config. CLI flags always override \
