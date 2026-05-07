@@ -64,6 +64,30 @@ pub fn run_setup(ctx: &ParityContext, scenario: &Scenario) -> Result<()> {
                 // invocations see the up-to-date forge state.
                 ctx.run_jj(&["git", "fetch"]);
             }
+            SetupStep::SetRemoteUrl { remote, url } => {
+                let status = Command::new("git")
+                    .args(["remote", "set-url", remote, url])
+                    .current_dir(&ctx.repo_path)
+                    .status()
+                    .expect("git remote set-url");
+                if !status.success() {
+                    return Err(anyhow!(
+                        "setup step #{i} (set_remote_url {remote} -> {url}) failed"
+                    ));
+                }
+            }
+            SetupStep::SetGitConfig { key, value } => {
+                let status = Command::new("git")
+                    .args(["config", "--local", key, value])
+                    .current_dir(&ctx.repo_path)
+                    .status()
+                    .expect("git config --local");
+                if !status.success() {
+                    return Err(anyhow!(
+                        "setup step #{i} (set_git_config {key}={value}) failed"
+                    ));
+                }
+            }
         }
     }
     Ok(())

@@ -56,6 +56,22 @@ fn check_stderr(expect: &Expectations, output: &RunOutput) -> Result<()> {
             );
         }
     }
+    for needle in &expect.stdout_contains {
+        if !output.stdout.contains(needle) {
+            bail!(
+                "expected stdout to contain '{needle}'\nstdout was:\n{}",
+                output.stdout
+            );
+        }
+    }
+    for forbidden in &expect.stdout_not_contains {
+        if output.stdout.contains(forbidden) {
+            bail!(
+                "expected stdout NOT to contain '{forbidden}'\nstdout was:\n{}",
+                output.stdout
+            );
+        }
+    }
     Ok(())
 }
 

@@ -1,0 +1,77 @@
+name = "merge-gates-on-local-degraded"
+description = """
+Regression guard for the sticky local_degraded bug.
+
+When reconcile_local_state fails (here: jj git fetch fails because we
+re-pointed origin to an unreachable URL), local_degraded becomes true.
+Today the merge loop happily proceeds to merge the next PR through the
+forge API alone, even though the local stack was never rebased onto the
+new base. That risks merging a bloated diff that re-applies the previous
+PR's content.
+
+The fix is to gate further merges when the current reconcile flips
+local_degraded from false to true. After the fix, profile must remain
+open with the next-PR base correctly retargeted.
+
+This scenario will FAIL until the fix lands. That's intentional — the
+failing test is what proves we caught the bug.
+
+Setup:
+  1. submit creates auth and profile PRs while origin is healthy.
+  2. external_admin_merge --squash auth — GitHub also auto-deletes the
+     auth branch and auto-retargets profile's base to main.
+  3. set_remote_url repoints origin to an unreachable host so the next
+     `jj git fetch` errors out cleanly. The forge API path is unaffected
+     because it uses GITHUB_TOKEN, not git.
+"""
+
+[[stack]]
+bookmark = "auth"
+file = "auth.rs"
+content = "// auth module\n"
+message = "Add authentication"
+
+[[stack]]
+bookmark = "profile"
+file = "profile.rs"
+content = "// profile module\n"
+message = "Add user profile"
+
+[[setup]]
+type = "submit"
+
+[[setup]]
+type = "external_admin_merge"
+bookmark = "auth"
+method = "squash"
+
+[[setup]]
+type = "set_git_config"
+key = "core.sshCommand"
+value = "/bin/false"
+
+# --no-fetch skips the top-level resolve_stack fetch so we don't trip on
+# core.sshCommand before reaching reconcile_local_state, which is the
+# call site whose failure exposes the sticky-degraded bug. forge API calls
+# go over HTTPS via GITHUB_TOKEN and stay healthy.
+[run]
+command = "merge"
+extra_args = ["--no-fetch", "--no-ci-check", "--required-approvals", "0"]
+
+[expect]
+exit_status = "success"
+stdout_contains = [
+    "Note: local state is out of sync with the forge",
+    "Failed to fetch remotes",
+]
+
+[[expect.pr]]
+bookmark = "auth"
+state = "merged"
+
+# The fix gates further merges when local_degraded just flipped on, so
+# profile must remain open and unaffected by a forge-API-only merge.
+[[expect.pr]]
+bookmark = "profile"
+state = "open"
+base = "main"
