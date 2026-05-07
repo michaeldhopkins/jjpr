@@ -38,6 +38,9 @@ is now.
 | `--merge-method <method>` | `squash`, `merge`, or `rebase` (overrides config) |
 | `--required-approvals <N>` | Override the config's approval threshold |
 | `--reconcile-strategy <strategy>` | `rebase` or `merge` for post-merge stack syncing |
+| `--reviewer <users>` | Comma-separated reviewers; requested per scope each iteration |
+| `--reviewer-scope <scope>` | `bottom` (default), `leaf`, or `all` |
+| `--ready` | Create new PRs as ready instead of as drafts (skips the promote phase) |
 | `--base <branch>` | Override the auto-detected stack base |
 | `--remote <name>` | Override the git remote name |
 | `--no-fetch` | Skip `git fetch` before starting |
@@ -87,3 +90,21 @@ Waiting for a bookmark in the working copy's ancestry...
 
 Run `jj bookmark set <name>` in another shell and the loop picks it up
 within a few seconds.
+
+## Reviewers and scope
+
+`--reviewer alice,bob` requests reviewers each iteration. Default scope
+is `bottom` — the request lands on the lowest live PR. As that PR merges,
+the next iteration's bottom (which is now what was middle) gets the
+request. This means a reviewer is always being asked to review the PR
+that will land next, not the entire stack at once.
+
+`--reviewer-scope leaf` requests on the topmost live PR; `all` requests
+on every PR (the pre-0.21 default).
+
+## Ready vs. draft
+
+By default, watch creates new PRs as drafts and **promotes** them to
+ready when their CI checks pass. This gives you a "hold while CI runs"
+window. Pass `--ready` to skip both: new PRs are created as ready and
+the promote phase is a no-op.

@@ -116,6 +116,36 @@ impl std::fmt::Display for MergeMethod {
     }
 }
 
+/// Which PRs in the stack should receive reviewer requests.
+///
+/// `Bottom` (default): only the bottommost LIVE PR — i.e., the lowest
+/// segment that hasn't been merged yet. As the stack drains via merges,
+/// the next iteration's bottom is whichever PR is now lowest. This is
+/// the natural workflow: ask for review where it's actually needed next.
+///
+/// `Leaf`: only the topmost PR.
+///
+/// `All`: every PR in the stack. Old jjpr default; kept for users who
+/// rely on it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewerScope {
+    #[default]
+    Bottom,
+    Leaf,
+    All,
+}
+
+impl std::fmt::Display for ReviewerScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bottom => write!(f, "bottom"),
+            Self::Leaf => write!(f, "leaf"),
+            Self::All => write!(f, "all"),
+        }
+    }
+}
+
 /// Status of CI checks on a PR's head ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChecksStatus {

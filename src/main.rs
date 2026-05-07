@@ -32,19 +32,24 @@ fn main() -> Result<()> {
         Some(Commands::Submit {
             bookmark,
             reviewer,
+            reviewer_scope,
             remote,
             draft,
             ready,
             base,
         }) => {
+            // CLI `conflicts_with` makes (draft, ready) = (true, true)
+            // unreachable, so the three plan::DraftMode states cover
+            // every input combination.
             let draft_mode = match (draft, ready) {
-                (true, _) => DraftMode::Draft,
-                (_, true) => DraftMode::Ready,
-                _ => DraftMode::Normal,
+                (true, _) => plan::DraftMode::NewAsDraft,
+                (_, true) => plan::DraftMode::MarkExistingReady,
+                _ => plan::DraftMode::Default,
             };
             cmd_submit(SubmitOptions {
                 bookmark: bookmark.as_deref(),
                 reviewers: &reviewer,
+                reviewer_scope,
                 preferred_remote: remote.as_deref(),
                 dry_run: cli.dry_run,
                 no_fetch: cli.no_fetch,
@@ -87,6 +92,9 @@ fn main() -> Result<()> {
         }
         Some(Commands::Watch {
             bookmark,
+            reviewer,
+            reviewer_scope,
+            ready,
             remote,
             base,
             merge_method,
@@ -95,18 +103,32 @@ fn main() -> Result<()> {
             reconcile_strategy,
             timeout,
         }) => {
+            // --dry-run is a top-level flag; watch is an infinite loop
+            // with long-running side effects, so dry-running it has no
+            // sensible meaning. Reject explicitly rather than silently
+            // ignoring.
+            if cli.dry_run {
+                anyhow::bail!(
+                    "--dry-run is not supported with `jjpr watch` (the loop \
+                     is always live). Use `jjpr submit --dry-run` for a \
+                     one-shot preview."
+                );
+            }
             let ci_override = if no_ci_check { Some(false) } else { None };
-            cmd_watch(
-                bookmark.as_deref(),
-                remote.as_deref(),
-                base.as_deref(),
+            cmd_watch(WatchArgs {
+                bookmark: bookmark.as_deref(),
+                preferred_remote: remote.as_deref(),
+                base_override: base.as_deref(),
                 merge_method,
                 required_approvals,
-                ci_override,
+                ci_pass_override: ci_override,
                 reconcile_strategy,
                 timeout,
-                cli.no_fetch,
-            )
+                no_fetch: cli.no_fetch,
+                reviewers: &reviewer,
+                reviewer_scope,
+                ready,
+            })
         }
         Some(Commands::Auth { command }) => {
             match command {
@@ -228,19 +250,14 @@ fn resolve_stack(
     }))
 }
 
-enum DraftMode {
-    Normal,
-    Draft,
-    Ready,
-}
-
 struct SubmitOptions<'a> {
     bookmark: Option<&'a str>,
     reviewers: &'a [String],
+    reviewer_scope: jjpr::forge::types::ReviewerScope,
     preferred_remote: Option<&'a str>,
     dry_run: bool,
     no_fetch: bool,
-    draft_mode: DraftMode,
+    draft_mode: plan::DraftMode,
     base_override: Option<&'a str>,
 }
 
@@ -273,18 +290,19 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         stack.forge_kind,
         &stack.default_branch,
         &plan::SubmitOptions {
-            draft: matches!(opts.draft_mode, DraftMode::Draft),
-            ready: matches!(opts.draft_mode, DraftMode::Ready),
+            draft_mode: opts.draft_mode,
             reviewers: opts.reviewers,
+            reviewer_scope: opts.reviewer_scope,
             stack_base: stack_base_override,
             stack_nav: stack.config.stack_nav,
+            dry_run: opts.dry_run,
         },
     )?;
 
     if opts.bookmark.is_some() {
         println!("Submitting stack for '{}'...\n", stack.target_bookmark);
     }
-    execute::execute_submission_plan(&stack.jj, stack.forge.as_ref(), &submission_plan, opts.reviewers, opts.dry_run)?;
+    execute::execute_submission_plan(&stack.jj, stack.forge.as_ref(), &submission_plan)?;
     println!("\nDone.");
 
     Ok(())
@@ -565,17 +583,20 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
             anyhow::bail!("--dry-run is not supported with --watch");
         }
         eprintln!("hint: `jjpr merge --watch` is deprecated. Use `jjpr watch` instead.\n");
-        return cmd_watch(
-            args.bookmark,
-            args.preferred_remote,
-            args.base_override,
-            args.merge_method,
-            args.required_approvals,
-            args.ci_pass_override,
-            args.reconcile_strategy,
-            args.timeout,
+        return cmd_watch(WatchArgs {
+            bookmark: args.bookmark,
+            preferred_remote: args.preferred_remote,
+            base_override: args.base_override,
+            merge_method: args.merge_method,
+            required_approvals: args.required_approvals,
+            ci_pass_override: args.ci_pass_override,
+            reconcile_strategy: args.reconcile_strategy,
+            timeout: args.timeout,
             no_fetch,
-        );
+            reviewers: &[],
+            reviewer_scope: jjpr::forge::types::ReviewerScope::default(),
+            ready: false,
+        });
     }
 
     if args.bookmark.is_some() {
@@ -590,18 +611,36 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     print_local_warnings(&result, &stack.segments, stack_base, &stack.default_branch)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn cmd_watch(
-    bookmark: Option<&str>,
-    preferred_remote: Option<&str>,
-    base_override: Option<&str>,
+struct WatchArgs<'a> {
+    bookmark: Option<&'a str>,
+    preferred_remote: Option<&'a str>,
+    base_override: Option<&'a str>,
     merge_method: Option<MergeMethod>,
     required_approvals: Option<u32>,
     ci_pass_override: Option<bool>,
     reconcile_strategy: Option<config::ReconcileStrategy>,
     timeout: Option<u64>,
     no_fetch: bool,
-) -> Result<()> {
+    reviewers: &'a [String],
+    reviewer_scope: jjpr::forge::types::ReviewerScope,
+    ready: bool,
+}
+
+fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
+    let WatchArgs {
+        bookmark,
+        preferred_remote,
+        base_override,
+        merge_method,
+        required_approvals,
+        ci_pass_override,
+        reconcile_strategy,
+        timeout,
+        no_fetch,
+        reviewers,
+        reviewer_scope,
+        ready,
+    } = args;
     // Set up Ctrl+C handler once, shared between bookmark wait and watch loop
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = shutdown.clone();
@@ -659,6 +698,9 @@ fn cmd_watch(
 
     println!("Watching stack up to '{}'...\n", stack.target_bookmark);
 
+    let submit_opts =
+        jjpr::watch::WatchSubmitOptions::from_cli(reviewers.to_vec(), reviewer_scope, ready);
+
     let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
     let result = jjpr::watch::run_watch_loop(
         &stack.jj,
@@ -668,6 +710,7 @@ fn cmd_watch(
         &stack.remote_name,
         &stack.default_branch,
         &merge_options,
+        &submit_opts,
         &stack.target_bookmark,
         stack_base_str.as_deref(),
         stack.config.stack_nav,

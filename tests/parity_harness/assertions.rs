@@ -14,7 +14,7 @@ pub fn check(
     output: &RunOutput,
 ) -> Result<()> {
     check_exit(&scenario.expect, output)?;
-    check_stderr(&scenario.expect, output)?;
+    check_stderr(ctx, &scenario.expect, output)?;
     for pr_expect in &scenario.expect.prs {
         check_pr(ctx, pr_expect)?;
     }
@@ -39,35 +39,39 @@ fn check_exit(expect: &Expectations, output: &RunOutput) -> Result<()> {
     }
 }
 
-fn check_stderr(expect: &Expectations, output: &RunOutput) -> Result<()> {
+fn check_stderr(ctx: &ParityContext, expect: &Expectations, output: &RunOutput) -> Result<()> {
     for needle in &expect.stderr_contains {
-        if !output.stderr.contains(needle) {
+        let n = resolve_bookmark_substring(ctx, needle);
+        if !output.stderr.contains(&n) {
             bail!(
-                "expected stderr to contain '{needle}'\nstderr was:\n{}",
+                "expected stderr to contain '{n}'\nstderr was:\n{}",
                 output.stderr
             );
         }
     }
     for forbidden in &expect.stderr_not_contains {
-        if output.stderr.contains(forbidden) {
+        let f = resolve_bookmark_substring(ctx, forbidden);
+        if output.stderr.contains(&f) {
             bail!(
-                "expected stderr NOT to contain '{forbidden}'\nstderr was:\n{}",
+                "expected stderr NOT to contain '{f}'\nstderr was:\n{}",
                 output.stderr
             );
         }
     }
     for needle in &expect.stdout_contains {
-        if !output.stdout.contains(needle) {
+        let n = resolve_bookmark_substring(ctx, needle);
+        if !output.stdout.contains(&n) {
             bail!(
-                "expected stdout to contain '{needle}'\nstdout was:\n{}",
+                "expected stdout to contain '{n}'\nstdout was:\n{}",
                 output.stdout
             );
         }
     }
     for forbidden in &expect.stdout_not_contains {
-        if output.stdout.contains(forbidden) {
+        let f = resolve_bookmark_substring(ctx, forbidden);
+        if output.stdout.contains(&f) {
             bail!(
-                "expected stdout NOT to contain '{forbidden}'\nstdout was:\n{}",
+                "expected stdout NOT to contain '{f}'\nstdout was:\n{}",
                 output.stdout
             );
         }

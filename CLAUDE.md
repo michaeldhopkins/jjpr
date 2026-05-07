@@ -25,7 +25,7 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 
 ```
 cargo test               # Unit + jj integration (fast, ~2s)
-cargo clippy --tests      # Must be clean
+cargo clippy --locked --tests -- -D warnings  # Must be clean (CI's exact flags)
 JJPR_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
 ```
 
@@ -53,7 +53,7 @@ Every push must pass these steps. CI runs `cargo check --locked`, `cargo test`, 
 1. **Bump the version** in `Cargo.toml` when adding features or making behavioral changes (semver: patch for fixes, minor for new features/behavioral changes).
 2. **Update Cargo.lock** — run `cargo check` after any `Cargo.toml` change so the lockfile stays in sync. CI uses `--locked` and will reject a stale lockfile.
 3. **`cargo test`** — all tests must pass.
-4. **`cargo clippy --tests`** — must be clean (warnings are errors in CI).
+4. **`cargo clippy --locked --tests -- -D warnings`** — exact CI flags. `-D warnings` promotes warnings to errors, which catches things plain `cargo clippy --tests` doesn't (e.g., `too_many_lines` is `warn` locally but fails CI). Must be clean.
 5. **`cargo install --path .`** — install the updated binary locally.
 6. **Review and regenerate the docs.** Any change to commands, flags, output, behavior, configuration fields, or forge support must be reviewed against `docs/src/` and the page(s) updated in the same commit. **Every time you edit anything under `docs/src/` (or anything that should change the rendered site), run `./generate-docs.sh` immediately afterwards.** That rebuilds `docs/book/` and mirrors it into `~/projects/michaeldhopkins.com/public/docs/jjpr/`. Don't batch edits and skip the rebuild — running the script is part of the same task as the edit. Commit the source changes in jjpr and the rendered changes in `michaeldhopkins.com` separately.
    - The README is intentionally minimal — only the title, install snippet, and a pointer to the docs site. Don't grow it back into the main reference; behavior and option docs go in `docs/src/`.
