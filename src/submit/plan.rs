@@ -47,6 +47,20 @@ pub struct BookmarkNeedingReady {
     pub pr_number: u64,
 }
 
+/// A bookmark whose managed description couldn't be safely reconciled:
+/// the commit body and the on-forge description both diverged from what
+/// jjpr last wrote (or the PR predates fingerprinting and has drifted).
+/// jjpr leaves the PR untouched and surfaces this so the user can decide.
+#[derive(Debug)]
+pub struct BodyConflict {
+    pub bookmark: Bookmark,
+    pub pr_number: u64,
+    /// True when there's no fingerprint to compare against (a PR created
+    /// before fingerprinting, or one whose marker was removed), as opposed
+    /// to a genuine both-sides-edited conflict.
+    pub unfingerprinted: bool,
+}
+
 /// A bookmark whose PR title doesn't match the current commit description.
 #[derive(Debug)]
 pub struct TitleDrift {
@@ -80,6 +94,9 @@ pub struct SubmissionPlan {
     /// execute can iterate without re-deriving scope.
     pub bookmarks_needing_reviewers: Vec<(Bookmark, u64)>,
     pub bookmarks_with_title_drift: Vec<TitleDrift>,
+    /// PRs whose description jjpr declined to overwrite because it couldn't
+    /// tell a stale PR from a hand edit. Surfaced as warnings, not actions.
+    pub bookmarks_with_body_conflict: Vec<BodyConflict>,
     pub bookmarks_already_merged: Vec<MergedBookmark>,
     pub existing_prs: HashMap<String, PullRequest>,
     pub remote_name: String,
@@ -397,6 +414,7 @@ pub fn create_submission_plan(
     let mut bookmarks_needing_ready = Vec::new();
     let mut bookmarks_needing_reviewers = Vec::new();
     let mut bookmarks_with_title_drift = Vec::new();
+    let mut bookmarks_with_body_conflict = Vec::new();
     let mut bookmarks_already_merged = Vec::new();
     let mut existing_prs: HashMap<String, PullRequest> = HashMap::new();
     let mut all_bookmarks = Vec::new();
@@ -488,16 +506,24 @@ pub fn create_submission_plan(
             let current_body = pr.body.as_deref().unwrap_or("");
             if let Some(current_managed) = extract_managed_body(current_body) {
                 let stored_fp = extract_fingerprint(current_body);
-                if let BodyReconcile::Update { seed } =
-                    reconcile_body(stored_fp, current_managed, &expected_body)
-                {
-                    let new_full_body = replace_managed_body(current_body, &expected_body);
-                    bookmarks_needing_body_update.push(BookmarkNeedingBodyUpdate {
-                        bookmark: bookmark.clone(),
-                        pr_number: pr.number,
-                        new_body: new_full_body,
-                        seed,
-                    });
+                match reconcile_body(stored_fp, current_managed, &expected_body) {
+                    BodyReconcile::Update { seed } => {
+                        let new_full_body = replace_managed_body(current_body, &expected_body);
+                        bookmarks_needing_body_update.push(BookmarkNeedingBodyUpdate {
+                            bookmark: bookmark.clone(),
+                            pr_number: pr.number,
+                            new_body: new_full_body,
+                            seed,
+                        });
+                    }
+                    BodyReconcile::Conflict => {
+                        bookmarks_with_body_conflict.push(BodyConflict {
+                            bookmark: bookmark.clone(),
+                            pr_number: pr.number,
+                            unfingerprinted: stored_fp.is_none(),
+                        });
+                    }
+                    BodyReconcile::Leave | BodyReconcile::InSync => {}
                 }
             }
 
@@ -575,6 +601,7 @@ pub fn create_submission_plan(
         bookmarks_needing_ready,
         bookmarks_needing_reviewers,
         bookmarks_with_title_drift,
+        bookmarks_with_body_conflict,
         bookmarks_already_merged,
         existing_prs,
         remote_name: remote_name.to_string(),
@@ -1335,6 +1362,49 @@ mod tests {
         let new_body = &plan.bookmarks_needing_body_update[0].new_body;
         assert_eq!(extract_managed_body(new_body), Some("Detailed description"));
         assert!(extract_fingerprint(new_body).is_some());
+    }
+
+    #[test]
+    fn test_plan_records_unfingerprinted_conflict() {
+        // Legacy hand-edited body: left untouched AND surfaced as a conflict.
+        let mut pr = make_pr("feature", "main");
+        pr.body = Some(
+            "<!-- jjpr:description -->\nHand-written context.\n<!-- /jjpr:description -->".to_string(),
+        );
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        assert!(plan.bookmarks_needing_body_update.is_empty());
+        assert_eq!(plan.bookmarks_with_body_conflict.len(), 1);
+        assert!(plan.bookmarks_with_body_conflict[0].unfingerprinted);
+    }
+
+    #[test]
+    fn test_plan_records_both_edited_conflict() {
+        // jjpr last wrote "Older" (fingerprint), the user edited the PR to
+        // "Mine", and the commit derives "Detailed description". Both sides
+        // moved -> conflict, and it's a fingerprinted one.
+        let mut pr = make_pr("feature", "main");
+        pr.body = Some(format!(
+            "<!-- jjpr:description -->\nMine\n<!-- /jjpr:description -->\n{}",
+            fingerprint_marker("Older")
+        ));
+
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        assert!(plan.bookmarks_needing_body_update.is_empty());
+        assert_eq!(plan.bookmarks_with_body_conflict.len(), 1);
+        assert!(!plan.bookmarks_with_body_conflict[0].unfingerprinted);
     }
 
     #[test]

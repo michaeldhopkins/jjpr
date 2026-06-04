@@ -68,8 +68,9 @@ it last wrote there, which lets it tell two situations apart:
 
 If both the commit message and the on-forge text changed since jjpr last
 wrote them, jjpr can't tell which you meant to keep, so it leaves the PR
-untouched rather than overwrite your edit. To make the change take, edit
-the commit message (the source of truth for the managed section).
+untouched rather than overwrite your edit and prints a note telling you so.
+To make the change take, edit the commit message (the source of truth for
+the managed section).
 
 PRs created before fingerprinting get a fingerprint recorded on the next
 submit. A pre-fingerprint PR whose managed text was hand-edited away from

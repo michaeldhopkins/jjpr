@@ -254,7 +254,14 @@ pub fn execute_submission_plan(
     // Report title drift
     print_title_drift_warnings(&plan.bookmarks_with_title_drift, &plan.repo_info, fk);
 
-    if !plan.has_actions() && plan.bookmarks_already_merged.is_empty() && comments_updated == 0 {
+    // Report descriptions jjpr declined to overwrite
+    print_body_conflict_warnings(&plan.bookmarks_with_body_conflict, fk);
+
+    if !plan.has_actions()
+        && plan.bookmarks_already_merged.is_empty()
+        && plan.bookmarks_with_body_conflict.is_empty()
+        && comments_updated == 0
+    {
         println!("  Stack is up to date.");
     }
 
@@ -286,6 +293,24 @@ fn print_title_drift_warnings(
             forge_kind.format_ref(drift.pr_number),
             drift.current_title,
             drift.expected_title,
+        );
+    }
+}
+
+fn print_body_conflict_warnings(
+    conflicts: &[super::plan::BodyConflict],
+    forge_kind: crate::forge::ForgeKind,
+) {
+    for conflict in conflicts {
+        let reason = if conflict.unfingerprinted {
+            "its description was edited on the forge (or predates jjpr tracking)"
+        } else {
+            "its description and commit message both changed since the last submit"
+        };
+        println!(
+            "  Note: left {} body unchanged — {reason}.\n\
+             \x20        Edit the commit message if you want jjpr to update the description.",
+            forge_kind.format_ref(conflict.pr_number),
         );
     }
 }
@@ -516,17 +541,25 @@ mod tests {
 
     struct RecordingGitHub {
         calls: Mutex<Vec<String>>,
+        /// Last body written per PR number, so tests can assert what the
+        /// final `update_pr_body` actually contained.
+        bodies: Mutex<HashMap<u64, String>>,
     }
 
     impl RecordingGitHub {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
+                bodies: Mutex::new(HashMap::new()),
             }
         }
 
         fn calls(&self) -> Vec<String> {
             self.calls.lock().expect("poisoned").clone()
+        }
+
+        fn last_body(&self, pr_number: u64) -> Option<String> {
+            self.bodies.lock().expect("poisoned").get(&pr_number).cloned()
         }
     }
 
@@ -611,10 +644,13 @@ mod tests {
                 .push(format!("update_comment:{id}"));
             Ok(())
         }
-        fn update_pr_body(&self, _o: &str, _r: &str, n: u64, _body: &str) -> Result<()> {
+        fn update_pr_body(&self, _o: &str, _r: &str, n: u64, body: &str) -> Result<()> {
             self.calls
                 .lock().expect("poisoned")
                 .push(format!("update_pr_body:#{n}"));
+            self.bodies
+                .lock().expect("poisoned")
+                .insert(n, body.to_string());
             Ok(())
         }
         fn mark_pr_ready(&self, _o: &str, _r: &str, number: u64) -> Result<()> {
@@ -712,6 +748,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -964,6 +1001,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
@@ -1017,6 +1055,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("profile".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
@@ -1056,6 +1095,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([(
                 "auth".to_string(),
@@ -1092,6 +1132,79 @@ mod tests {
     }
 
     #[test]
+    fn test_description_nav_does_not_revert_body_update() {
+        // Regression: in DescriptionNav mode, Phase 7 splices the stack-nav
+        // section into the PR body. It must build on the body Phase 4 just
+        // wrote, not the pre-update copy — otherwise it reverts the fresh
+        // description. Two bookmarks so stack nav actually renders.
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+
+        let pr = |n: u64, head: &str, body: &str| PullRequest {
+            number: n,
+            html_url: format!("https://github.com/o/r/pull/{n}"),
+            title: format!("PR {n}"),
+            body: Some(body.to_string()),
+            base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
+            head: PullRequestRef { ref_name: head.to_string(), label: String::new(), sha: String::new() },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec![],
+        };
+
+        let new_body =
+            "<!-- jjpr:description -->\nBRAND NEW DESCRIPTION\n<!-- /jjpr:description -->".to_string();
+
+        let plan = SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
+                bookmark: make_bookmark("auth"),
+                pr_number: 10,
+                new_body: new_body.clone(),
+                seed: false,
+            }],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs: HashMap::from([
+                (
+                    "auth".to_string(),
+                    pr(10, "auth", "<!-- jjpr:description -->\nold\n<!-- /jjpr:description -->"),
+                ),
+                ("api".to_string(), pr(11, "api", "api body")),
+            ]),
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo { owner: "o".to_string(), repo: "r".to_string() },
+            forge_kind: ForgeKind::GitHub,
+            all_bookmarks: vec![make_bookmark("auth"), make_bookmark("api")],
+            default_branch: "main".to_string(),
+            draft: false,
+            stack_nav: crate::config::StackNavMode::Description,
+            reviewers: Vec::new(),
+            dry_run: false,
+        };
+
+        execute_submission_plan(&jj, &github, &plan).unwrap();
+
+        // The final body for #10 (written by Phase 7's nav splice) must still
+        // contain the new description and have gained a stack-nav section.
+        let final_body = github.last_body(10).expect("auth body was written");
+        assert!(
+            final_body.contains("BRAND NEW DESCRIPTION"),
+            "Phase 7 reverted Phase 4's description: {final_body:?}"
+        );
+        assert!(
+            final_body.contains("jjpr:stack-nav"),
+            "stack nav was not spliced into the body: {final_body:?}"
+        );
+    }
+
+    #[test]
     fn test_dry_run_skips_body_update() {
         let jj = RecordingJj::new();
         let github = RecordingGitHub::new();
@@ -1109,6 +1222,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1163,6 +1277,7 @@ mod tests {
             }],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1198,6 +1313,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1247,6 +1363,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
@@ -1296,6 +1413,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
@@ -1345,6 +1463,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),
@@ -1402,6 +1521,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1432,6 +1552,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![(make_bookmark("auth"), 10)],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1468,6 +1589,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1497,6 +1619,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1522,6 +1645,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::new(),
             remote_name: "origin".to_string(),
@@ -1613,6 +1737,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([
                 ("auth".to_string(), auth_pr),
@@ -1706,6 +1831,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![super::super::plan::MergedBookmark {
                 bookmark: make_bookmark("auth"),
                 pr_number: 1,
@@ -1840,6 +1966,7 @@ mod tests {
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
             bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
             bookmarks_already_merged: vec![],
             existing_prs: HashMap::from([("auth".to_string(), existing_pr)]),
             remote_name: "origin".to_string(),

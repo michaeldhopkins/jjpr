@@ -171,6 +171,32 @@ fn find_pr(head: &str) -> Option<serde_json::Value> {
     prs.into_iter().next()
 }
 
+fn fetch_pr_body(pr_number: u64) -> String {
+    let full_repo = format!("{OWNER}/{REPO}");
+    let output = Command::new("gh")
+        .args([
+            "pr", "view", &pr_number.to_string(),
+            "--repo", &full_repo,
+            "--json", "body", "--jq", ".body",
+        ])
+        .output()
+        .expect("gh pr view body");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn set_pr_body(pr_number: u64, body: &str) {
+    let full_repo = format!("{OWNER}/{REPO}");
+    let status = Command::new("gh")
+        .args([
+            "pr", "edit", &pr_number.to_string(),
+            "--repo", &full_repo,
+            "--body", body,
+        ])
+        .status()
+        .expect("gh pr edit body");
+    assert!(status.success(), "gh pr edit --body should succeed");
+}
+
 fn list_comments(pr_number: u64) -> Vec<serde_json::Value> {
     let full_repo = format!("{OWNER}/{REPO}");
     let output = Command::new("gh")
@@ -304,6 +330,117 @@ fn test_submit_creates_stacked_prs() {
                 .unwrap_or("")
                 .contains("<!-- jjpr:stack-info -->")),
         "profile PR should have stack comment"
+    );
+}
+
+/// Verifies the description-preservation fix end-to-end on a real forge:
+/// 1. A submitted PR's managed body has its git trailer stripped and a
+///    fingerprint recorded.
+/// 2. A description hand-edited on the forge survives a re-submit (the
+///    commit is unchanged, so jjpr must leave the edit alone rather than
+///    overwrite it with the commit-derived body).
+#[test]
+fn test_submit_preserves_hand_edited_description() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+    if !common::jj_available() {
+        println!("Skipping E2E test (jj not available)");
+        return;
+    }
+
+    let ctx = E2eContext::new();
+    let name = ctx.bookmark_name("preserve");
+
+    ctx.write_file(&format!("{name}.rs"), "// preserve module\n");
+    ctx.commit(
+        "Add preserve module\n\nReal body paragraph that must survive.\n\nCo-authored-by: Test User <test@example.com>",
+    );
+    ctx.set_bookmark(&name);
+
+    let jj = ctx.runner();
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let github = || {
+        let client = ForgeClient::new(
+            "https://api.github.com",
+            token.clone(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
+        GitHubForge::new(client)
+    };
+    let repo_info = RepoInfo {
+        owner: OWNER.to_string(),
+        repo: REPO.to_string(),
+    };
+    let submit = || {
+        let graph = change_graph::build_change_graph(&jj).unwrap();
+        let analysis =
+            analyze::analyze_submission_graph(&graph, &name).unwrap();
+        let segments = resolve::resolve_bookmark_selections(
+            &analysis.relevant_segments,
+            false,
+        )
+        .unwrap();
+        let p = plan::create_submission_plan(
+            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub,
+            "main",
+            &plan::SubmitOptions {
+                draft_mode: plan::DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: jjpr::forge::types::ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: jjpr::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        execute::execute_submission_plan(&jj, &github(), &p).unwrap();
+    };
+
+    // First submit creates the PR.
+    submit();
+    let pr = find_pr(&name).expect("preserve PR exists");
+    let pr_number = pr["number"].as_u64().unwrap();
+
+    // Commit B: the Co-authored-by trailer is stripped; the real body and a
+    // fingerprint marker are present.
+    let created_body = fetch_pr_body(pr_number);
+    assert!(
+        created_body.contains("Real body paragraph that must survive."),
+        "managed body should carry the commit body, was:\n{created_body}"
+    );
+    assert!(
+        !created_body.contains("Co-authored-by"),
+        "trailer should be stripped from the PR body, was:\n{created_body}"
+    );
+    assert!(
+        created_body.contains("<!-- jjpr:body-fp "),
+        "PR body should carry a fingerprint marker, was:\n{created_body}"
+    );
+
+    // Simulate a user editing the description directly on the forge, inside
+    // the sentinels, leaving the fingerprint in place.
+    let edited_body = created_body.replace(
+        "Real body paragraph that must survive.",
+        "HAND EDITED DO NOT CLOBBER",
+    );
+    set_pr_body(pr_number, &edited_body);
+
+    // Re-submit with the commit unchanged. The fix: jjpr must not overwrite
+    // the hand edit.
+    submit();
+
+    let final_body = fetch_pr_body(pr_number);
+    assert!(
+        final_body.contains("HAND EDITED DO NOT CLOBBER"),
+        "hand-edited description must survive re-submit, was:\n{final_body}"
+    );
+    assert!(
+        !final_body.contains("Real body paragraph that must survive."),
+        "jjpr must not have reverted the description to the commit body, was:\n{final_body}"
     );
 }
 
