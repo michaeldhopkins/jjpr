@@ -143,16 +143,60 @@ pub fn extract_fingerprint(pr_body: &str) -> Option<&str> {
     Some(pr_body[start..end].trim())
 }
 
+/// Recognized git trailer keys (lowercased). A trailing block of these is
+/// stripped from the PR body so commit attribution like `Co-authored-by:`
+/// doesn't become the PR description — a body that is nothing but trailers
+/// reads as a wiped description.
+const TRAILER_KEYS: &[&str] = &[
+    "co-authored-by",
+    "co-developed-by",
+    "signed-off-by",
+    "helped-by",
+    "reviewed-by",
+    "acked-by",
+    "tested-by",
+    "reported-by",
+    "suggested-by",
+    "change-id",
+];
+
+/// Drop a trailing block of git trailers (and the blank lines around it)
+/// from a commit body. Only the contiguous run of recognized trailers at
+/// the very end is removed; a trailer that appears mid-body, or any
+/// non-trailer line, stops the scan and is preserved.
+fn strip_trailers(body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut end = lines.len();
+    while end > 0 {
+        let line = lines[end - 1].trim();
+        if line.is_empty() {
+            end -= 1;
+            continue;
+        }
+        let is_trailer = line.split_once(':').is_some_and(|(key, value)| {
+            !value.trim().is_empty()
+                && TRAILER_KEYS.contains(&key.trim().to_ascii_lowercase().as_str())
+        });
+        if is_trailer {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    lines[..end].join("\n").trim_end().to_string()
+}
+
 /// Derive the PR title and raw body text from the first change in a segment.
 fn derive_pr_title_body(segment: &NarrowedSegment) -> (String, String) {
     if let Some(change) = segment.changes.first() {
         let title = change.description_first_line.clone();
-        let mut body = change
-            .description
-            .strip_prefix(&title)
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let mut body = strip_trailers(
+            change
+                .description
+                .strip_prefix(&title)
+                .unwrap_or("")
+                .trim(),
+        );
 
         if !segment.merge_source_names.is_empty() {
             let note = generate_merge_note(&segment.merge_source_names);
@@ -1115,6 +1159,68 @@ mod tests {
             extract_fingerprint(&wrapped),
             Some(body_fingerprint("hello world").as_str())
         );
+    }
+
+    #[test]
+    fn test_strip_trailers_removes_trailing_attribution() {
+        let body = "Real body paragraph.\n\nCo-authored-by: Claude <noreply@anthropic.com>";
+        assert_eq!(strip_trailers(body), "Real body paragraph.");
+    }
+
+    #[test]
+    fn test_strip_trailers_removes_multiple_trailers() {
+        let body = "Body.\n\nSigned-off-by: A <a@x>\nCo-authored-by: B <b@x>";
+        assert_eq!(strip_trailers(body), "Body.");
+    }
+
+    #[test]
+    fn test_strip_trailers_body_that_is_only_a_trailer_becomes_empty() {
+        assert_eq!(strip_trailers("Co-authored-by: Claude <noreply@anthropic.com>"), "");
+    }
+
+    #[test]
+    fn test_strip_trailers_keeps_non_trailer_lines() {
+        // A colon line whose key isn't a recognized trailer is prose.
+        let body = "Body.\n\nNote: keep this line.";
+        assert_eq!(strip_trailers(body), "Body.\n\nNote: keep this line.");
+    }
+
+    #[test]
+    fn test_strip_trailers_keeps_mid_body_trailer() {
+        // Only the trailing run is stripped; a trailer followed by prose stays.
+        let body = "Signed-off-by: A <a@x>\n\nMore prose after.";
+        assert_eq!(strip_trailers(body), body);
+    }
+
+    #[test]
+    fn test_derive_body_strips_trailer() {
+        let segment = NarrowedSegment {
+            bookmark: Bookmark {
+                name: "feature".to_string(),
+                commit_id: "c".to_string(),
+                change_id: "ch".to_string(),
+                has_remote: true,
+                is_synced: true,
+            },
+            changes: vec![LogEntry {
+                commit_id: "c".to_string(),
+                change_id: "ch".to_string(),
+                author_name: "T".to_string(),
+                author_email: "t@t".to_string(),
+                description: "Add feature\n\nWhy this matters.\n\nCo-authored-by: Claude <noreply@anthropic.com>".to_string(),
+                description_first_line: "Add feature".to_string(),
+                parents: vec![],
+                local_bookmarks: vec!["feature".to_string()],
+                remote_bookmarks: vec![],
+                is_working_copy: false,
+                conflict: false,
+                empty: false,
+            }],
+            merge_source_names: vec![],
+        };
+        let (title, body) = derive_pr_title_body(&segment);
+        assert_eq!(title, "Add feature");
+        assert_eq!(body, "Why this matters.");
     }
 
     #[test]

@@ -50,7 +50,9 @@ submits up to the topmost bookmark.
 ## PR titles and bodies
 
 Title and body come from the first commit's description in each
-bookmark's segment.
+bookmark's segment. A trailing block of git trailers (`Co-authored-by:`,
+`Signed-off-by:`, and similar) is stripped from the body so commit
+attribution doesn't show up as the PR description.
 
 The body is wrapped in HTML comment markers. Text you add above or
 below the markers (screenshots, notes, test plans) is always preserved.
