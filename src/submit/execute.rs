@@ -144,15 +144,30 @@ pub fn execute_submission_plan(
             );
             continue;
         }
-        println!(
-            "  Updating {} body for '{}'...",
-            fk.format_ref(item.pr_number), item.bookmark.name
-        );
+        if item.seed {
+            println!(
+                "  Recording description fingerprint on {} ('{}')...",
+                fk.format_ref(item.pr_number), item.bookmark.name
+            );
+        } else {
+            println!(
+                "  Updating {} body for '{}'...",
+                fk.format_ref(item.pr_number), item.bookmark.name
+            );
+        }
         if let Err(e) = github.update_pr_body(owner, repo, item.pr_number, &item.new_body) {
             report_partial_failure(&completed_actions);
             return Err(e);
         }
-        completed_actions.push(format!("Updated {} body", fk.format_ref(item.pr_number)));
+        // Keep the in-memory PR in sync so Phase 7's stack-nav splice (which
+        // edits the body for DescriptionNav) builds on the body we just
+        // wrote instead of reverting to the pre-update copy.
+        if let Some(pr) = bookmark_to_pr.get_mut(&item.bookmark.name) {
+            pr.body = Some(item.new_body.clone());
+        }
+        if !item.seed {
+            completed_actions.push(format!("Updated {} body", fk.format_ref(item.pr_number)));
+        }
     }
 
     // Phase 5: Convert draft PRs to ready
@@ -1036,6 +1051,7 @@ mod tests {
                 bookmark: make_bookmark("auth"),
                 pr_number: 10,
                 new_body: "Updated body".to_string(),
+                seed: false,
             }],
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
@@ -1088,6 +1104,7 @@ mod tests {
                 bookmark: make_bookmark("auth"),
                 pr_number: 10,
                 new_body: "Updated body".to_string(),
+                seed: false,
             }],
             bookmarks_needing_ready: vec![],
             bookmarks_needing_reviewers: vec![],
