@@ -52,13 +52,29 @@ submits up to the topmost bookmark.
 Title and body come from the first commit's description in each
 bookmark's segment.
 
-The body is wrapped in HTML comment markers. When you re-submit after
-changing a commit message, only the managed section is updated. Text
-you add above or below the markers (screenshots, notes, test plans)
-is preserved.
+The body is wrapped in HTML comment markers. Text you add above or
+below the markers (screenshots, notes, test plans) is always preserved.
 
-If you remove the markers from the PR body, jjpr stops updating that
-PR's description.
+When you re-submit, jjpr reconciles the managed section between the
+markers against the commit message. It records a fingerprint of whatever
+it last wrote there, which lets it tell two situations apart:
+
+- You changed the commit message, so the PR is stale. jjpr updates the
+  managed section.
+- You edited the text between the markers directly on the forge. jjpr
+  leaves it alone.
+
+If both the commit message and the on-forge text changed since jjpr last
+wrote them, jjpr can't tell which you meant to keep, so it leaves the PR
+untouched rather than overwrite your edit. To make the change take, edit
+the commit message (the source of truth for the managed section).
+
+PRs created before fingerprinting get a fingerprint recorded on the next
+submit. A pre-fingerprint PR whose managed text was hand-edited away from
+its commit message is left untouched, never overwritten.
+
+If you remove the markers from the PR body entirely, jjpr stops updating
+that PR's description.
 
 The PR title is not automatically updated after creation. If you
 change the commit's first line, jjpr warns you about the drift.
