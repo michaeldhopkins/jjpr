@@ -29,6 +29,11 @@ Each cycle:
 Press `Ctrl+C` to exit. The next run resumes from wherever the stack
 is now.
 
+Watch keeps waiting as long as a PR is making progress toward merge,
+including through slow CI. A PR stuck on pending checks or a missing
+approval is not treated as a stall: the loop keeps polling until you
+pass `--timeout` and it elapses, or you press `Ctrl+C`.
+
 ## Flags
 
 | Flag | Effect |

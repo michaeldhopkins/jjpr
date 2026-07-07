@@ -717,7 +717,7 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         merge::watch::WatchOptions {
             shutdown,
             timeout: timeout_dur,
-            poll_interval: std::time::Duration::from_secs(30),
+            poll_interval: watch_poll_interval(),
         },
     )?;
 
@@ -761,6 +761,18 @@ fn print_watch_summary(result: &jjpr::watch::WatchResult) {
             if mr.merged.len() == 1 { "" } else { "s" }
         );
     }
+}
+
+/// Watch's poll cadence. Defaults to 30s. `JJPR_WATCH_POLL_SECS` overrides it;
+/// this is an undocumented test seam so the E2E parity harness can drive many
+/// poll iterations in seconds instead of minutes. Not meant for end users.
+fn watch_poll_interval() -> std::time::Duration {
+    let secs = std::env::var("JJPR_WATCH_POLL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(30);
+    std::time::Duration::from_secs(secs)
 }
 
 fn print_merge_summary(result: &merge::execute::MergeResult) {
