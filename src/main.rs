@@ -641,6 +641,9 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         reviewer_scope,
         ready,
     } = args;
+    // Compute once: gates the live in-place spinner (TTY) versus the
+    // scrolling heartbeat (pipes, CI, captured output).
+    let is_tty = std::io::stdout().is_terminal();
     // Set up Ctrl+C handler once, shared between bookmark wait and watch loop
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let flag = shutdown.clone();
@@ -662,7 +665,7 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
             None => {
                 let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
                 let poll = std::time::Duration::from_secs(5);
-                match jjpr::watch::wait_for_bookmark(&jj, timeout_dur, poll, &shutdown)? {
+                match jjpr::watch::wait_for_bookmark(&jj, timeout_dur, poll, &shutdown, is_tty)? {
                     Some(name) => {
                         println!("Found bookmark '{name}'\n");
                         Some(name)
@@ -718,6 +721,7 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
             shutdown,
             timeout: timeout_dur,
             poll_interval: watch_poll_interval(),
+            is_tty,
         },
     )?;
 
