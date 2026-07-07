@@ -34,6 +34,11 @@ including through slow CI. A PR stuck on pending checks or a missing
 approval is not treated as a stall: the loop keeps polling until you
 pass `--timeout` and it elapses, or you press `Ctrl+C`.
 
+While waiting between polls, a terminal shows a live spinner so you can
+tell watch is still running. When output is piped or captured (CI, logs),
+the spinner is omitted and watch instead prints a periodic timestamped
+line.
+
 ## Flags
 
 | Flag | Effect |

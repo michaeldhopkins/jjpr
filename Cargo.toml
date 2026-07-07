@@ -1,6 +1,6 @@
 [package]
 name = "jjpr"
-version = "0.23.1"
+version = "0.24.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Manage stacked pull requests in Jujutsu repositories"
@@ -34,6 +34,8 @@ predicates = "3"
 insta = "1"
 clap_complete = "4"
 clap_mangen = "0.2"
+# openpty, for the TTY-countdown integration test (tests/tty_watch.rs)
+libc = "0.2.183"
 
 [lints.clippy]
 # Enforce enums over boolean state flags

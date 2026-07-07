@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -120,12 +121,68 @@ pub(crate) fn report_status_changes(
     }
 }
 
-/// Clear any dots printed on the current line before printing a status message.
-pub(crate) fn clear_dot_line(dots_on_line: &mut bool) {
-    if *dots_on_line {
-        println!();
-        *dots_on_line = false;
+/// Braille spinner frames — the same cycle `indicatif` and most CLIs use.
+const SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// How long each spinner frame is shown. ~80ms reads as a smooth spin.
+const SPINNER_TICK: Duration = Duration::from_millis(80);
+
+/// Render one spinner frame in place. On a TTY this rewrites the current line
+/// (carriage return + clear-to-end); off a TTY it writes nothing, so piped or
+/// captured output stays clean.
+pub(crate) fn render_spinner(out: &mut impl Write, is_tty: bool, frame: usize) {
+    if !is_tty {
+        return;
     }
+    let glyph = SPINNER_FRAMES[frame % SPINNER_FRAMES.len()];
+    let _ = write!(out, "\r{glyph} Waiting...\x1b[K");
+    let _ = out.flush();
+}
+
+/// Erase the spinner line so the next full-line message starts on a clean
+/// line. No-op off a TTY.
+pub(crate) fn clear_status_line(out: &mut impl Write, is_tty: bool) {
+    if !is_tty {
+        return;
+    }
+    let _ = write!(out, "\r\x1b[K");
+    let _ = out.flush();
+}
+
+/// Whether the scrolling "Still waiting" heartbeat should print. Only off a
+/// TTY: on a TTY the live spinner already conveys liveness, so the heartbeat
+/// would just scroll needlessly.
+pub(crate) fn should_print_heartbeat(is_tty: bool, elapsed: Duration, interval: Duration) -> bool {
+    !is_tty && elapsed >= interval
+}
+
+/// Sleep for `duration`, animating a live spinner on a TTY. Off a TTY this is
+/// exactly `interruptible_sleep` (renders nothing). `frame` persists across
+/// calls so the spin stays continuous between polls. On normal completion the
+/// last frame is left in place (the caller clears it before printing a real
+/// message); on shutdown the line is cleared. Returns true if interrupted.
+pub(crate) fn spinner_sleep(
+    duration: Duration,
+    shutdown: &AtomicBool,
+    is_tty: bool,
+    frame: &mut usize,
+) -> bool {
+    if !is_tty {
+        return interruptible_sleep(duration, shutdown);
+    }
+    let mut out = std::io::stdout();
+    let end = Instant::now() + duration;
+    while Instant::now() < end {
+        if shutdown.load(Ordering::Relaxed) {
+            clear_status_line(&mut out, is_tty);
+            return true;
+        }
+        render_spinner(&mut out, is_tty, *frame);
+        *frame = frame.wrapping_add(1);
+        thread::sleep(SPINNER_TICK);
+    }
+    false
 }
 
 pub(crate) fn refresh_pr_map(
@@ -141,6 +198,9 @@ pub struct WatchOptions {
     pub shutdown: Arc<AtomicBool>,
     pub timeout: Option<Duration>,
     pub poll_interval: Duration,
+    /// Whether stdout is a terminal. Gates the live in-place spinner (TTY)
+    /// versus the scrolling heartbeat (pipes, CI, captured output).
+    pub is_tty: bool,
 }
 
 pub(crate) fn local_time_hhmm() -> String {
@@ -228,5 +288,60 @@ mod tests {
         let current = vec![BlockReason::InsufficientApprovals { have: 1, need: 1 }];
         let result = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
         assert!(result.is_some(), "threshold reached should be reported");
+    }
+
+    // --- spinner / heartbeat split ---
+
+    #[test]
+    fn render_spinner_on_tty_rewrites_line_with_a_frame() {
+        let mut buf = Vec::new();
+        render_spinner(&mut buf, true, 0);
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(s.starts_with('\r'), "should carriage-return to column 0");
+        assert!(s.contains(SPINNER_FRAMES[0]), "should render a spinner glyph");
+        assert!(s.contains("Waiting..."));
+        assert!(s.contains("\x1b[K"), "should clear to end of line");
+    }
+
+    #[test]
+    fn render_spinner_wraps_frame_index() {
+        // The frame index is a free-running counter; it must wrap, not panic.
+        let mut buf = Vec::new();
+        render_spinner(&mut buf, true, SPINNER_FRAMES.len() + 3);
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(s.contains(SPINNER_FRAMES[3]));
+    }
+
+    #[test]
+    fn render_spinner_off_tty_is_silent() {
+        let mut buf = Vec::new();
+        render_spinner(&mut buf, false, 0);
+        assert!(buf.is_empty(), "no spinner bytes when stdout is not a TTY");
+    }
+
+    #[test]
+    fn clear_status_off_tty_is_silent() {
+        let mut buf = Vec::new();
+        clear_status_line(&mut buf, false);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn clear_status_on_tty_erases_line() {
+        let mut buf = Vec::new();
+        clear_status_line(&mut buf, true);
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(s.starts_with('\r') && s.contains("\x1b[K"));
+    }
+
+    #[test]
+    fn heartbeat_prints_only_off_tty_after_interval() {
+        let interval = Duration::from_secs(60);
+        assert!(should_print_heartbeat(false, Duration::from_secs(60), interval));
+        assert!(!should_print_heartbeat(false, Duration::from_secs(59), interval));
+        assert!(
+            !should_print_heartbeat(true, Duration::from_secs(120), interval),
+            "the live spinner replaces the heartbeat on a TTY",
+        );
     }
 }

@@ -28,7 +28,10 @@ timeout_minutes = 1
 [expect]
 exit_status = "success"
 stdout_contains = ["Watch timed out."]
-stdout_not_contains = ["No progress after"]
+# "No progress after" would mean the issue #4 regression is back. The braille
+# spinner frame would mean the TTY-only spinner leaked into piped/captured
+# output (the harness runs the binary non-interactively).
+stdout_not_contains = ["No progress after", "⠋"]
 
 [[expect.pr]]
 bookmark = "block"

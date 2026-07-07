@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -16,8 +15,9 @@ use crate::merge::execute::{
 };
 use crate::merge::plan::{evaluate_segment, BlockReason, MergeOptions, PrMergeStatus};
 use crate::merge::watch::{
-    clear_dot_line, interruptible_sleep, local_time_hhmm, refresh_pr_map,
-    report_status_changes, WatchOptions, HEARTBEAT_INTERVAL, MAX_CONSECUTIVE_ERRORS,
+    clear_status_line, local_time_hhmm, refresh_pr_map, report_status_changes,
+    should_print_heartbeat, spinner_sleep, WatchOptions, HEARTBEAT_INTERVAL,
+    MAX_CONSECUTIVE_ERRORS,
 };
 use crate::submit::{analyze, plan, execute, resolve};
 
@@ -245,15 +245,16 @@ enum PostMergeAction {
     /// sleep and retry.
     Heartbeat,
     /// State is degraded with the same reasons as last time, before the
-    /// heartbeat interval. Print a dot and sleep and retry.
-    Dot,
+    /// heartbeat interval has elapsed. Sleep and retry quietly; the between-poll
+    /// spinner (TTY) or the next heartbeat (non-TTY) carries the update.
+    Quiet,
 }
 
 impl PostMergeAction {
     /// Whether the loop should sleep and `continue` after handling this
     /// action. True for any degraded action; false for clean ones.
     fn waits(self) -> bool {
-        matches!(self, Self::NewFailure | Self::Heartbeat | Self::Dot)
+        matches!(self, Self::NewFailure | Self::Heartbeat | Self::Quiet)
     }
 }
 
@@ -276,7 +277,7 @@ fn classify_post_merge(
     } else if last_heartbeat_elapsed >= heartbeat_interval {
         PostMergeAction::Heartbeat
     } else {
-        PostMergeAction::Dot
+        PostMergeAction::Quiet
     }
 }
 
@@ -293,7 +294,7 @@ fn run_merge_phase(
     consecutive_errors: &mut u32,
     last_heartbeat: &mut Instant,
     state: &mut ReconcileState,
-    dots_on_line: &mut bool,
+    is_tty: bool,
 ) -> Result<MergePhaseOutcome> {
     let owner = &merge_plan.repo_info.owner;
     let repo = &merge_plan.repo_info.repo;
@@ -330,7 +331,6 @@ fn run_merge_phase(
                 bookmark_name,
                 pr_number,
             } => {
-                clear_dot_line(dots_on_line);
                 if prev_reasons.is_some() {
                     println!(
                         "  {bookmark_name}: Merged externally ({}); moving on",
@@ -352,7 +352,6 @@ fn run_merge_phase(
             }
 
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
-                clear_dot_line(dots_on_line);
                 if prev_reasons.is_some() {
                     println!("  {bookmark_name}: Ready to merge");
                 }
@@ -390,7 +389,6 @@ fn run_merge_phase(
                 reasons,
             } => {
                 if reasons.iter().any(|r| matches!(r, BlockReason::NoPr)) {
-                    clear_dot_line(dots_on_line);
                     // Match execute_merge_plan's UX: name the bookmark so
                     // the user knows where the stack stopped.
                     println!("\n  Blocked at '{bookmark_name}':");
@@ -411,7 +409,6 @@ fn run_merge_phase(
                 if prev_reasons.is_none()
                     && let Some(hint) = reviewer_hint(pr.as_ref(), &reasons, &bookmark_name, forge_kind)
                 {
-                    clear_dot_line(dots_on_line);
                     println!("{hint}");
                 }
 
@@ -422,7 +419,6 @@ fn run_merge_phase(
                     forge_kind,
                 ) {
                     Some(displayed) => {
-                        clear_dot_line(dots_on_line);
                         *prev_reasons = Some(displayed);
                         *last_heartbeat = Instant::now();
                     }
@@ -430,8 +426,10 @@ fn run_merge_phase(
                         if prev_reasons.is_none() {
                             *prev_reasons = Some(vec![]);
                         }
-                        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
-                            clear_dot_line(dots_on_line);
+                        // On a TTY the between-poll spinner is the liveness
+                        // signal; off a TTY, print a periodic timestamped line
+                        // so a long wait doesn't look hung.
+                        if should_print_heartbeat(is_tty, last_heartbeat.elapsed(), HEARTBEAT_INTERVAL) {
                             let now = local_time_hhmm();
                             let first_reason = reasons
                                 .first()
@@ -441,10 +439,6 @@ fn run_merge_phase(
                                 "  [{now}] Still waiting for {bookmark_name}: {first_reason}"
                             );
                             *last_heartbeat = Instant::now();
-                        } else {
-                            print!(".");
-                            let _ = std::io::stdout().flush();
-                            *dots_on_line = true;
                         }
                     }
                 }
@@ -468,7 +462,6 @@ fn run_merge_phase(
             // is persistent: when the user fixes local state, the next
             // iteration's reconcile gets a fresh chance and we resume.
             if state.degraded() {
-                clear_dot_line(dots_on_line);
                 break;
             }
         }
@@ -496,29 +489,38 @@ pub fn wait_for_bookmark(
     timeout: Option<Duration>,
     poll_interval: Duration,
     shutdown: &AtomicBool,
+    is_tty: bool,
 ) -> Result<Option<String>> {
     let deadline = timeout.map(|d| Instant::now() + d);
 
     println!("Waiting for a bookmark in the working copy's ancestry...");
     println!("    hint: jj bookmark set <name>\n");
 
+    let mut spinner_frame: usize = 0;
     loop {
         if shutdown.load(Ordering::Relaxed) {
+            clear_status_line(&mut std::io::stdout(), is_tty);
             return Ok(None);
         }
         if let Some(dl) = deadline
             && Instant::now() >= dl
         {
+            clear_status_line(&mut std::io::stdout(), is_tty);
             return Ok(None);
         }
 
+        // The bookmark check is silent, so the spinner frame left by
+        // spinner_sleep stays on screen through it — no blank flash before the
+        // spin resumes. Clear only before returning to a caller that prints
+        // (found / timeout).
         if let Ok(graph) = change_graph::build_change_graph(jj)
             && let Ok(Some(name)) = analyze::infer_target_bookmark(&graph, jj)
         {
+            clear_status_line(&mut std::io::stdout(), is_tty);
             return Ok(Some(name));
         }
 
-        if interruptible_sleep(poll_interval, shutdown) {
+        if spinner_sleep(poll_interval, shutdown, is_tty, &mut spinner_frame) {
             return Ok(None);
         }
     }
@@ -542,6 +544,7 @@ pub fn run_watch_loop(
     let shutdown = opts.shutdown;
     let timeout = opts.timeout;
     let poll_interval = opts.poll_interval;
+    let is_tty = opts.is_tty;
     let owner = &repo_info.owner;
     let repo = &repo_info.repo;
 
@@ -569,8 +572,8 @@ pub fn run_watch_loop(
     let mut prev_reasons: Option<Vec<BlockReason>> = None;
     let mut consecutive_errors: u32 = 0;
     let mut last_heartbeat = Instant::now();
-    let mut dots_on_line = false;
     let mut no_progress_count: u32 = 0;
+    let mut spinner_frame: usize = 0;
     let deadline = timeout.map(|d| Instant::now() + d);
 
     let merge_plan = make_merge_plan(
@@ -592,6 +595,9 @@ pub fn run_watch_loop(
     }
 
     loop {
+        // Clear any spinner frame left by the previous poll's sleep before this
+        // iteration prints anything, so real messages never collide with it.
+        clear_status_line(&mut std::io::stdout(), is_tty);
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
@@ -621,7 +627,7 @@ pub fn run_watch_loop(
                     eprintln!("  Too many consecutive errors; giving up.");
                     break;
                 }
-                if interruptible_sleep(poll_interval, &shutdown) {
+                if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
                     break;
                 }
                 continue;
@@ -629,7 +635,6 @@ pub fn run_watch_loop(
         };
 
         if segments.is_empty() {
-            clear_dot_line(&mut dots_on_line);
             report_orphaned_prs(jj, forge, owner, repo, &merged, &skipped_merged, forge_kind);
             break;
         }
@@ -659,7 +664,7 @@ pub fn run_watch_loop(
                 }
                 println!("    hint: jj edit <change_id>, fix the conflicts, then jjpr watch will continue");
             }
-            if interruptible_sleep(poll_interval, &shutdown) {
+            if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
                 break;
             }
             continue;
@@ -678,7 +683,7 @@ pub fn run_watch_loop(
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                     break;
                 }
-                if interruptible_sleep(poll_interval, &shutdown) {
+                if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
                     break;
                 }
                 continue;
@@ -698,7 +703,7 @@ pub fn run_watch_loop(
                 if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                     break;
                 }
-                if interruptible_sleep(poll_interval, &shutdown) {
+                if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
                     break;
                 }
                 continue;
@@ -733,7 +738,7 @@ pub fn run_watch_loop(
         let merge_outcome = run_merge_phase(
             jj, forge, &segments, &pr_map, merge_options, &merge_plan,
             forge_kind, &mut prev_reasons, &mut consecutive_errors,
-            &mut last_heartbeat, &mut state, &mut dots_on_line,
+            &mut last_heartbeat, &mut state, is_tty,
         )?;
 
         let total_before = merged.len() + skipped_merged.len();
@@ -761,31 +766,29 @@ pub fn run_watch_loop(
         match action {
             PostMergeAction::Continue => {}
             PostMergeAction::Recovered => {
-                clear_dot_line(&mut dots_on_line);
                 println!("  Local sync recovered. Resuming.");
                 prev_reconcile_block = None;
             }
             PostMergeAction::NewFailure => {
-                clear_dot_line(&mut dots_on_line);
                 report_reconcile_failure(&state, &segments, &merged, &skipped_merged,
                     stack_base, default_branch, forge_kind);
                 prev_reconcile_block = Some(state.block_reasons());
                 last_heartbeat = Instant::now();
             }
             PostMergeAction::Heartbeat => {
-                clear_dot_line(&mut dots_on_line);
-                let now = local_time_hhmm();
-                println!("  [{now}] Still waiting for local sync to recover");
+                // On a TTY the between-poll spinner conveys liveness, so the
+                // periodic heartbeat is suppressed here too (the one-time
+                // NewFailure report already explained what to fix).
+                if !is_tty {
+                    let now = local_time_hhmm();
+                    println!("  [{now}] Still waiting for local sync to recover");
+                }
                 last_heartbeat = Instant::now();
             }
-            PostMergeAction::Dot => {
-                print!(".");
-                let _ = std::io::stdout().flush();
-                dots_on_line = true;
-            }
+            PostMergeAction::Quiet => {}
         }
         if action.waits() {
-            if interruptible_sleep(poll_interval, &shutdown) {
+            if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
                 break;
             }
             continue;
@@ -804,7 +807,6 @@ pub fn run_watch_loop(
         ) {
             no_progress_count += 1;
             if no_progress_count >= 5 {
-                clear_dot_line(&mut dots_on_line);
                 println!("\n  No progress after {no_progress_count} consecutive iterations; exiting.");
                 println!("  Remaining bookmarks may need manual intervention.");
                 break;
@@ -820,8 +822,8 @@ pub fn run_watch_loop(
             continue;
         }
 
-        // Sleep before next iteration
-        if interruptible_sleep(poll_interval, &shutdown) {
+        // Sleep before next iteration, showing the between-poll spinner.
+        if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
             break;
         }
     }
@@ -1455,6 +1457,7 @@ mod tests {
             None,
             Duration::from_millis(1),
             &shutdown,
+            false,
         ).unwrap();
 
         assert_eq!(result.as_deref(), Some("auth"));
@@ -1473,6 +1476,7 @@ mod tests {
             None,
             Duration::from_secs(60),
             &shutdown,
+            false,
         ).unwrap();
 
         assert!(result.is_none());
@@ -1492,6 +1496,7 @@ mod tests {
             Some(Duration::from_millis(10)),
             Duration::from_millis(1),
             &shutdown,
+            false,
         ).unwrap();
 
         assert!(result.is_none());
@@ -1645,13 +1650,12 @@ mod tests {
         let mut prev_reasons: Option<Vec<BlockReason>> = None;
         let mut consecutive_errors = 0u32;
         let mut last_heartbeat = Instant::now();
-        let mut dots = false;
 
         let outcome = run_merge_phase(
             &FailFetchJj, &forge, &segments, &forge.prs, &plan.options,
             &plan, ForgeKind::GitHub,
             &mut prev_reasons, &mut consecutive_errors,
-            &mut last_heartbeat, &mut state, &mut dots,
+            &mut last_heartbeat, &mut state, false,
         ).expect("run_merge_phase should not error");
 
         // auth merged once; profile must NOT have been merged.
@@ -1792,13 +1796,12 @@ mod tests {
         let mut prev_reasons: Option<Vec<BlockReason>> = None;
         let mut consecutive_errors = 0u32;
         let mut last_heartbeat = Instant::now();
-        let mut dots = false;
 
         let outcome = run_merge_phase(
             &HealthyJj, &forge, &segments, &forge.prs, &plan.options,
             &plan, ForgeKind::GitHub,
             &mut prev_reasons, &mut consecutive_errors,
-            &mut last_heartbeat, &mut state, &mut dots,
+            &mut last_heartbeat, &mut state, false,
         ).expect("run_merge_phase should not error");
 
         assert!(outcome.waiting_on_block, "blocked segment must set waiting_on_block");
@@ -1886,7 +1889,7 @@ mod tests {
         let action = classify_post_merge(
             &local_failure_state(), &prev, Duration::from_secs(10), HEARTBEAT,
         );
-        assert_eq!(action, PostMergeAction::Dot);
+        assert_eq!(action, PostMergeAction::Quiet);
         assert!(action.waits());
     }
 
@@ -1940,7 +1943,7 @@ mod tests {
 
         // Iter 2: same failure, only 5s elapsed → Dot.
         let a2 = classify_post_merge(&degraded, &prev, Duration::from_secs(5), HEARTBEAT);
-        assert_eq!(a2, PostMergeAction::Dot, "iter 2 within heartbeat window must be quiet");
+        assert_eq!(a2, PostMergeAction::Quiet, "iter 2 within heartbeat window must be quiet");
         // prev unchanged
 
         // Iter 3: same failure, 65s elapsed → Heartbeat.
@@ -2000,13 +2003,12 @@ mod tests {
         let mut prev_reasons: Option<Vec<BlockReason>> = None;
         let mut consecutive_errors = 0u32;
         let mut last_heartbeat = Instant::now();
-        let mut dots = false;
 
         let outcome = run_merge_phase(
             &HealthyJj, &forge, &segments, &forge.prs, &plan.options,
             &plan, ForgeKind::GitHub,
             &mut prev_reasons, &mut consecutive_errors,
-            &mut last_heartbeat, &mut state, &mut dots,
+            &mut last_heartbeat, &mut state, false,
         ).expect("run_merge_phase should not error");
 
         assert_eq!(forge.merge_calls(), vec![1], "only auth should merge");
