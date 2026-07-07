@@ -1,0 +1,35 @@
+name = "watch-waits-on-block"
+description = """
+Regression for issue #4: `jjpr watch` must keep waiting on a blocked PR
+until --timeout, not abandon it after a handful of no-progress polls.
+
+Watch submits a single-bookmark stack, creating a PR that can never merge
+in the single-account test repo (it stays blocked awaiting approval, or as
+a draft with pending CI). The no-progress safety valve used to count each
+such wait as a stall and exit after five polls. With JJPR_WATCH_POLL_SECS=2
+(set by the harness) the buggy build would bail in ~10s; the fixed build
+waits out the full 1-minute timeout and exits with "Watch timed out."
+
+The assertion is deliberately forge-behavior-agnostic: whether the block is
+InsufficientApprovals or Draft/ChecksPending, watch must reach the timeout
+and must never print the no-progress message.
+"""
+
+[[stack]]
+bookmark = "block"
+file = "block.rs"
+content = "// block module\n"
+message = "Add block"
+
+[run]
+command = "watch"
+timeout_minutes = 1
+
+[expect]
+exit_status = "success"
+stdout_contains = ["Watch timed out."]
+stdout_not_contains = ["No progress after"]
+
+[[expect.pr]]
+bookmark = "block"
+state = "open"

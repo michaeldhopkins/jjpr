@@ -131,6 +131,10 @@ fn invoke_jjpr(ctx: &ParityContext, args: &[String]) -> RunOutput {
     let out = Command::new(jjpr_binary())
         .args(args)
         .current_dir(&ctx.repo_path)
+        // Drive watch's poll loop fast so watch scenarios run in seconds
+        // rather than 30s per iteration. Read only by `jjpr watch`; harmless
+        // for submit/merge. See main::watch_poll_interval.
+        .env("JJPR_WATCH_POLL_SECS", "2")
         .output()
         .expect("invoke jjpr binary");
     RunOutput::from_output(out)

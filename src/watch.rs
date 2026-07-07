@@ -196,6 +196,32 @@ struct MergePhaseOutcome {
     skipped: Vec<SkippedMergedPr>,
     blocked: Option<BlockedPr>,
     all_done: bool,
+    /// The merge phase stopped early because a segment is still blocked and
+    /// we're waiting for it to clear (CI pending, awaiting approval, still a
+    /// draft) — as opposed to a hard block (`blocked`) or running to
+    /// completion. This is an *active wait*, not a stall: the outer loop must
+    /// not count it toward the no-progress safety valve, or `jjpr watch`
+    /// abandons slow CI after five polls (issue #4).
+    waiting_on_block: bool,
+}
+
+/// Whether a just-finished merge phase represents a genuine *stall* that
+/// should count toward the no-progress safety valve.
+///
+/// A stall is: the phase ran without stopping to wait on a block, yet nothing
+/// merged/skipped changed and nothing was created or promoted. That happens
+/// when `rediscover_segments` keeps handing back the same already-merged
+/// segments — a real loop we must break out of.
+///
+/// An active wait on a still-blocked segment is not a stall: watch must keep
+/// polling until the user's `--timeout` fires (issue #4).
+fn is_stalled(
+    waiting_on_block: bool,
+    total_before: usize,
+    total_after: usize,
+    created_or_promoted: bool,
+) -> bool {
+    !waiting_on_block && total_after == total_before && !created_or_promoted
 }
 
 /// What the outer watch loop should do after a merge phase, given the
@@ -276,6 +302,7 @@ fn run_merge_phase(
     let mut skipped = Vec::new();
     let mut seg_idx = 0;
     let mut advanced = false;
+    let mut waiting_on_block = false;
 
     while seg_idx < segments.len() {
         let segment = &segments[seg_idx];
@@ -377,6 +404,7 @@ fn run_merge_phase(
                             reasons,
                         }),
                         all_done: false,
+                        waiting_on_block: false,
                     });
                 }
 
@@ -420,6 +448,7 @@ fn run_merge_phase(
                         }
                     }
                 }
+                waiting_on_block = true;
                 break; // Wait for next iteration
             }
         }
@@ -450,6 +479,7 @@ fn run_merge_phase(
         skipped,
         blocked: None,
         all_done: seg_idx >= segments.len() && advanced,
+        waiting_on_block,
     })
 }
 
@@ -762,8 +792,16 @@ pub fn run_watch_loop(
         }
 
         // No-progress safety valve: must run even when all_done fires, because
-        // rediscover_segments might keep returning the same already-merged segments.
-        if total_after == total_before && !created_or_promoted {
+        // rediscover_segments might keep returning the same already-merged
+        // segments. But an active wait on a still-blocked segment (CI pending,
+        // awaiting approval) is not a stall — only --timeout should end that
+        // (issue #4). See is_stalled.
+        if is_stalled(
+            merge_outcome.waiting_on_block,
+            total_before,
+            total_after,
+            created_or_promoted,
+        ) {
             no_progress_count += 1;
             if no_progress_count >= 5 {
                 clear_dot_line(&mut dots_on_line);
@@ -1299,6 +1337,33 @@ mod tests {
         assert!(calls.contains(&"mark_pr_ready:3".to_string()));
     }
 
+    // --- is_stalled (no-progress safety valve) ---
+
+    #[test]
+    fn stalled_when_nothing_changed_and_not_waiting() {
+        // Merge phase ran to completion, nothing merged, nothing created:
+        // rediscover keeps handing back already-merged segments. A real stall.
+        assert!(is_stalled(false, 2, 2, false));
+    }
+
+    #[test]
+    fn not_stalled_while_waiting_on_block() {
+        // Regression test for issue #4: a segment blocked on pending CI or an
+        // awaited approval is an active wait, not a stall — the no-progress
+        // valve must not fire, so --timeout alone governs how long we wait.
+        assert!(!is_stalled(true, 2, 2, false));
+    }
+
+    #[test]
+    fn not_stalled_when_a_merge_landed() {
+        assert!(!is_stalled(false, 1, 2, false));
+    }
+
+    #[test]
+    fn not_stalled_when_something_was_created_or_promoted() {
+        assert!(!is_stalled(false, 2, 2, true));
+    }
+
     // --- wait_for_bookmark stub + tests ---
 
     /// Jj stub for wait_for_bookmark. `appear_after` controls how many
@@ -1670,6 +1735,82 @@ mod tests {
         fn merge_into(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
         fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> { Ok(vec!["c".into()]) }
         fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
+    }
+
+    /// Forge serving a non-draft, mergeable, CI-passing PR that has zero
+    /// approvals. With required_approvals = 1, evaluate_segment returns
+    /// Blocked{InsufficientApprovals} — a segment we must wait on, not merge.
+    struct UnapprovedForge {
+        prs: HashMap<String, PullRequest>,
+    }
+    impl UnapprovedForge {
+        fn new(prs: Vec<PullRequest>) -> Self {
+            let map = prs.into_iter().map(|p| (p.head.ref_name.clone(), p)).collect();
+            Self { prs: map }
+        }
+    }
+    impl Forge for UnapprovedForge {
+        fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+            Ok(self.prs.values().cloned().collect())
+        }
+        fn merge_pr(&self, _: &str, _: &str, _: u64, _: MergeMethod) -> Result<()> {
+            panic!("a blocked segment must never be merged");
+        }
+        fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
+            Ok(PrMergeability { mergeable: Some(true), mergeable_state: "clean".into() })
+        }
+        fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+            Ok(ChecksStatus::Pass)
+        }
+        fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
+            Ok(ReviewSummary { approved_count: 0, changes_requested: false })
+        }
+        fn find_merged_pr(&self, _: &str, _: &str, _: &str) -> Result<Option<PullRequest>> { Ok(None) }
+        fn create_pr(&self, _: &str, _: &str, _: &str, _: &str, _: &str, _: &str, _: bool) -> Result<PullRequest> { unimplemented!() }
+        fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> { Ok(()) }
+        fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> { Ok(()) }
+        fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
+        fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> { unimplemented!() }
+        fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
+        fn get_authenticated_user(&self) -> Result<String> { Ok("test".into()) }
+        fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
+            Ok(PrState { merged: false, state: "open".into() })
+        }
+    }
+
+    #[test]
+    fn run_merge_phase_flags_waiting_on_blocked_segment() {
+        // Regression for issue #4: a segment blocked on an awaited approval
+        // must surface as waiting_on_block so the outer loop's no-progress
+        // valve treats it as an active wait, not a stall.
+        let forge = UnapprovedForge::new(vec![gate_test_pr("auth", 1)]);
+        let segments = vec![gate_test_segment("auth")];
+        let plan = gate_test_plan();
+        let mut state = ReconcileState::default();
+        let mut prev_reasons: Option<Vec<BlockReason>> = None;
+        let mut consecutive_errors = 0u32;
+        let mut last_heartbeat = Instant::now();
+        let mut dots = false;
+
+        let outcome = run_merge_phase(
+            &HealthyJj, &forge, &segments, &forge.prs, &plan.options,
+            &plan, ForgeKind::GitHub,
+            &mut prev_reasons, &mut consecutive_errors,
+            &mut last_heartbeat, &mut state, &mut dots,
+        ).expect("run_merge_phase should not error");
+
+        assert!(outcome.waiting_on_block, "blocked segment must set waiting_on_block");
+        assert!(outcome.merged.is_empty(), "nothing should merge while blocked");
+        assert!(outcome.blocked.is_none(), "InsufficientApprovals is a soft wait, not a hard block");
+        assert!(!outcome.all_done, "the phase stopped early to wait, not because it finished");
+
+        // The whole point: is_stalled must not count this as a stall.
+        assert!(
+            !is_stalled(outcome.waiting_on_block, 0, 0, false),
+            "an active wait must not trip the no-progress valve",
+        );
     }
 
     // --- classify_post_merge tests (the persistent-watch state machine) ---
