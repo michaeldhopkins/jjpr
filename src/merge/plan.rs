@@ -29,12 +29,21 @@ pub enum BlockReason {
     /// Recovery is usually retry; persistent failures need network or
     /// permission investigation.
     ForgeReconcileFailed,
+    /// A concurrent jj process reconciled the operation log during our
+    /// reconcile, so we rolled the working copy back to a known-good
+    /// operation rather than ship the mangled auto-merge. Transient: the
+    /// next poll retries. Persistent means another jj/jjpr process is still
+    /// running on this repo and needs to be paused.
+    ConcurrentModification,
 }
 
 impl BlockReason {
     /// Transient reasons that may resolve without user action (worth watching).
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::ChecksPending | Self::MergeabilityUnknown)
+        matches!(
+            self,
+            Self::ChecksPending | Self::MergeabilityUnknown | Self::ConcurrentModification
+        )
     }
 }
 
