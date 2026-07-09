@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use vcs_runner::{is_transient_error, jj_available, run_jj_utf8, run_jj_utf8_with_retry};
+use vcs_runner::{
+    is_transient_error, jj_available, jj_current_operation_id, jj_divergent_change_ids,
+    jj_is_divergent_at_operation, jj_op_restore, jj_operation_log, run_jj_utf8,
+    run_jj_utf8_with_retry,
+};
 
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
@@ -180,6 +184,42 @@ impl Jj for JjRunner {
             "log", "-r", revset, "--no-graph", "-T", r#"if(conflict, "true", "false")"#,
         ])?;
         Ok(output.trim() == "true")
+    }
+
+    // Operation-log primitives live in vcs-runner (the shared jj/git shell
+    // layer); these delegate. The recovery *policy* — when to snapshot, what's a
+    // good op, walking past a reconcile — stays in jjpr (src/merge, src/watch).
+
+    fn current_operation_id(&self) -> Result<String> {
+        Ok(jj_current_operation_id(&self.repo_path)?)
+    }
+
+    fn operation_descriptions_since(&self, op_id: &str) -> Result<Vec<String>> {
+        // Descriptions of the ops newer than `op_id` (exclusive), newest first.
+        Ok(jj_operation_log(&self.repo_path, 0)?
+            .into_iter()
+            .take_while(|op| op.id != op_id)
+            .map(|op| op.description)
+            .collect())
+    }
+
+    fn divergent_change_ids(&self) -> Result<Vec<String>> {
+        Ok(jj_divergent_change_ids(&self.repo_path)?)
+    }
+
+    fn restore_operation(&self, op_id: &str) -> Result<()> {
+        Ok(jj_op_restore(&self.repo_path, op_id)?)
+    }
+
+    fn recent_operations(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        Ok(jj_operation_log(&self.repo_path, limit)?
+            .into_iter()
+            .map(|op| (op.id, op.description))
+            .collect())
+    }
+
+    fn is_divergent_at_operation(&self, op_id: &str) -> Result<bool> {
+        Ok(jj_is_divergent_at_operation(&self.repo_path, op_id)?)
     }
 }
 
