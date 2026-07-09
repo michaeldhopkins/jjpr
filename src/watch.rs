@@ -948,6 +948,16 @@ fn report_reconcile_failure(
         println!("    - {}", crate::merge::execute::format_block_reason(reason, fk));
     }
 
+    if state.has_concurrent() {
+        println!();
+        println!("  Concurrent modification:");
+        for w in state.warnings.iter().filter(|w| w.kind == DivergenceKind::Concurrent) {
+            println!("    {}", w.message);
+        }
+        // No manual-fix hint: the working copy was already rolled back to a
+        // known-good operation and watch re-syncs from the forge next poll.
+    }
+
     if state.local_failed {
         println!();
         println!("  Local sync warnings:");
