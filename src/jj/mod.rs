@@ -28,53 +28,41 @@ pub trait Jj: Send + Sync {
     /// Check whether the commit at `revset` has unresolved conflicts.
     fn is_conflicted(&self, revset: &str) -> Result<bool>;
 
-    // --- Operation-log awareness (concurrent-modification detection/recovery) ---
-    //
-    // A second jj process mutating the same working copy (e.g. `jjpr watch`
-    // racing a foreground command) forks the operation log; jj then silently
-    // "reconciles divergent operations" by merging the two heads, which can
-    // corrupt the stack (collapse commits, drop files). These methods let us
-    // record a known-good operation before mutating and roll back to it if a
-    // reconcile happened. The defaults are inert so test stubs that don't care
-    // keep compiling; only `JjRunner` (and divergence-specific test stubs)
-    // override them.
+    /// Snapshot the working copy into `@` — capture the user's current edits.
+    /// jjpr is otherwise working-copy-agnostic (it never snapshots incidentally);
+    /// user-invoked commands like `submit` call this once so they act on the
+    /// user's latest state, while the autonomous watch loop never does (it
+    /// operates on committed, bookmarked state). Default is inert for stubs.
+    fn snapshot(&self) -> Result<()> {
+        Ok(())
+    }
 
-    /// The id of the current (head) operation in the operation log. Record this
-    /// before a batch of mutations to get a point to `restore_operation` back to.
+    // --- Operation-log awareness (concurrent-modification recovery) ---
+    //
+    // A second jj process mutating the same repo (e.g. `jjpr watch` racing a
+    // foreground command) forks the operation log; jj then reconciles the two
+    // heads. jj preserves both sides' commits, so the only corruption signature
+    // is a divergent change — which `divergent_change_ids` reports directly. On
+    // that signal the reconcile gates before its rebase, or rolls only the rebase
+    // back to `current_operation_id`'s post-fetch value via `restore_operation`.
+    // The defaults are inert so test stubs that don't care keep compiling.
+
+    /// The id of the current (head) operation in the operation log. Captured
+    /// after fetch as the point to `restore_operation` back to if a rebase mangles.
     fn current_operation_id(&self) -> Result<String> {
         Ok(String::new())
     }
 
-    /// First-line descriptions of the operations newer than `op_id` (exclusive),
-    /// newest first. A "reconcile divergent operations" entry here means a
-    /// concurrent writer forced a reconcile during our mutations.
-    fn operation_descriptions_since(&self, _op_id: &str) -> Result<Vec<String>> {
-        Ok(Vec::new())
-    }
-
     /// Change ids that are divergent (one change id on multiple visible commits).
-    /// Non-empty is the persistent tell left by a concurrent op-log reconcile.
+    /// Non-empty is the corruption signal left by a concurrent op-log reconcile
+    /// (or a rebase racing one) — the sole thing recovery gates on.
     fn divergent_change_ids(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 
     /// Roll the repo back to `op_id` (`jj op restore`). The recovery primitive:
-    /// pick a known-good operation instead of shipping jj's mangled auto-merge.
+    /// undo only our own mangling rebase, back to the clean post-fetch op.
     fn restore_operation(&self, _op_id: &str) -> Result<()> {
         Ok(())
-    }
-
-    /// Recent operations as `(id, first-line description)` pairs, newest first,
-    /// up to `limit`. Used to recover a repo that is *already* divergent at the
-    /// start of a reconcile: spot the "reconcile divergent operations" op and
-    /// walk back to a clean operation to restore to.
-    fn recent_operations(&self, _limit: usize) -> Result<Vec<(String, String)>> {
-        Ok(Vec::new())
-    }
-
-    /// Whether divergent changes exist as of a specific past operation. Lets us
-    /// find the most recent operation whose state predates the divergence.
-    fn is_divergent_at_operation(&self, _op_id: &str) -> Result<bool> {
-        Ok(false)
     }
 }

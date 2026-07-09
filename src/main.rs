@@ -197,9 +197,16 @@ fn resolve_stack(
     preferred_remote: Option<&str>,
     no_fetch: bool,
     command_verb: &str,
+    snapshot: bool,
 ) -> Result<Option<ResolvedStack>> {
     let repo_path = find_repo_root()?;
     let jj = JjRunner::new(repo_path.clone())?;
+    // jjpr is otherwise working-copy-agnostic; for user-invoked commands
+    // (submit/merge) snapshot once so we act on the user's latest edits. The
+    // autonomous watch loop passes false — it operates on committed state.
+    if snapshot {
+        jj.snapshot()?;
+    }
     let cfg = config::load_config_with_repo(Some(&repo_path))?;
 
     let target_bookmark = match bookmark {
@@ -262,7 +269,7 @@ struct SubmitOptions<'a> {
 }
 
 fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
-    let Some(stack) = resolve_stack(opts.bookmark, opts.preferred_remote, opts.no_fetch, "Submitting")? else {
+    let Some(stack) = resolve_stack(opts.bookmark, opts.preferred_remote, opts.no_fetch, "Submitting", true)? else {
         return Ok(());
     };
 
@@ -549,7 +556,7 @@ struct MergeArgs<'a> {
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
-    let Some(stack) = resolve_stack(args.bookmark, args.preferred_remote, no_fetch, "Merging")? else {
+    let Some(stack) = resolve_stack(args.bookmark, args.preferred_remote, no_fetch, "Merging", true)? else {
         return Ok(());
     };
 
@@ -683,7 +690,7 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         }
     };
 
-    let Some(stack) = resolve_stack(resolved_bookmark.as_deref(), preferred_remote, no_fetch, "Watching")? else {
+    let Some(stack) = resolve_stack(resolved_bookmark.as_deref(), preferred_remote, no_fetch, "Watching", false)? else {
         return Ok(());
     };
 

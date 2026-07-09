@@ -30,9 +30,10 @@ pub enum BlockReason {
     /// permission investigation.
     ForgeReconcileFailed,
     /// A concurrent jj process reconciled the operation log during our
-    /// reconcile, so we rolled the working copy back to a known-good
-    /// operation rather than ship the mangled auto-merge. Transient: the
-    /// next poll retries. Persistent means another jj/jjpr process is still
+    /// reconcile. jj preserves both sides' work, so we paused before the
+    /// mangling rebase (or rolled only the rebase back to the clean post-fetch
+    /// op) rather than ship a mangled tree — no work is discarded. Transient:
+    /// the next poll retries. Persistent means another jj/jjpr process is still
     /// running on this repo and needs to be paused.
     ConcurrentModification,
 }

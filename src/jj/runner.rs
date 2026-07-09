@@ -2,8 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use vcs_runner::{
-    is_transient_error, jj_available, jj_current_operation_id, jj_divergent_change_ids,
-    jj_is_divergent_at_operation, jj_op_restore, jj_operation_log, run_jj_utf8,
+    is_transient_error, jj_available, jj_current_operation_id, jj_op_restore, run_jj_utf8,
     run_jj_utf8_with_retry,
 };
 
@@ -29,13 +28,49 @@ impl JjRunner {
         Ok(Self { repo_path })
     }
 
-    /// Run jj and return lossy-decoded stdout with surrounding whitespace trimmed.
+    /// Run jj **working-copy-agnostically** — never snapshots or moves the
+    /// user's checkout. This is jjpr's default: as a background actor it operates
+    /// on committed, bookmarked state, so it must not perturb a live working
+    /// copy. Returns lossy-decoded stdout, trimmed.
     fn run_jj(&self, args: &[&str]) -> Result<String> {
+        let mut full = Vec::with_capacity(args.len() + 1);
+        full.push("--ignore-working-copy");
+        full.extend_from_slice(args);
+        Ok(run_jj_utf8(&self.repo_path, &full)?)
+    }
+
+    /// Run jj **allowing** it to snapshot/update the working copy. Reserved for
+    /// the few operations that intentionally touch `@`: an explicit snapshot, and
+    /// the reconcile rebase/merge when the user is sitting on the affected commit.
+    fn run_jj_touching_wc(&self, args: &[&str]) -> Result<String> {
         Ok(run_jj_utf8(&self.repo_path, args)?)
+    }
+
+    /// Run a stack-rewriting op (rebase/merge) working-copy-aware: touch the
+    /// working copy only when `@` is inside `descendants(affected)` — then jj
+    /// moves `@` and carries the user's edits along; otherwise stay agnostic so
+    /// an unrelated checkout is never snapshotted or moved. Falls back to the
+    /// safe (WC-updating) path if we can't tell.
+    fn run_stack_op(&self, affected: &str, args: &[&str]) -> Result<String> {
+        if self.working_copy_in_subtree(affected).unwrap_or(true) {
+            self.run_jj_touching_wc(args)
+        } else {
+            self.run_jj(args)
+        }
     }
 
     pub fn repo_path(&self) -> &Path {
         &self.repo_path
+    }
+
+    /// Whether the working-copy commit (`@`) is within `descendants(source)` —
+    /// i.e. a rebase rooted at `source` would move it, so jj must update the
+    /// working copy. Checked working-copy-agnostically (via `run_jj`) so the
+    /// check itself never snapshots the user's uncommitted edits.
+    fn working_copy_in_subtree(&self, source: &str) -> Result<bool> {
+        let revset = format!("@ & descendants({source})");
+        let out = self.run_jj(&["log", "-r", &revset, "--no-graph", "-T", r#""x""#])?;
+        Ok(!out.trim().is_empty())
     }
 }
 
@@ -48,7 +83,20 @@ impl Jj for JjRunner {
         // duplicate commits, so those deliberately use `run_jj` (no retry).
         // Fetch is pure-read into the git backend; retrying is safe in both
         // cases.
-        run_jj_utf8_with_retry(&self.repo_path, &["git", "fetch", "--all-remotes"], is_transient_error)?;
+        run_jj_utf8_with_retry(
+            &self.repo_path,
+            &["--ignore-working-copy", "git", "fetch", "--all-remotes"],
+            is_transient_error,
+        )?;
+        Ok(())
+    }
+
+    fn snapshot(&self) -> Result<()> {
+        // Any command WITHOUT --ignore-working-copy snapshots the working copy;
+        // `jj status` is a cheap, side-effect-free way to force it. The one place
+        // jjpr snapshots on purpose — so a user-invoked command captures their
+        // current edits, exactly as any interactive jj command would.
+        self.run_jj_touching_wc(&["status"])?;
         Ok(())
     }
 
@@ -155,13 +203,20 @@ impl Jj for JjRunner {
     }
 
     fn rebase_onto(&self, source: &str, destination: &str) -> Result<()> {
-        self.run_jj(&["rebase", "-s", source, "-d", destination])?;
+        // Working-copy-aware: jj updates the checkout only if `@` is in the
+        // rebased subtree (proven in tests/rebase_working_copy.rs — ignoring it
+        // there strands the user with a stale working copy).
+        self.run_stack_op(source, &["rebase", "-s", source, "-d", destination])?;
         Ok(())
     }
 
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
         let msg = format!("Merge {dest} into {bookmark}");
-        self.run_jj(&["new", "--no-edit", "-m", &msg, bookmark, dest])?;
+        // Same working-copy-awareness as the rebase: only snapshot when the
+        // user's `@` is on the bookmark being advanced. `--no-edit` never moves
+        // `@`, so this never strands; it just controls whether their WIP is
+        // folded into the merge. The bookmark move never touches the WC.
+        self.run_stack_op(bookmark, &["new", "--no-edit", "-m", &msg, bookmark, dest])?;
         let revset = format!("children({bookmark}) & children({dest})");
         self.run_jj(&["bookmark", "set", bookmark, "-r", &revset])?;
         Ok(())
@@ -186,40 +241,28 @@ impl Jj for JjRunner {
         Ok(output.trim() == "true")
     }
 
-    // Operation-log primitives live in vcs-runner (the shared jj/git shell
-    // layer); these delegate. The recovery *policy* — when to snapshot, what's a
-    // good op, walking past a reconcile — stays in jjpr (src/merge, src/watch).
+    // Operation-log primitives for concurrent-modification recovery. `op restore`
+    // and the current-op id delegate to vcs-runner; the recovery *policy* (gate on
+    // divergence, restore only the mangling rebase) stays in jjpr (src/merge).
 
     fn current_operation_id(&self) -> Result<String> {
         Ok(jj_current_operation_id(&self.repo_path)?)
     }
 
-    fn operation_descriptions_since(&self, op_id: &str) -> Result<Vec<String>> {
-        // Descriptions of the ops newer than `op_id` (exclusive), newest first.
-        Ok(jj_operation_log(&self.repo_path, 0)?
-            .into_iter()
-            .take_while(|op| op.id != op_id)
-            .map(|op| op.description)
-            .collect())
-    }
-
     fn divergent_change_ids(&self) -> Result<Vec<String>> {
-        Ok(jj_divergent_change_ids(&self.repo_path)?)
+        // Working-copy-agnostic (via run_jj): a concurrent writer can leave the
+        // working copy stale, and this signal — which exists to detect exactly
+        // that situation — must still be readable then. Going through vcs-runner
+        // (no --ignore-working-copy) errors with "working copy is stale".
+        let out = self.run_jj(&["log", "-r", "divergent()", "--no-graph", "-T", r#"change_id ++ "\n""#])?;
+        let mut ids: Vec<String> = out.lines().filter(|l| !l.is_empty()).map(String::from).collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
     }
 
     fn restore_operation(&self, op_id: &str) -> Result<()> {
         Ok(jj_op_restore(&self.repo_path, op_id)?)
-    }
-
-    fn recent_operations(&self, limit: usize) -> Result<Vec<(String, String)>> {
-        Ok(jj_operation_log(&self.repo_path, limit)?
-            .into_iter()
-            .map(|op| (op.id, op.description))
-            .collect())
-    }
-
-    fn is_divergent_at_operation(&self, op_id: &str) -> Result<bool> {
-        Ok(jj_is_divergent_at_operation(&self.repo_path, op_id)?)
     }
 }
 
