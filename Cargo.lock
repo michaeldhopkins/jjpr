@@ -625,7 +625,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jjpr"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -841,9 +841,9 @@ dependencies = [
 
 [[package]]
 name = "procpilot"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2b07713cc1ea53e2c3c91511e7a486bf7144e66c005b53d934a5b148e135de7"
+checksum = "4e6b1bd540a7f41bd7c768a661a488d67b2e0803100683ecb7e3ff484190873e"
 dependencies = [
  "backon",
  "os_pipe",
@@ -1342,9 +1342,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "vcs-runner"
-version = "0.12.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd50e0aaa4c42af694c052d1637486e2936cc76e337c7ceac44e60e34a07fbb7"
+checksum = "cdefc08fc2f76f77d6d347978bb58434b10e43484711bab07b8bec89359a5e98"
 dependencies = [
  "anyhow",
  "procpilot",
