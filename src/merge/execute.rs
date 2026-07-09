@@ -13,6 +13,25 @@ use crate::jj::Jj;
 
 use super::plan::{evaluate_segment, BlockReason, MergePlan, PrMergeStatus};
 
+/// jj's corruption signal — divergent change ids.
+enum Divergence {
+    Clean,
+    Present(Vec<String>),
+}
+
+/// Read the divergence signal, failing SAFE. A read error here is almost always
+/// lock contention from the very concurrent writer we're guarding against (jj's
+/// op-heads lock; `run_jj` does not retry), and must NEVER be mistaken for
+/// "clean" — that would let a mangled tree through the gate. So an error is
+/// reported as `Present` (with no ids to name), gating the caller.
+fn divergence(jj: &dyn Jj) -> Divergence {
+    match jj.divergent_change_ids() {
+        Ok(d) if d.is_empty() => Divergence::Clean,
+        Ok(d) => Divergence::Present(d),
+        Err(_) => Divergence::Present(Vec::new()),
+    }
+}
+
 /// Attempt to synchronize local state after a forge merge.
 ///
 /// Returns warnings for any local failures (fetch, divergence, rebase, push)
@@ -32,42 +51,42 @@ fn reconcile_local_state(
         message,
     };
 
-    // Record a known-good operation before mutating — but only trust it if the
-    // repo is clean right now. If it's already dirty, there's no clean
-    // pre-mutation op, so recovery falls back to walking the op log.
-    let good_op = match jj.current_operation_id() {
-        Ok(id) if !id.is_empty() => {
-            match jj.divergent_change_ids() {
-                Ok(ref d) if d.is_empty() => Some(id),
-                _ => None,
-            }
-        }
-        _ => None,
-    };
-
-    // Already divergent before we start? Recover to a clean operation before
-    // fetching/rebasing, so we never operate on (and compound) a mangled tree.
-    if good_op.is_none()
-        && let Some(w) = recover_if_concurrent(jj, None)
-    {
-        return vec![w];
+    // The corruption signal is jj's first-class divergent() set: a concurrent
+    // op-log reconcile — or a rebase racing one — leaves two versions of a
+    // change. That is the only thing we gate on. A concurrent reconcile that does
+    // NOT diverge is independent work and is safe to proceed through (proven:
+    // tests/recovery_scenarios.rs::proceeding_through_a_nondivergent_reconcile_stays_clean).
+    //
+    // If the stack is ALREADY divergent, do not rebase it — rebasing a divergent
+    // stack is what collapses/drops files. Both versions are preserved in place;
+    // gate and surface, and the next poll retries once it's resolved. We never
+    // roll back past the divergence, so no real work is discarded.
+    if let Divergence::Present(ids) = divergence(jj) {
+        return vec![concurrent_gate_warning(false, &ids)];
     }
 
     println!("  Fetching remotes...");
     if let Err(e) = jj.git_fetch() {
-        // A failed fetch can still have triggered jj's auto-reconcile of a
-        // concurrent op-log fork; recover before reporting the fetch error.
-        if let Some(w) = recover_if_concurrent(jj, good_op.as_deref()) {
-            return vec![w];
+        // A failed fetch can still have reconciled a concurrent fork into a
+        // divergent state; surface it.
+        if let Divergence::Present(ids) = divergence(jj) {
+            return vec![concurrent_gate_warning(false, &ids)];
         }
         warnings.push(mk(format!("Failed to fetch remotes: {e}")));
         return warnings;
     }
 
-    // The fetch is where a pre-existing concurrent fork gets reconciled. Catch
-    // it here, before any rebase operates on (and compounds) the mangled state.
-    if let Some(w) = recover_if_concurrent(jj, good_op.as_deref()) {
-        return vec![w];
+    // The operation right after fetch — the clean, work-preserving point to roll
+    // a bad rebase back to. We NEVER roll back past this: rolling back to before
+    // the fetch would discard the concurrent process's work, and jj already
+    // preserves both sides' commits in the reconciled state.
+    let post_fetch_op = jj.current_operation_id().ok().filter(|s| !s.is_empty());
+
+    // A concurrent reconcile during the fetch that left the stack divergent: our
+    // work and the other process's work are both present but divergent. Do NOT
+    // rebase on top of that — that is the mangle. Gate, preserving both, retry.
+    if let Divergence::Present(ids) = divergence(jj) {
+        return vec![concurrent_gate_warning(false, &ids)];
     }
 
     // Track which bookmarks to push. With merge strategy, only push bookmarks
@@ -149,10 +168,21 @@ fn reconcile_local_state(
         }
     };
 
-    // The rebase/merge above is the other point a concurrent writer can race.
-    // Detect and roll back before pushing, so we never publish a mangled tree.
-    if let Some(w) = recover_if_concurrent(jj, good_op.as_deref()) {
-        return vec![w];
+    // If the rebase introduced divergence — it raced a concurrent reconcile, or
+    // operated on a state that mangled — undo ONLY the rebase: restore to the
+    // clean post-fetch op (which preserves both our work and the fetched changes)
+    // and retry. Never publish a mangled tree, and never roll back past the fetch.
+    if let Divergence::Present(ids) = divergence(jj) {
+        return match post_fetch_op.as_deref() {
+            // Restore succeeded — the tree is clean again.
+            Some(op) if jj.restore_operation(op).is_ok() => {
+                vec![concurrent_gate_warning(true, &[])]
+            }
+            // Restore failed (likely the same lock contention) or we never
+            // captured a post-fetch op: the divergent tree is still checked out,
+            // so tell the truth. It is not pushed, and the next poll re-gates.
+            _ => vec![concurrent_gate_warning(false, &ids)],
+        };
     }
 
     for name in &bookmarks_to_push {
@@ -166,70 +196,36 @@ fn reconcile_local_state(
     warnings
 }
 
-/// Whether a concurrent jj process forced an op-log reconcile since `good_op`.
-/// True if a "reconcile divergent operations" op appeared, or divergent change
-/// ids now exist — either is the tell that jj merged two op-log heads.
-fn detect_concurrent_modification(jj: &dyn Jj, good_op: &str) -> Result<bool> {
-    let reconciled = jj
-        .operation_descriptions_since(good_op)?
-        .iter()
-        .any(|d| d.contains("reconcile divergent operations"));
-    let divergent = !jj.divergent_change_ids()?.is_empty();
-    Ok(reconciled || divergent)
-}
-
-/// If a concurrent op-log reconcile is detected, roll the repo back to a clean
-/// operation (discarding jj's mangled auto-merge) and return a warning. The
-/// forge is the source of truth for what's been pushed, so the next poll
-/// re-fetches and re-derives. Returns `None` when there's nothing to recover.
-///
-/// Two paths, by whether a trustworthy pre-mutation op was captured:
-/// - `good_op = Some`: the repo was clean when reconcile started; roll back to
-///   that exact op iff a concurrent reconcile has happened since.
-/// - `good_op = None`: the repo was *already* divergent at the start; find the
-///   reconcile op in recent history and walk back to the most recent clean op.
-fn recover_if_concurrent(jj: &dyn Jj, good_op: Option<&str>) -> Option<LocalDivergenceWarning> {
-    let recovery_op = match good_op {
-        Some(good) => detect_concurrent_modification(jj, good)
-            .unwrap_or(false)
-            .then(|| good.to_string()),
-        None => find_recovery_operation(jj),
+/// A work-preserving concurrent-modification warning. jj's reconcile keeps both
+/// sides' commits, so recovery never discards work: we either gate before the
+/// mangling rebase (`restored = false`) or roll only the rebase back to the
+/// clean post-fetch op (`restored = true`). No "run jj op restore" hand-off.
+fn concurrent_gate_warning(restored: bool, divergent_ids: &[String]) -> LocalDivergenceWarning {
+    let mut message = if restored {
+        "Paused: a concurrent jj process raced jjpr's restack. jjpr rolled its \
+         in-progress restack back to the clean fetched state — your work and the \
+         fetched changes are intact — and will retry on the next poll."
+            .to_string()
+    } else {
+        "Paused: a concurrent jj process modified the operation log while jjpr was \
+         reconciling. Both your work and the other process's work are preserved; \
+         jjpr did not restack, to avoid corrupting the stack, and will retry on \
+         the next poll."
+            .to_string()
     };
-    let op = recovery_op?;
-    let message = match jj.restore_operation(&op) {
-        Ok(()) => "Recovered from a concurrent modification: another jj process \
-                   reconciled the operation log, so the working copy was rolled \
-                   back and will re-sync on the next poll. If this repeats, pause \
-                   the other jj/jjpr process on this repo."
-            .to_string(),
-        Err(e) => format!(
-            "Detected a concurrent modification but could not roll back \
-             (jj op restore failed: {e}). Pause any other jj/jjpr process on \
-             this repo, then re-run."
-        ),
-    };
-    Some(LocalDivergenceWarning {
+    if !divergent_ids.is_empty() {
+        message.push_str(&format!(
+            " The stack has a divergent change ({}) — two versions of the same \
+             change from the concurrent modification, both kept. jjpr continues \
+             once it is resolved (keep one with `jj abandon <the-stale-commit>`).",
+            divergent_ids.join(", ")
+        ));
+    }
+    message.push_str(" If another jj/jjpr process is running on this repo, pause it.");
+    LocalDivergenceWarning {
         kind: DivergenceKind::Concurrent,
         message,
-    })
-}
-
-/// Recovery point for a repo that is already divergent at the start of a
-/// reconcile. Only recovers when the divergence came from a concurrent op-log
-/// reconcile (a "reconcile divergent operations" op in recent history) — a
-/// user's *intentional* divergence is left alone. Returns the most recent
-/// operation whose state is free of divergence, to `op restore` back to.
-fn find_recovery_operation(jj: &dyn Jj) -> Option<String> {
-    let ops = jj.recent_operations(20).ok()?;
-    let from_concurrent = ops
-        .iter()
-        .any(|(_, desc)| desc.contains("reconcile divergent operations"));
-    if !from_concurrent {
-        return None;
     }
-    ops.into_iter()
-        .map(|(id, _)| id)
-        .find(|id| matches!(jj.is_divergent_at_operation(id), Ok(false)))
 }
 
 /// Refresh PR state from forge and retarget the next PR's base if needed.
@@ -380,8 +376,8 @@ pub(crate) fn reconcile_after_merge(
         plan.options.reconcile_strategy,
     );
     // Ordinary local-sync failures need a manual rebase (local_failed). A
-    // concurrent op-log reconcile was already rolled back (Concurrent warning)
-    // and degrades via has_concurrent(); both gate further merges.
+    // concurrent op-log reconcile was handled work-preservingly (Concurrent
+    // warning) and degrades via has_concurrent(); both gate further merges.
     if warnings.iter().any(|w| w.kind == DivergenceKind::Local) {
         state.local_failed = true;
     }
@@ -474,9 +470,10 @@ pub enum DivergenceKind {
     /// `reconcile_forge_state` failure: list_open_prs, update_pr_base,
     /// or stack-comment update.
     Forge,
-    /// A concurrent jj process reconciled the op log mid-reconcile; we rolled
-    /// back to a known-good operation. Recovery is automatic (retry), not a
-    /// local rebase — so it renders differently from `Local`.
+    /// A concurrent jj process reconciled the op log mid-reconcile; we paused
+    /// before the mangling rebase (preserving both sides' work) and retry.
+    /// Recovery is automatic and work-preserving, not a manual fix — so it
+    /// renders differently from `Local`.
     Concurrent,
 }
 
@@ -502,8 +499,9 @@ impl ReconcileState {
         self.local_failed || self.forge_failed || self.has_concurrent()
     }
 
-    /// Whether this pass rolled back a concurrent op-log reconcile. Derived
-    /// from the warnings so the struct stays a plain flag/warning bag.
+    /// Whether this pass hit a concurrent op-log reconcile (and paused/rolled
+    /// only the rebase back to preserve work). Derived from the warnings so the
+    /// struct stays a plain flag/warning bag.
     pub fn has_concurrent(&self) -> bool {
         self.warnings.iter().any(|w| w.kind == DivergenceKind::Concurrent)
     }
@@ -2552,70 +2550,78 @@ mod tests {
         assert!(BlockReason::ConcurrentModification.is_transient());
     }
 
-    /// Configurable reconcile stub (builder-style). Models the op-log signals
-    /// reconcile reads and records op restores and pushes.
+    /// Scriptable reconcile stub. `current_operation_id` returns the post-fetch op
+    /// "pf" (the restore target); `divergent` is the standing divergent-change set
+    /// and `divergent_after_rebase` the divergence a mangling rebase introduces.
+    /// Records fetch/rebase/restore/push so tests can assert the exact actions.
     struct FakeReconcileJj {
-        ops_since: Vec<String>,          // operation_descriptions_since (clean-start detection)
-        start_dirty: bool,               // divergent_change_ids non-empty at start
-        recent_ops: Vec<(String, String)>, // recent_operations (id, description), newest first
-        clean_op: Option<String>,        // the op is_divergent_at_operation returns false for
+        divergent: Vec<String>,
+        divergent_after_rebase: Vec<String>,
+        divergent_errors: bool,
+        fetched: Mutex<bool>,
+        rebased: Mutex<bool>,
         restored: Mutex<Vec<String>>,
         pushed: Mutex<Vec<String>>,
     }
     impl FakeReconcileJj {
         fn new() -> Self {
             Self {
-                ops_since: vec![],
-                start_dirty: false,
-                recent_ops: vec![],
-                clean_op: None,
+                divergent: vec![],
+                divergent_after_rebase: vec![],
+                divergent_errors: false,
+                fetched: Mutex::new(false),
+                rebased: Mutex::new(false),
                 restored: Mutex::new(vec![]),
                 pushed: Mutex::new(vec![]),
             }
         }
-        fn ops_since(mut self, v: &[&str]) -> Self {
-            self.ops_since = v.iter().map(|s| s.to_string()).collect();
+        fn divergent(mut self, v: &[&str]) -> Self {
+            self.divergent = v.iter().map(|s| s.to_string()).collect();
             self
         }
-        fn start_dirty(mut self) -> Self {
-            self.start_dirty = true;
+        /// The divergence read fails (models lock contention from a concurrent
+        /// writer — `jj log -r divergent()` erroring transiently).
+        fn divergent_errors(mut self) -> Self {
+            self.divergent_errors = true;
             self
         }
-        fn recent_ops(mut self, v: &[(&str, &str)]) -> Self {
-            self.recent_ops = v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
-            self
-        }
-        fn clean_op(mut self, op: &str) -> Self {
-            self.clean_op = Some(op.to_string());
+        /// Divergence that only appears once the rebase has run — i.e. the rebase
+        /// itself introduced it (the corruption signature).
+        fn divergent_after_rebase(mut self, v: &[&str]) -> Self {
+            self.divergent_after_rebase = v.iter().map(|s| s.to_string()).collect();
             self
         }
     }
     impl Jj for FakeReconcileJj {
         fn current_operation_id(&self) -> Result<String> {
-            Ok("good-op".to_string())
+            Ok("pf".to_string())
         }
         fn divergent_change_ids(&self) -> Result<Vec<String>> {
-            Ok(if self.start_dirty { vec!["ch_x".to_string()] } else { vec![] })
+            if self.divergent_errors {
+                anyhow::bail!("lock contention reading divergent()");
+            }
+            let mut ids = self.divergent.clone();
+            if *self.rebased.lock().expect("poisoned") {
+                ids.extend(self.divergent_after_rebase.iter().cloned());
+            }
+            Ok(ids)
         }
-        fn operation_descriptions_since(&self, _op: &str) -> Result<Vec<String>> {
-            Ok(self.ops_since.clone())
+        fn git_fetch(&self) -> Result<()> {
+            *self.fetched.lock().expect("poisoned") = true;
+            Ok(())
         }
-        fn recent_operations(&self, _limit: usize) -> Result<Vec<(String, String)>> {
-            Ok(self.recent_ops.clone())
-        }
-        fn is_divergent_at_operation(&self, op: &str) -> Result<bool> {
-            Ok(self.clean_op.as_deref() != Some(op))
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+            *self.rebased.lock().expect("poisoned") = true;
+            Ok(())
         }
         fn restore_operation(&self, op: &str) -> Result<()> {
             self.restored.lock().expect("poisoned").push(op.to_string());
             Ok(())
         }
-        fn git_fetch(&self) -> Result<()> { Ok(()) }
         fn push_bookmark(&self, name: &str, _: &str) -> Result<()> {
             self.pushed.lock().expect("poisoned").push(name.to_string());
             Ok(())
         }
-        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
         fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
         fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
         fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
@@ -2635,67 +2641,67 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_recovers_from_concurrent_op_log_reconcile() {
-        // Clean at start, then a concurrent reconcile appears since the good op.
-        let jj = FakeReconcileJj::new().ops_since(&["reconcile divergent operations"]);
-        let warnings = reconcile_two(&jj);
-
-        // Exactly one Concurrent warning — other pass warnings are discarded
-        // because we rolled the tree back.
-        assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
-        // Rolled back to the recorded good operation, and never pushed the mangle.
-        assert_eq!(*jj.restored.lock().unwrap(), vec!["good-op".to_string()]);
-        assert!(jj.pushed.lock().unwrap().is_empty(), "must not push after rollback");
-    }
-
-    #[test]
-    fn reconcile_does_not_false_recover_when_clean() {
-        // No concurrent reconcile in the op log: reconcile must proceed normally
-        // (push the stack), never calling op restore.
-        let jj = FakeReconcileJj::new().ops_since(&["rebase commits", "snapshot working copy"]);
-        let warnings = reconcile_two(&jj);
-
-        assert!(!warnings.iter().any(|w| w.kind == DivergenceKind::Concurrent), "got {warnings:?}");
-        assert!(jj.restored.lock().unwrap().is_empty(), "must not roll back a clean repo");
-        assert_eq!(*jj.pushed.lock().unwrap(), vec!["top".to_string()], "should push normally");
-    }
-
-    #[test]
-    fn reconcile_recovers_when_already_divergent_from_concurrent_reconcile() {
-        // Already divergent at start, and a "reconcile divergent operations" op
-        // is in recent history: recover by rolling back to the most recent clean
-        // operation ("op-clean"), before any fetch/rebase.
-        let jj = FakeReconcileJj::new()
-            .start_dirty()
-            .recent_ops(&[
-                ("op-head", "reconcile divergent operations"),
-                ("op-clean", "new empty commit"),
-                ("op-older", "snapshot working copy"),
-            ])
-            .clean_op("op-clean");
+    fn reconcile_gates_when_already_divergent() {
+        // Already divergent at start: don't rebase a divergent stack, don't roll
+        // back — preserve both versions in place and surface the change id.
+        let jj = FakeReconcileJj::new().divergent(&["ch_x"]);
         let warnings = reconcile_two(&jj);
 
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
-        assert_eq!(*jj.restored.lock().unwrap(), vec!["op-clean".to_string()]);
-        assert!(jj.pushed.lock().unwrap().is_empty(), "must not push mangled state");
+        assert!(warnings[0].message.contains("ch_x"), "should name the divergent change");
+        assert!(!*jj.fetched.lock().unwrap(), "gates before touching the repo");
+        assert!(!*jj.rebased.lock().unwrap());
+        assert!(jj.restored.lock().unwrap().is_empty());
+        assert!(jj.pushed.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn reconcile_leaves_intentional_divergence_alone() {
-        // Divergent at start but NO reconcile op in history: this is a user's
-        // intentional divergence, not a concurrent writer. Must not roll back.
-        let jj = FakeReconcileJj::new()
-            .start_dirty()
-            .recent_ops(&[("op-head", "describe commit abc"), ("op-2", "new empty commit")])
-            .clean_op("op-2");
-        let _ = reconcile_two(&jj);
+    fn reconcile_restores_to_post_fetch_when_rebase_introduces_divergence() {
+        // Fetch is clean; the rebase itself introduces divergence (the corruption
+        // signature — it raced a concurrent reconcile). jjpr must undo ONLY the
+        // rebase: restore to the post-fetch op ("pf"), never past it to "op0"
+        // (which would discard the concurrent process's work), and never push.
+        let jj = FakeReconcileJj::new().divergent_after_rebase(&["ch_b"]);
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
+        assert!(*jj.rebased.lock().unwrap(), "rebase was attempted (fetch was clean)");
+        // Restore targets exactly the post-fetch op — the only op captured, so we
+        // structurally cannot roll back past the fetch.
+        assert_eq!(*jj.restored.lock().unwrap(), vec!["pf".to_string()]);
+        assert!(jj.pushed.lock().unwrap().is_empty(), "must not push a mangled tree");
+    }
+
+    #[test]
+    fn reconcile_proceeds_and_pushes_when_clean() {
+        // No concurrency, no divergence: the normal fast path — rebase and push,
+        // never rolling back.
+        let jj = FakeReconcileJj::new();
+        let warnings = reconcile_two(&jj);
 
         assert!(
-            jj.restored.lock().unwrap().is_empty(),
-            "must not op-restore a user's intentional divergence"
+            !warnings.iter().any(|w| w.kind == DivergenceKind::Concurrent),
+            "got {warnings:?}"
         );
+        assert!(*jj.rebased.lock().unwrap());
+        assert_eq!(*jj.pushed.lock().unwrap(), vec!["top".to_string()]);
+        assert!(jj.restored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_gates_when_the_divergence_read_errors() {
+        // The divergence signal is what a concurrent writer's lock contention
+        // makes fail — and it fails BEFORE we know the state is clean. A read
+        // error must gate (never push), not be mistaken for "no divergence".
+        let jj = FakeReconcileJj::new().divergent_errors();
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
+        assert!(!*jj.rebased.lock().unwrap(), "must not rebase when it can't verify the state");
+        assert!(jj.pushed.lock().unwrap().is_empty(), "must not push when it can't verify the state");
     }
 
     /// `block_reasons()` ordering is load-bearing: prev_reconcile_block

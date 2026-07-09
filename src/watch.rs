@@ -954,8 +954,9 @@ fn report_reconcile_failure(
         for w in state.warnings.iter().filter(|w| w.kind == DivergenceKind::Concurrent) {
             println!("    {}", w.message);
         }
-        // No manual-fix hint: the working copy was already rolled back to a
-        // known-good operation and watch re-syncs from the forge next poll.
+        // No manual-fix hint: the warning already states that both sides' work
+        // is preserved and watch retries next poll. Recovery never discards work,
+        // so there's nothing for the user to restore.
     }
 
     if state.local_failed {
