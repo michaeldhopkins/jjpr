@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod forge;
 pub mod graph;
+pub mod heartbeat;
 pub mod jj;
 pub mod merge;
 pub mod submit;

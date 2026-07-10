@@ -659,6 +659,19 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
     }).expect("failed to set Ctrl+C handler");
 
+    // Single-watcher guard: two `jjpr watch` on one repo can't corrupt anything,
+    // but they double the forge API load every poll (burning the user's rate
+    // limit), so exit if one is already running here. Held for the run; the
+    // heartbeat is removed on drop.
+    let poll_window = watch_poll_interval().as_secs().saturating_mul(2);
+    let heartbeat = match jjpr::heartbeat::WatchHeartbeat::claim(&find_repo_root()?, poll_window) {
+        Some(hb) => hb,
+        None => {
+            println!("jjpr watch is already running on this repo in another window. Exiting.");
+            return Ok(());
+        }
+    };
+
     // For watch: if no bookmark is specified, try to infer one. If none exists
     // yet, wait for one to appear (unlike submit/merge which exit immediately).
     let resolved_bookmark = if let Some(name) = bookmark {
@@ -672,7 +685,7 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
             None => {
                 let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
                 let poll = std::time::Duration::from_secs(5);
-                match jjpr::watch::wait_for_bookmark(&jj, timeout_dur, poll, &shutdown, is_tty)? {
+                match jjpr::watch::wait_for_bookmark(&jj, timeout_dur, poll, &shutdown, is_tty, Some(&heartbeat))? {
                     Some(name) => {
                         println!("Found bookmark '{name}'\n");
                         Some(name)
@@ -730,6 +743,7 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
             poll_interval: watch_poll_interval(),
             is_tty,
         },
+        Some(&heartbeat),
     )?;
 
     print_watch_summary(&result);

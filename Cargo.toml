@@ -1,6 +1,6 @@
 [package]
 name = "jjpr"
-version = "0.28.0"
+version = "0.29.0"
 edition = "2024"
 rust-version = "1.91"
 description = "Manage stacked pull requests in Jujutsu repositories"
@@ -23,7 +23,7 @@ dialoguer = "0.11"
 toml = "0.8"
 percent-encoding = "2"
 ureq = { version = "3", features = ["json"] }
-vcs-runner = { version = "0.14.0", default-features = false }
+vcs-runner = { version = "0.15.0", default-features = false }
 ctrlc = "3"
 libc = "0.2.183"
 
