@@ -646,6 +646,10 @@ pub fn run_watch_loop(
         };
 
         if segments.is_empty() {
+            println!(
+                "\n  Watched stack '{target_bookmark}' is no longer present — it has \
+                 merged, or the bookmark was removed. Stopping."
+            );
             report_orphaned_prs(jj, forge, owner, repo, &merged, &skipped_merged, forge_kind);
             break;
         }
@@ -1013,17 +1017,18 @@ fn rediscover_segments(
 ) -> Result<Vec<NarrowedSegment>> {
     let graph = change_graph::build_change_graph(jj)?;
 
+    // The target was chosen intentionally — named explicitly, or inferred from
+    // the working copy at startup. If it can no longer be resolved it is
+    // genuinely GONE (the stack merged, or the bookmark was removed). We do NOT
+    // fall back to inferring from the working copy here: that would silently
+    // pivot watch onto whatever stack `@` happens to be on and auto-merge PRs
+    // the user never asked to watch. Every resilience case — a rebase moving the
+    // bookmark, a bottom squash-merge, a top conflict — keeps the target
+    // findable (proven in the rediscover_* tests), so no fallback is needed.
+    // Empty means "stop": the loop reports and exits.
     match analyze::analyze_submission_graph(&graph, target_bookmark) {
         Ok(a) => resolve::resolve_bookmark_selections(&a.relevant_segments, false),
-        Err(_) => {
-            // Target bookmark gone — try inferring from working copy
-            if let Ok(Some(inferred)) = analyze::infer_target_bookmark(&graph, jj)
-                && let Ok(a) = analyze::analyze_submission_graph(&graph, &inferred)
-            {
-                return resolve::resolve_bookmark_selections(&a.relevant_segments, false);
-            }
-            Ok(vec![])
-        }
+        Err(_) => Ok(vec![]),
     }
 }
 
@@ -2044,6 +2049,223 @@ mod tests {
         assert!(
             state.warnings.iter().any(|w| w.kind == DivergenceKind::Forge),
             "must record a Forge-kind warning"
+        );
+    }
+
+    // --- "commit switched during watch": what rediscover_segments does when the
+    // watched stack changes mid-watch. Real jj, since it exercises the whole
+    // graph-build -> analyze -> infer path. ---
+
+    fn jj_installed() -> bool {
+        std::process::Command::new("jj").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    }
+
+    /// Two independent stacks off master — bookmark `bA` and bookmark `bB` —
+    /// with `@` left on `bB`. Returns the tempdir (keep it alive) and a runner.
+    fn two_stack_repo() -> (tempfile::TempDir, crate::jj::JjRunner) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = ["--config=user.name=T", "--config=user.email=t@e.com"];
+        let jj = |args: &[&str]| {
+            let mut full: Vec<&str> = cfg.to_vec();
+            full.extend_from_slice(args);
+            std::process::Command::new("jj").args(&full).current_dir(dir.path()).output().expect("jj");
+        };
+        std::process::Command::new("jj").args(["git", "init"]).current_dir(dir.path()).output().expect("init");
+        for (k, v) in [("user.name", "T"), ("user.email", "t@e.com")] {
+            jj(&["config", "set", "--repo", k, v]);
+        }
+        std::fs::write(dir.path().join("base.txt"), "b\n").unwrap();
+        jj(&["describe", "-m", "BASE"]);
+        jj(&["bookmark", "create", "master", "-r", "@"]);
+        jj(&["new", "master", "-m", "A"]);
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        jj(&["status"]);
+        jj(&["bookmark", "create", "bA", "-r", "@"]);
+        jj(&["new", "master", "-m", "B"]);
+        std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+        jj(&["status"]);
+        jj(&["bookmark", "create", "bB", "-r", "@"]);
+        let runner = crate::jj::JjRunner::new(dir.path().to_path_buf()).unwrap();
+        (dir, runner)
+    }
+
+    fn segment_bookmarks(segs: &[NarrowedSegment]) -> Vec<String> {
+        segs.iter().map(|s| s.bookmark.name.clone()).collect()
+    }
+
+    #[test]
+    fn rediscover_follows_target_bookmark_not_the_working_copy() {
+        if !jj_installed() {
+            return;
+        }
+        let (_dir, jj) = two_stack_repo();
+        // `@` is on bB, but we're watching bA — rediscover must follow the
+        // target bookmark, not the working copy. (This is why moving `@`
+        // mid-watch doesn't hijack the watch.)
+        let names = segment_bookmarks(&rediscover_segments(&jj, "bA").unwrap());
+        assert!(names.contains(&"bA".to_string()), "should follow target bA; got {names:?}");
+        assert!(!names.contains(&"bB".to_string()), "must not pick up @'s stack bB; got {names:?}");
+    }
+
+    #[test]
+    fn rediscover_stops_instead_of_hijacking_when_target_gone_and_wc_elsewhere() {
+        if !jj_installed() {
+            return;
+        }
+        let (dir, jj) = two_stack_repo();
+        // The watched bookmark disappears mid-watch (renamed/abandoned in another
+        // window)...
+        std::process::Command::new("jj")
+            .args(["--config=user.name=T", "--config=user.email=t@e.com", "bookmark", "delete", "bA"])
+            .current_dir(dir.path())
+            .output()
+            .expect("delete bA");
+        // ...and `@` happens to be on a DIFFERENT stack (bB). We must NOT pivot
+        // to bB — that would auto-merge a stack the user never asked to watch.
+        // The target is gone, so rediscover returns empty and the loop stops.
+        let names = segment_bookmarks(&rediscover_segments(&jj, "bA").unwrap());
+        assert!(
+            names.is_empty(),
+            "gone target must stop, not hijack @'s stack; got {names:?}"
+        );
+    }
+
+    fn jj_run(dir: &std::path::Path, args: &[&str]) {
+        let mut full = vec!["--config=user.name=T", "--config=user.email=t@e.com"];
+        full.extend_from_slice(args);
+        std::process::Command::new("jj").args(&full).current_dir(dir).output().expect("jj");
+    }
+    fn jj_out(dir: &std::path::Path, args: &[&str]) -> String {
+        let mut full = vec!["--config=user.name=T", "--config=user.email=t@e.com"];
+        full.extend_from_slice(args);
+        let o = std::process::Command::new("jj").args(&full).current_dir(dir).output().expect("jj");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn rediscover_follows_target_across_a_rebase() {
+        if !jj_installed() {
+            return;
+        }
+        let (dir, jj) = two_stack_repo();
+        let before = jj_out(dir.path(), &["--ignore-working-copy", "log", "-r", "bA", "--no-graph", "-T", "commit_id"]);
+        // Rebase bA onto bB: bA's commit id changes, but jj moves the bookmark
+        // NAME with it. This is why ordinary VCS churn (the reconcile rebase, a
+        // concurrent rebase) never triggers the fallback — the target stays
+        // findable by name. The infer fallback is NOT the mechanism that "keeps
+        // track after a move".
+        jj_run(dir.path(), &["--ignore-working-copy", "rebase", "-r", "bA", "-d", "bB"]);
+        let after = jj_out(dir.path(), &["--ignore-working-copy", "log", "-r", "bA", "--no-graph", "-T", "commit_id"]);
+        assert_ne!(before, after, "the rebase should have changed bA's commit id");
+
+        let names = segment_bookmarks(&rediscover_segments(&jj, "bA").unwrap());
+        assert!(names.contains(&"bA".to_string()), "target must stay findable after a rebase; got {names:?}");
+    }
+
+    #[test]
+    fn rediscover_stops_when_target_gone_and_working_copy_is_off_any_stack() {
+        if !jj_installed() {
+            return;
+        }
+        let (dir, jj) = two_stack_repo();
+        // Move @ onto trunk (off both stacks), then the watched bookmark vanishes.
+        jj_run(dir.path(), &["edit", "master"]);
+        jj_run(dir.path(), &["bookmark", "delete", "bA"]);
+        // Target gone AND @ is on nothing watchable -> rediscover returns empty,
+        // which the loop routes into "report orphaned PRs and stop". This is the
+        // benign outcome of the same fallback that misbehaves in the test above:
+        // whether it stops or hijacks depends entirely on where @ happens to be.
+        let names = segment_bookmarks(&rediscover_segments(&jj, "bA").unwrap());
+        assert!(names.is_empty(), "should stop (empty) when target gone and @ is off any stack; got {names:?}");
+    }
+
+    #[test]
+    fn rediscover_keeps_target_findable_through_a_bottom_squash_merge() {
+        if !jj_installed() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let d = dir.path();
+        std::process::Command::new("jj").args(["git", "init"]).current_dir(d).output().expect("init");
+        jj_run(d, &["config", "set", "--repo", "user.name", "T"]);
+        jj_run(d, &["config", "set", "--repo", "user.email", "t@e.com"]);
+        std::fs::write(d.join("base.txt"), "b\n").unwrap();
+        jj_run(d, &["describe", "-m", "BASE"]);
+        jj_run(d, &["bookmark", "create", "master", "-r", "@"]);
+        // Linear stack: bottom (bBot) -> top (bTop), @ on top.
+        jj_run(d, &["new", "-m", "BOTTOM"]);
+        std::fs::write(d.join("bot.txt"), "x\n").unwrap();
+        jj_run(d, &["status"]);
+        jj_run(d, &["bookmark", "create", "bBot", "-r", "@"]);
+        jj_run(d, &["new", "-m", "TOP"]);
+        std::fs::write(d.join("top.txt"), "y\n").unwrap();
+        jj_run(d, &["status"]);
+        jj_run(d, &["bookmark", "create", "bTop", "-r", "@"]);
+        // The bottom PR squash-merges: a squash commit lands on trunk and trunk
+        // advances to it (as `jj git fetch` would import). The local stack still
+        // hangs off the old base until jjpr reconciles on the next poll.
+        jj_run(d, &["--ignore-working-copy", "new", "--no-edit", "master", "-m", "SQUASH"]);
+        let s = jj_out(d, &["--ignore-working-copy", "log", "-r", "description(\"SQUASH\")", "--no-graph", "-T", "commit_id"]);
+        jj_run(d, &["--ignore-working-copy", "bookmark", "set", "master", "-r", &s]);
+
+        let jj = crate::jj::JjRunner::new(d.to_path_buf()).unwrap();
+        // The watched target (top) stays findable THROUGH the bottom squash
+        // merge — it never becomes unfindable, so the @-fallback never triggers.
+        // This is what makes it safe to drop the hijacking fallback.
+        let names = segment_bookmarks(&rediscover_segments(&jj, "bTop").unwrap());
+        assert!(
+            names.contains(&"bTop".to_string()),
+            "target must stay findable through a bottom squash-merge; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn rediscover_when_target_commit_is_conflicted() {
+        if !jj_installed() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let d = dir.path();
+        std::process::Command::new("jj").args(["git", "init"]).current_dir(d).output().expect("init");
+        jj_run(d, &["config", "set", "--repo", "user.name", "T"]);
+        jj_run(d, &["config", "set", "--repo", "user.email", "t@e.com"]);
+        std::fs::write(d.join("f.txt"), "LIMIT = 10\n").unwrap();
+        jj_run(d, &["describe", "-m", "BASE"]);
+        jj_run(d, &["bookmark", "create", "master", "-r", "@"]);
+        // `base` stands in for the squashed bottom's content now on the base the
+        // top gets rebased onto: it edits the same line the top will.
+        jj_run(d, &["new", "master", "-m", "NEWBASE"]);
+        std::fs::write(d.join("f.txt"), "LIMIT = 20\n").unwrap();
+        jj_run(d, &["status"]);
+        jj_run(d, &["bookmark", "create", "bBase", "-r", "@"]);
+        // The top edits the same line, then gets rebased onto that base — both
+        // changed LIMIT, so the top lands CONFLICTED. This is the end state a
+        // squash-merge reconcile produces when the top overlaps the bottom.
+        jj_run(d, &["new", "master", "-m", "TOP"]);
+        std::fs::write(d.join("f.txt"), "LIMIT = 30\n").unwrap();
+        jj_run(d, &["status"]);
+        jj_run(d, &["bookmark", "create", "bTop", "-r", "@"]);
+        jj_run(d, &["rebase", "-s", "bTop", "-d", "bBase"]);
+        let conflicted = jj_out(d, &["--ignore-working-copy", "log", "-r", "bTop", "--no-graph", "-T", "if(conflict, \"yes\", \"no\")"]);
+        assert_eq!(conflicted, "yes", "test setup: bTop should be conflicted");
+
+        let jj = crate::jj::JjRunner::new(d.to_path_buf()).unwrap();
+        let segs = rediscover_segments(&jj, "bTop").unwrap();
+        let names = segment_bookmarks(&segs);
+        // A CONTENT-conflicted commit is NOT dropped from the graph (the
+        // "skipping" path is for divergent/missing bookmarks, not conflict
+        // markers), so the target stays findable. That means it never falls
+        // through to the @-inference fallback, and it never prematurely stops —
+        // it flows into the loop's conflict-wait instead.
+        assert!(
+            names.contains(&"bTop".to_string()),
+            "a conflicted target must stay findable so the conflict-wait handles it; got {names:?}"
+        );
+        // And the conflict flag reaches the segment, so Phase 1b actually waits
+        // for resolution rather than proceeding.
+        assert!(
+            segs.iter().any(|s| s.changes.iter().any(|c| c.conflict)),
+            "the conflicted target's segment must carry the conflict flag so the loop waits for resolution"
         );
     }
 }
