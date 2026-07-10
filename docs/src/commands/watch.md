@@ -101,6 +101,24 @@ Waiting for a bookmark in the working copy's ancestry...
 Run `jj bookmark set <name>` in another shell and the loop picks it up
 within a few seconds.
 
+## Which stack watch follows
+
+Whichever stack you target at startup — named explicitly, or inferred
+from the working copy the first time — is the stack watch follows for the
+rest of the run. It tracks that stack by bookmark, so moving your working
+copy or editing other commits while watch runs does not redirect it.
+
+If the watched stack goes away — it fully merges, or its bookmark is
+removed — watch stops and says so:
+
+```
+Watched stack 'my-feature' is no longer present — it has merged, or the
+bookmark was removed. Stopping.
+```
+
+It will not silently switch to whatever stack you happen to be on. To
+watch a different stack, run `jjpr watch <bookmark>` again.
+
 ## One watcher per repo
 
 Run only one `jjpr watch` per repository. Two watchers poll the forge

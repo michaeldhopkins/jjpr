@@ -598,3 +598,109 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
         "top PR is still live and should not be strikethrough"
     );
 }
+
+/// The squash-merge work scenario: a user watches the top of a stack; the bottom
+/// PR is squash-merged on the forge. The watched target (top) must stay findable
+/// so watch keeps reconciling the SAME stack — it must not lose the target or
+/// silently hijack to whatever the working copy happens to be on. Settles the
+/// "commit switched during watch" decision against the real forge: because the
+/// target survives the squash merge, the working-copy-inference fallback never
+/// needs to fire.
+#[test]
+fn test_watch_target_findable_through_bottom_squash_merge() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+    if !common::jj_available() {
+        println!("Skipping E2E test (jj not available)");
+        return;
+    }
+
+    let ctx = E2eContext::new();
+    let bottom_name = ctx.bookmark_name("sqbot");
+    let top_name = ctx.bookmark_name("sqtop");
+    let full_repo = format!("{OWNER}/{REPO}");
+
+    ctx.write_file(&format!("{bottom_name}.rs"), "// bottom module\n");
+    ctx.commit("Add bottom\n\nBottom of the stack");
+    ctx.set_bookmark(&bottom_name);
+    ctx.write_file(&format!("{top_name}.rs"), "// top module\n");
+    ctx.commit("Add top\n\nTop of the stack");
+    ctx.set_bookmark(&top_name);
+
+    let jj = ctx.runner();
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let github = || {
+        let client = ForgeClient::new(
+            "https://api.github.com",
+            token.clone(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
+        GitHubForge::new(client)
+    };
+    let repo_info = RepoInfo {
+        owner: OWNER.to_string(),
+        repo: REPO.to_string(),
+    };
+    let opts = plan::SubmitOptions {
+        draft_mode: plan::DraftMode::Default,
+        reviewers: &[],
+        reviewer_scope: jjpr::forge::types::ReviewerScope::Bottom,
+        stack_base: None,
+        stack_nav: jjpr::config::StackNavMode::Comment,
+        dry_run: false,
+    };
+
+    // Submit the 2-PR stack.
+    {
+        let graph = change_graph::build_change_graph(&jj).unwrap();
+        let analysis = analyze::analyze_submission_graph(&graph, &top_name).unwrap();
+        let segments =
+            resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
+        let plan = plan::create_submission_plan(
+            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub, "main", &opts,
+        )
+        .unwrap();
+        execute::execute_submission_plan(&jj, &github(), &plan).unwrap();
+    }
+
+    // Top starts based on the bottom branch.
+    let top_pr = find_pr(&top_name).expect("top PR exists");
+    assert_eq!(
+        top_pr["baseRefName"].as_str().unwrap(),
+        bottom_name,
+        "top should start based on the bottom branch"
+    );
+    let bottom_number = find_pr(&bottom_name).expect("bottom PR exists")["number"]
+        .as_u64()
+        .unwrap();
+
+    // Squash-merge the bottom PR (--admin bypasses required-review on the test repo).
+    let merge_status = Command::new("gh")
+        .args([
+            "pr", "merge", &bottom_number.to_string(),
+            "--repo", &full_repo, "--squash", "--admin",
+        ])
+        .status()
+        .expect("gh pr merge");
+    assert!(merge_status.success(), "squash-merge should succeed");
+
+    // Fetch, as a watch poll would before it reconciles.
+    run_jj(ctx.repo_path.as_path(), &["git", "fetch"]);
+
+    // The decision: after a REAL squash merge, the watched target stays findable
+    // and resolves to the same stack. If this ever regressed, watch would fall
+    // back to inferring from the working copy — the hijack we're removing.
+    let graph = change_graph::build_change_graph(&jj).unwrap();
+    let analysis = analyze::analyze_submission_graph(&graph, &top_name)
+        .expect("target must stay findable after a bottom squash-merge — watch must not lose it");
+    let segments =
+        resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
+    assert!(
+        segments.iter().any(|s| s.bookmark.name == top_name),
+        "resolved stack must still contain the top target after the squash merge"
+    );
+}
