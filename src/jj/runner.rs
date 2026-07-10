@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use vcs_runner::{
-    is_transient_error, jj_available, jj_current_operation_id, jj_op_restore, run_jj_utf8,
-    run_jj_utf8_with_retry,
+    is_transient_error, jj_available, jj_current_operation_id, jj_divergent_change_ids,
+    jj_op_restore, run_jj_utf8, run_jj_utf8_ignore_wc, run_jj_utf8_with_retry,
 };
 
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
@@ -33,10 +33,7 @@ impl JjRunner {
     /// on committed, bookmarked state, so it must not perturb a live working
     /// copy. Returns lossy-decoded stdout, trimmed.
     fn run_jj(&self, args: &[&str]) -> Result<String> {
-        let mut full = Vec::with_capacity(args.len() + 1);
-        full.push("--ignore-working-copy");
-        full.extend_from_slice(args);
-        Ok(run_jj_utf8(&self.repo_path, &full)?)
+        Ok(run_jj_utf8_ignore_wc(&self.repo_path, args)?)
     }
 
     /// Run jj **allowing** it to snapshot/update the working copy. Reserved for
@@ -250,15 +247,10 @@ impl Jj for JjRunner {
     }
 
     fn divergent_change_ids(&self) -> Result<Vec<String>> {
-        // Working-copy-agnostic (via run_jj): a concurrent writer can leave the
-        // working copy stale, and this signal — which exists to detect exactly
-        // that situation — must still be readable then. Going through vcs-runner
-        // (no --ignore-working-copy) errors with "working copy is stale".
-        let out = self.run_jj(&["log", "-r", "divergent()", "--no-graph", "-T", r#"change_id ++ "\n""#])?;
-        let mut ids: Vec<String> = out.lines().filter(|l| !l.is_empty()).map(String::from).collect();
-        ids.sort();
-        ids.dedup();
-        Ok(ids)
+        // vcs-runner 0.15 reads this working-copy-agnostically (it must stay
+        // readable when a concurrent writer left the working copy stale — the
+        // exact situation this signal detects) and dedups to distinct changes.
+        Ok(jj_divergent_change_ids(&self.repo_path)?)
     }
 
     fn restore_operation(&self, op_id: &str) -> Result<()> {
