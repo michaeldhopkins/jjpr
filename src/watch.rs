@@ -490,6 +490,7 @@ pub fn wait_for_bookmark(
     poll_interval: Duration,
     shutdown: &AtomicBool,
     is_tty: bool,
+    heartbeat: Option<&crate::heartbeat::WatchHeartbeat>,
 ) -> Result<Option<String>> {
     let deadline = timeout.map(|d| Instant::now() + d);
 
@@ -498,6 +499,11 @@ pub fn wait_for_bookmark(
 
     let mut spinner_frame: usize = 0;
     loop {
+        // Keep the watcher's heartbeat fresh while it waits, so a second
+        // `jjpr watch` started during a long bookmark-wait still backs off.
+        if let Some(hb) = heartbeat {
+            hb.refresh();
+        }
         if shutdown.load(Ordering::Relaxed) {
             clear_status_line(&mut std::io::stdout(), is_tty);
             return Ok(None);
@@ -540,6 +546,7 @@ pub fn run_watch_loop(
     stack_base: Option<&str>,
     stack_nav: crate::config::StackNavMode,
     opts: WatchOptions,
+    heartbeat: Option<&crate::heartbeat::WatchHeartbeat>,
 ) -> Result<WatchResult> {
     let shutdown = opts.shutdown;
     let timeout = opts.timeout;
@@ -595,6 +602,10 @@ pub fn run_watch_loop(
     }
 
     loop {
+        // Mark this watcher alive so a second `jjpr watch` here backs off.
+        if let Some(hb) = heartbeat {
+            hb.refresh();
+        }
         // Clear any spinner frame left by the previous poll's sleep before this
         // iteration prints anything, so real messages never collide with it.
         clear_status_line(&mut std::io::stdout(), is_tty);
@@ -1469,6 +1480,7 @@ mod tests {
             Duration::from_millis(1),
             &shutdown,
             false,
+            None,
         ).unwrap();
 
         assert_eq!(result.as_deref(), Some("auth"));
@@ -1488,6 +1500,7 @@ mod tests {
             Duration::from_secs(60),
             &shutdown,
             false,
+            None,
         ).unwrap();
 
         assert!(result.is_none());
@@ -1508,6 +1521,7 @@ mod tests {
             Duration::from_millis(1),
             &shutdown,
             false,
+            None,
         ).unwrap();
 
         assert!(result.is_none());

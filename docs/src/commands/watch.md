@@ -101,6 +101,21 @@ Waiting for a bookmark in the working copy's ancestry...
 Run `jj bookmark set <name>` in another shell and the loop picks it up
 within a few seconds.
 
+## One watcher per repo
+
+Run only one `jjpr watch` per repository. Two watchers poll the forge
+twice as often, which wastes your API rate limit. If a watch is already
+running on the repo, a second one exits:
+
+```
+jjpr watch is already running on this repo in another window. Exiting.
+```
+
+The running watch records a heartbeat in `.jj/jjpr-watch.json` and
+refreshes it each poll; a second watch sees the fresh heartbeat and
+exits. If a previous watch was killed, the heartbeat goes stale and a
+new watch takes over.
+
 ## Reviewers and scope
 
 `--reviewer alice,bob` requests reviewers each iteration. Default scope
