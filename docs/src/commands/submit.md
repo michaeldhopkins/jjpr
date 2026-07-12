@@ -112,8 +112,10 @@ first PR at that branch instead of the default branch (e.g., `main`).
 The status output reflects this:
 
 ```
-  auth (1 change, #42 open, synced)
-  profile (1 change, needs push)
+  auth (1 change, PR open, push up to date)
+    https://github.com/o/r/pull/42
+  profile (1 change, not pushed yet)
+    no PR yet — run `jjpr submit`
   (based on coworker-feat)
 ```
 
