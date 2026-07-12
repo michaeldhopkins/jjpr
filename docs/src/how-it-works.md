@@ -83,6 +83,13 @@ status output annotates the stack with `(based on <branch>)`.
 This handles the common case of stacking on a coworker's PR branch.
 Override with `--base <branch>` when needed.
 
+`submit`, `watch`, and `merge` only ever act on your own bookmarks
+(commits you authored). `status` is the exception: it shows the whole
+stack down to trunk regardless of author, so a coworker's branch you've
+stacked on appears as its own segment — attributed to them, and marked
+so it's clear the mutating commands leave it alone. See
+[status](commands/status.md).
+
 ## What jjpr never does
 
 - Modify the working copy without an explicit user-driven command.

@@ -600,6 +600,7 @@ mod tests {
                 node_id: "PR_node123".to_string(),
                 merged_at: None,
                 requested_reviewers: vec![],
+                author: String::new(),
             })
         }
         fn update_pr_base(&self, _o: &str, _r: &str, n: u64, base: &str) -> Result<()> {
@@ -991,6 +992,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1041,6 +1043,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1110,6 +1113,7 @@ mod tests {
                     node_id: String::new(),
                     merged_at: None,
                     requested_reviewers: vec![],
+                    author: String::new(),
                 },
             )]),
             remote_name: "origin".to_string(),
@@ -1151,6 +1155,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let new_body =
@@ -1353,6 +1358,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec!["alice".to_string()],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1403,6 +1409,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec!["alice".to_string(), "bob".to_string()],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1453,6 +1460,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec!["Alice".to_string()],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1714,6 +1722,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let profile_pr = PullRequest {
@@ -1727,6 +1736,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1821,6 +1831,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {
@@ -1956,6 +1967,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         };
 
         let plan = SubmissionPlan {

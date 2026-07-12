@@ -11,6 +11,19 @@ use anyhow::Result;
 pub trait Jj: Send + Sync {
     fn git_fetch(&self) -> Result<()>;
     fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>>;
+    /// Bookmarks to display in `status`, regardless of author (unlike
+    /// [`Jj::get_my_bookmarks`], which is author-scoped for the mutating
+    /// commands). This surfaces a coworker's branch you've stacked on.
+    ///
+    /// `all_owned_stacks = false` (the bare working-copy view) discovers only
+    /// the working copy's ancestry — cheap, and all `infer_target_stack` needs.
+    /// `true` (positional or `--all`) also includes your own stacks elsewhere so
+    /// they're findable by name, at the cost of a much larger ancestor closure.
+    /// Defaults to `get_my_bookmarks` for stubs that don't distinguish.
+    fn get_status_bookmarks(&self, all_owned_stacks: bool) -> Result<Vec<Bookmark>> {
+        let _ = all_owned_stacks;
+        self.get_my_bookmarks()
+    }
     /// Get all changes between trunk and `to_commit_id`.
     fn get_changes_to_commit(&self, to_commit_id: &str) -> Result<Vec<LogEntry>>;
     fn get_git_remotes(&self) -> Result<Vec<GitRemote>>;

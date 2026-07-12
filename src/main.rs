@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
 use jjpr::config;
@@ -21,7 +21,7 @@ use jjpr::forge::types::{ChecksStatus, MergeMethod, PrMergeability, PullRequest,
 use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
 use jjpr::forge::token as forge_token;
 use jjpr::graph::change_graph;
-use jjpr::jj::types::Bookmark;
+use jjpr::jj::types::{Bookmark, BookmarkSegment, BranchStack};
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
 use jjpr::submit::{analyze, execute, plan, resolve};
@@ -326,23 +326,35 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         jj.git_fetch()?;
     }
 
-    let graph = change_graph::build_change_graph(&jj)?;
+    // The bare view infers from the working copy, so it only needs `@`'s
+    // ancestry. A positional bookmark or `--all` must also find your other
+    // stacks by name, which costs the larger `::mine()` closure.
+    let graph = change_graph::build_status_graph(&jj, all || bookmark.is_some())?;
 
     if graph.stacks.is_empty() {
         println!("No stacks found. Create bookmarks with `jj bookmark set <name>`.");
         return Ok(());
     }
 
-    let stacks_to_show = match analyze::select_stacks_to_show(&graph, bookmark, all, &jj)? {
+    // Author-scoped bookmarks (mine()) classify each segment: yours (jjpr acts
+    // on it) vs. someone else's (display-only). Discovery above is agnostic.
+    // Propagate a failure rather than fall back to an empty set — an empty set
+    // would mislabel your own stack as entirely someone else's.
+    let my_names: HashSet<String> =
+        jj.get_my_bookmarks()?.into_iter().map(|b| b.name).collect();
+    let segment_is_mine =
+        |seg: &BookmarkSegment| seg.bookmarks.iter().any(|b| my_names.contains(&b.name));
+
+    let stacks_to_show = match analyze::select_stacks_to_show(&graph, bookmark, all, &jj, &my_names)? {
         analyze::StackScope::Show(stacks) => stacks,
         analyze::StackScope::NoTarget => {
             println!("No bookmark in working copy ancestry.");
-            println!("Use `jjpr status --all` to see every local stack, or `jj bookmark set <name>` to mark one.");
+            println!("Use `jjpr status --all` to see your stacks, or `jj bookmark set <name>` to mark one.");
             return Ok(());
         }
         analyze::StackScope::Unknown(name) => {
-            println!("Bookmark '{name}' not found in any stack.");
-            println!("Run `jjpr status --all` to see every local stack.");
+            println!("Bookmark '{name}' not found in any stack containing your work.");
+            println!("Run `jjpr status --all` to see your stacks.");
             return Ok(());
         }
     };
@@ -354,84 +366,80 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         repo_info: None,
     });
 
-    // Fetch status for each PR that has forge access
+    // Per-segment forge state. list_open_prs returns everyone's open PRs in the
+    // repo, so a coworker's open base lands in pr_map keyed by branch name. A
+    // merged PR is looked up (by head branch) only for SOMEONE ELSE'S segment —
+    // never yours: `find_merged_pr` matches by branch name alone, so a fresh
+    // bookmark reusing an old, since-merged branch name would otherwise be
+    // mislabeled "merged, clean up" over live unpushed work.
     let mut status_map: HashMap<String, SegmentDisplayStatus> = HashMap::new();
+    let mut merged_map: HashMap<String, PullRequest> = HashMap::new();
     if let (Some(forge), Some(repo_info)) = (&info.forge, &info.repo_info) {
         for stack in &stacks_to_show {
             for segment in &stack.segments {
-                if let Some(bookmark) = segment.bookmarks.first()
-                    && let Some(pr) = info.pr_map.get(&bookmark.name)
-                {
+                let Some(bookmark) = segment.bookmarks.first() else {
+                    continue;
+                };
+                if let Some(pr) = info.pr_map.get(&bookmark.name) {
                     status_map.insert(
                         bookmark.name.clone(),
                         fetch_segment_status(forge.as_ref(), repo_info, pr),
                     );
+                } else if !segment_is_mine(segment)
+                    && let Ok(Some(pr)) =
+                        forge.find_merged_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)
+                {
+                    merged_map.insert(bookmark.name.clone(), pr);
                 }
+            }
+            // A foreign base (a coworker's branch you rebased onto with no local
+            // bookmark) is a branch name, not a segment. Look up its merged PR so
+            // the `(based on X)` footer can be attributed too; its open PR is
+            // already in pr_map.
+            if let Some(base) = &stack.base_branch
+                && !info.pr_map.contains_key(base)
+                && !merged_map.contains_key(base)
+                && let Ok(Some(pr)) = forge.find_merged_pr(&repo_info.owner, &repo_info.repo, base)
+            {
+                merged_map.insert(base.clone(), pr);
             }
         }
     }
+
+    let render = StatusRender {
+        pr_map: &info.pr_map,
+        merged_map: &merged_map,
+        status_map: &status_map,
+        my_names: &my_names,
+        has_forge: info.forge.is_some(),
+    };
 
     let multi = stacks_to_show.len() > 1;
     for (i, stack) in stacks_to_show.iter().enumerate() {
         if i > 0 {
             println!();
         }
+        // A stack you're viewing that is entirely someone else's (you're sitting
+        // on their branch): recognize it rather than render a stack you can't
+        // act on. Only for the scoped views — `--all` renders uniformly.
+        if !all && render.stack_is_all_foreign(stack) {
+            for line in render.render_foreign_only(stack) {
+                println!("{line}");
+            }
+            continue;
+        }
         if multi {
             println!("Stack {}:", i + 1);
         }
         for segment in &stack.segments {
-            let bookmark_names: Vec<&str> =
-                segment.bookmarks.iter().map(|b| b.name.as_str()).collect();
-            let name = bookmark_names.join(", ");
-            let sync_status = sync_status_label(&segment.bookmarks);
-            let change_count = segment.changes.len();
-
-            let pr_label = segment
-                .bookmarks
-                .first()
-                .and_then(|b| info.pr_map.get(&b.name))
-                .map(|pr| if pr.draft { ", PR draft" } else { ", PR open" })
-                .unwrap_or_default();
-
-            let merge_label = if segment.merge_source_names.is_empty() {
-                String::new()
-            } else {
-                format!(", merge of {}", segment.merge_source_names.join(" + "))
-            };
-
-            println!(
-                "  {} ({} change{}{}{}, {})",
-                name,
-                change_count,
-                if change_count == 1 { "" } else { "s" },
-                merge_label,
-                pr_label,
-                sync_status
-            );
-
-            // Under each segment: the PR link (or a hint when unsubmitted),
-            // then the CI/review detail for non-draft PRs.
-            if let Some(bookmark) = segment.bookmarks.first() {
-                if let Some(pr) = info.pr_map.get(&bookmark.name) {
-                    println!("    {}", pr.html_url);
-                    if !pr.draft
-                        && let Some(status) = status_map.get(&bookmark.name)
-                    {
-                        let line = format_status_line(status);
-                        if !line.is_empty() {
-                            println!("{line}");
-                        }
-                    }
-                } else if info.forge.is_some() {
-                    // Only when we could actually query the forge and it has no
-                    // open PR — not when the forge was unreachable (pr_map is
-                    // then empty for every segment, which is not "no PR yet").
-                    println!("    no PR yet — run `jjpr submit`");
-                }
+            for line in render.render_segment(segment) {
+                println!("{line}");
             }
         }
         if let Some(base) = &stack.base_branch {
-            println!("  (based on {base})");
+            for line in render.render_base(base) {
+                println!("{line}");
+            }
         }
     }
 
@@ -550,6 +558,211 @@ fn format_status_line(status: &SegmentDisplayStatus) -> String {
         return String::new();
     }
     format!("    {}", parts.join("  "))
+}
+
+/// The mergeability half of a status line only — what's relevant for a
+/// coworker's base (you want to know when it can/does land, not its CI/reviews).
+fn format_mergeability_line(status: &SegmentDisplayStatus) -> String {
+    match status.mergeability.as_ref().and_then(|m| m.mergeable) {
+        Some(true) => "    \u{2713} mergeable".to_string(),
+        Some(false) => "    \u{2717} conflicts".to_string(),
+        None => String::new(),
+    }
+}
+
+/// A segment's PR as it matters for display: an open/draft PR, a merged PR
+/// (found by branch after it left the open list), or none.
+enum SegmentPr<'a> {
+    Open(&'a PullRequest),
+    Merged(&'a PullRequest),
+    None,
+}
+
+/// Everything the status renderer needs, borrowed for the render pass.
+struct StatusRender<'a> {
+    pr_map: &'a HashMap<String, PullRequest>,
+    merged_map: &'a HashMap<String, PullRequest>,
+    status_map: &'a HashMap<String, SegmentDisplayStatus>,
+    /// Bookmarks on your own commits (`mine()`). A segment is "yours" iff its
+    /// primary bookmark is here — that's exactly what submit/watch/merge act on.
+    my_names: &'a HashSet<String>,
+    has_forge: bool,
+}
+
+impl StatusRender<'_> {
+    fn resolve_pr(&self, name: &str) -> SegmentPr<'_> {
+        if let Some(pr) = self.pr_map.get(name) {
+            SegmentPr::Open(pr)
+        } else if let Some(pr) = self.merged_map.get(name) {
+            SegmentPr::Merged(pr)
+        } else {
+            SegmentPr::None
+        }
+    }
+
+    fn segment_is_mine(&self, segment: &BookmarkSegment) -> bool {
+        segment.bookmarks.iter().any(|b| self.my_names.contains(&b.name))
+    }
+
+    fn stack_is_all_foreign(&self, stack: &BranchStack) -> bool {
+        !stack.segments.is_empty() && stack.segments.iter().all(|s| !self.segment_is_mine(s))
+    }
+
+    /// The parenthesized third field. For yours it's the push/sync state; for a
+    /// coworker's still-open PR it says jjpr leaves it alone; a merged/no-PR
+    /// foreign segment has nothing to add.
+    fn header_slot(&self, pr: &SegmentPr, mine: bool, bookmarks: &[Bookmark]) -> Option<String> {
+        if mine {
+            Some(sync_status_label(bookmarks).to_string())
+        } else if matches!(pr, SegmentPr::Open(_)) {
+            Some("jjpr won't submit or merge it".to_string())
+        } else {
+            None
+        }
+    }
+
+    fn render_segment(&self, segment: &BookmarkSegment) -> Vec<String> {
+        let name = segment.bookmarks.iter().map(|b| b.name.as_str()).collect::<Vec<_>>().join(", ");
+        let count = segment.changes.len();
+        let plural = if count == 1 { "" } else { "s" };
+        let merge_label = if segment.merge_source_names.is_empty() {
+            String::new()
+        } else {
+            format!(", merge of {}", segment.merge_source_names.join(" + "))
+        };
+
+        let mine = self.segment_is_mine(segment);
+        let pr = segment
+            .bookmarks
+            .first()
+            .map_or(SegmentPr::None, |b| self.resolve_pr(&b.name));
+
+        let pr_label = pr_label(&pr, mine);
+        let slot = self
+            .header_slot(&pr, mine, &segment.bookmarks)
+            .map(|s| format!(", {s}"))
+            .unwrap_or_default();
+
+        let mut lines = vec![format!("  {name} ({count} change{plural}{merge_label}{pr_label}{slot})")];
+        lines.extend(self.render_detail(segment, &pr, mine));
+        lines
+    }
+
+    fn render_detail(&self, segment: &BookmarkSegment, pr: &SegmentPr, mine: bool) -> Vec<String> {
+        let Some(bookmark) = segment.bookmarks.first() else {
+            return vec![];
+        };
+        match pr {
+            SegmentPr::Open(p) => {
+                let mut lines = vec![format!("    {}", p.html_url)];
+                let detail = if mine {
+                    if p.draft {
+                        String::new()
+                    } else {
+                        self.status_map.get(&bookmark.name).map(format_status_line).unwrap_or_default()
+                    }
+                } else {
+                    self.status_map.get(&bookmark.name).map(format_mergeability_line).unwrap_or_default()
+                };
+                if !detail.is_empty() {
+                    lines.push(detail);
+                }
+                lines
+            }
+            SegmentPr::Merged(p) => {
+                let when = merged_on_suffix(p);
+                let mut lines = vec![format!("    {}", p.html_url)];
+                if bookmark.has_remote {
+                    lines.push(format!("    \u{2713} merged{when}"));
+                } else {
+                    lines.push(format!(
+                        "    \u{2713} merged{when}; remote branch deleted, local bookmark is stale"
+                    ));
+                    lines.push(format!("       clean up: jj bookmark forget {}", bookmark.name));
+                }
+                lines
+            }
+            SegmentPr::None => {
+                if mine && self.has_forge {
+                    vec!["    no PR yet — run `jjpr submit`".to_string()]
+                } else {
+                    vec![]
+                }
+            }
+        }
+    }
+
+    /// The `(based on X)` footer, enriched when X has a PR. A base is a branch
+    /// you're stacked on but don't own locally (often a coworker's remote
+    /// branch with no local bookmark), so it's always attributed.
+    fn render_base(&self, base: &str) -> Vec<String> {
+        match self.resolve_pr(base) {
+            SegmentPr::Open(p) => vec![
+                format!("  (based on {base} \u{2014} PR open{})", author_suffix(p, false)),
+                format!("    {}", p.html_url),
+            ],
+            SegmentPr::Merged(p) => vec![
+                format!("  (based on {base} \u{2014} PR merged{})", author_suffix(p, false)),
+                format!("    {}", p.html_url),
+            ],
+            SegmentPr::None => vec![format!("  (based on {base})")],
+        }
+    }
+
+    /// Scenario where the working copy sits on a stack that's entirely someone
+    /// else's: name the branch, show it, and say there's nothing to submit.
+    fn render_foreign_only(&self, stack: &BranchStack) -> Vec<String> {
+        let leaf = stack.segments.first().and_then(|s| s.bookmarks.first());
+        let leaf_name = leaf.map_or("this stack", |b| b.name.as_str());
+        let merged = leaf.is_some_and(|b| matches!(self.resolve_pr(&b.name), SegmentPr::Merged(_)));
+        let qualifier = if merged {
+            "someone else's merged branch"
+        } else {
+            "someone else's branch"
+        };
+        let mut lines = vec![format!("On {leaf_name} \u{2014} {qualifier}:"), String::new()];
+        for segment in &stack.segments {
+            lines.extend(self.render_segment(segment));
+        }
+        if let Some(base) = &stack.base_branch {
+            lines.extend(self.render_base(base));
+        }
+        lines.push(String::new());
+        lines.push("Nothing of yours to submit here.".to_string());
+        lines
+    }
+}
+
+/// ` by @author` for someone else's PR, empty for yours (or when the forge
+/// omits the author).
+fn author_suffix(pr: &PullRequest, mine: bool) -> String {
+    if mine {
+        String::new()
+    } else if pr.author.is_empty() {
+        " by someone else".to_string()
+    } else {
+        format!(" by @{}", pr.author)
+    }
+}
+
+/// The `PR open/draft/merged [by @author]` label. Author attribution appears
+/// only for someone else's PR.
+fn pr_label(pr: &SegmentPr, mine: bool) -> String {
+    match pr {
+        SegmentPr::Open(p) if p.draft => format!(", PR draft{}", author_suffix(p, mine)),
+        SegmentPr::Open(p) => format!(", PR open{}", author_suffix(p, mine)),
+        SegmentPr::Merged(p) => format!(", PR merged{}", author_suffix(p, mine)),
+        SegmentPr::None => String::new(),
+    }
+}
+
+/// " on YYYY-MM-DD" from an ISO merged-at timestamp, or empty. Uses a checked
+/// slice so a malformed/non-ASCII timestamp degrades instead of panicking.
+fn merged_on_suffix(pr: &PullRequest) -> String {
+    match pr.merged_at.as_deref().and_then(|s| s.get(..10)) {
+        Some(date) => format!(" on {date}"),
+        None => String::new(),
+    }
 }
 
 struct MergeArgs<'a> {
@@ -1186,5 +1399,324 @@ mod tests {
     fn status_line_empty_when_no_signals() {
         let status = SegmentDisplayStatus { mergeability: None, checks: None, reviews: None };
         assert_eq!(format_status_line(&status), "");
+    }
+
+    // --- author-agnostic status rendering ---
+
+    fn named_bookmark(name: &str) -> Bookmark {
+        Bookmark {
+            name: name.to_string(),
+            commit_id: "c".to_string(),
+            change_id: "z".to_string(),
+            has_remote: true,
+            is_synced: true,
+        }
+    }
+
+    fn pr_with(author: &str, draft: bool, merged_at: Option<&str>) -> PullRequest {
+        use jjpr::forge::types::PullRequestRef;
+        let empty_ref = || PullRequestRef {
+            ref_name: String::new(),
+            label: String::new(),
+            sha: String::new(),
+        };
+        PullRequest {
+            number: 15138,
+            html_url: "https://x/pull/15138".to_string(),
+            title: "t".to_string(),
+            body: None,
+            base: empty_ref(),
+            head: empty_ref(),
+            draft,
+            node_id: String::new(),
+            merged_at: merged_at.map(str::to_string),
+            requested_reviewers: vec![],
+            author: author.to_string(),
+        }
+    }
+
+    fn seg(names: &[&str]) -> BookmarkSegment {
+        BookmarkSegment {
+            bookmarks: names.iter().map(|n| named_bookmark(n)).collect(),
+            changes: vec![],
+            merge_source_names: vec![],
+        }
+    }
+
+    fn bm(name: &str, has_remote: bool) -> Bookmark {
+        Bookmark {
+            name: name.to_string(),
+            commit_id: "c".to_string(),
+            change_id: "z".to_string(),
+            has_remote,
+            is_synced: has_remote,
+        }
+    }
+
+    fn segment_of(bookmarks: Vec<Bookmark>) -> BookmarkSegment {
+        BookmarkSegment { bookmarks, changes: vec![], merge_source_names: vec![] }
+    }
+
+    fn status_all_pass() -> SegmentDisplayStatus {
+        SegmentDisplayStatus {
+            mergeability: Some(PrMergeability { mergeable: Some(true), mergeable_state: String::new() }),
+            checks: Some(ChecksStatus::Pass),
+            reviews: Some(ReviewSummary { approved_count: 1, changes_requested: false }),
+        }
+    }
+
+    #[test]
+    fn pr_label_covers_ownership_and_state() {
+        // Yours: no author attribution.
+        assert_eq!(pr_label(&SegmentPr::Open(&pr_with("me", false, None)), true), ", PR open");
+        assert_eq!(pr_label(&SegmentPr::Open(&pr_with("me", true, None)), true), ", PR draft");
+        assert_eq!(
+            pr_label(&SegmentPr::Merged(&pr_with("me", false, Some("2026-04-20T00:00:00Z"))), true),
+            ", PR merged"
+        );
+        // Someone else's: attributed.
+        assert_eq!(
+            pr_label(&SegmentPr::Open(&pr_with("dana", false, None)), false),
+            ", PR open by @dana"
+        );
+        assert_eq!(
+            pr_label(&SegmentPr::Merged(&pr_with("jasonziaja", false, Some("2026-04-20"))), false),
+            ", PR merged by @jasonziaja"
+        );
+        // Foreign PR with an unknown author still reads sensibly.
+        assert_eq!(
+            pr_label(&SegmentPr::Open(&pr_with("", false, None)), false),
+            ", PR open by someone else"
+        );
+        assert_eq!(pr_label(&SegmentPr::None, false), "");
+    }
+
+    #[test]
+    fn merged_on_suffix_takes_the_date() {
+        assert_eq!(merged_on_suffix(&pr_with("x", false, Some("2026-04-20T14:43:59Z"))), " on 2026-04-20");
+        assert_eq!(merged_on_suffix(&pr_with("x", false, None)), "");
+        assert_eq!(merged_on_suffix(&pr_with("x", false, Some("short"))), "");
+    }
+
+    #[test]
+    fn mergeability_line_variants() {
+        let with = |m| SegmentDisplayStatus {
+            mergeability: Some(PrMergeability { mergeable: m, mergeable_state: String::new() }),
+            checks: None,
+            reviews: None,
+        };
+        assert_eq!(format_mergeability_line(&with(Some(true))), "    \u{2713} mergeable");
+        assert_eq!(format_mergeability_line(&with(Some(false))), "    \u{2717} conflicts");
+        assert_eq!(format_mergeability_line(&with(None)), "");
+    }
+
+    fn render_with<'a>(
+        pr_map: &'a HashMap<String, PullRequest>,
+        merged_map: &'a HashMap<String, PullRequest>,
+        my_names: &'a HashSet<String>,
+        status_map: &'a HashMap<String, SegmentDisplayStatus>,
+    ) -> StatusRender<'a> {
+        StatusRender { pr_map, merged_map, status_map, my_names, has_forge: true }
+    }
+
+    #[test]
+    fn header_slot_reflects_ownership_and_state() {
+        let (pr_map, merged_map, status_map) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let my: HashSet<String> = HashSet::new();
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+        let bms = [named_bookmark("b")];
+
+        // Yours → the push/sync state.
+        assert_eq!(
+            r.header_slot(&SegmentPr::None, true, &bms).as_deref(),
+            Some("push up to date")
+        );
+        // Someone else's still-open PR → the leave-alone note.
+        assert_eq!(
+            r.header_slot(&SegmentPr::Open(&pr_with("dana", false, None)), false, &bms).as_deref(),
+            Some("jjpr won't submit or merge it")
+        );
+        // Someone else's merged / PR-less segment → nothing to add.
+        assert_eq!(
+            r.header_slot(&SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))), false, &bms),
+            None
+        );
+        assert_eq!(r.header_slot(&SegmentPr::None, false, &bms), None);
+    }
+
+    #[test]
+    fn resolve_pr_prefers_open_then_merged() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("open-one".to_string(), pr_with("a", false, None));
+        let mut merged_map = HashMap::new();
+        merged_map.insert("merged-one".to_string(), pr_with("b", false, Some("2026-04-20")));
+        let (my, status_map) = (HashSet::new(), HashMap::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        assert!(matches!(r.resolve_pr("open-one"), SegmentPr::Open(_)));
+        assert!(matches!(r.resolve_pr("merged-one"), SegmentPr::Merged(_)));
+        assert!(matches!(r.resolve_pr("nope"), SegmentPr::None));
+    }
+
+    #[test]
+    fn ownership_and_all_foreign_detection() {
+        let (pr_map, merged_map, status_map) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let my: HashSet<String> = ["mine-feat".to_string()].into_iter().collect();
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        assert!(r.segment_is_mine(&seg(&["mine-feat"])));
+        assert!(!r.segment_is_mine(&seg(&["coworker-feat"])));
+
+        let all_foreign = BranchStack { segments: vec![seg(&["coworker-feat"])], base_branch: None };
+        let has_mine = BranchStack {
+            segments: vec![seg(&["mine-feat"]), seg(&["coworker-feat"])],
+            base_branch: None,
+        };
+        let empty = BranchStack { segments: vec![], base_branch: None };
+        assert!(r.stack_is_all_foreign(&all_foreign));
+        assert!(!r.stack_is_all_foreign(&has_mine));
+        assert!(!r.stack_is_all_foreign(&empty));
+    }
+
+    #[test]
+    fn renders_mine_open_pr_with_url_and_full_status() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("mine".to_string(), pr_with("me", false, None));
+        let mut status_map = HashMap::new();
+        status_map.insert("mine".to_string(), status_all_pass());
+        let (merged_map, my) = (HashMap::new(), ["mine".to_string()].into_iter().collect());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_segment(&seg(&["mine"]));
+        assert!(lines[0].contains(", PR open,"), "{lines:?}");
+        assert!(!lines[0].contains("by @"), "yours is not attributed: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("pull/15138")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
+    }
+
+    #[test]
+    fn renders_mine_without_pr_as_submit_hint() {
+        let (pr_map, merged_map, status_map) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let my: HashSet<String> = ["mine".to_string()].into_iter().collect();
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+        let lines = r.render_segment(&seg(&["mine"]));
+        assert!(lines.iter().any(|l| l.contains("no PR yet")), "{lines:?}");
+    }
+
+    #[test]
+    fn renders_foreign_open_pr_attributed_with_mergeability_only() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("dana-feat".to_string(), pr_with("dana", false, None));
+        let mut status_map = HashMap::new();
+        // CI fails, but a foreign segment should show mergeability only.
+        status_map.insert(
+            "dana-feat".to_string(),
+            SegmentDisplayStatus {
+                mergeability: Some(PrMergeability { mergeable: Some(true), mergeable_state: String::new() }),
+                checks: Some(ChecksStatus::Fail),
+                reviews: Some(ReviewSummary { approved_count: 0, changes_requested: false }),
+            },
+        );
+        let (merged_map, my) = (HashMap::new(), HashSet::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_segment(&seg(&["dana-feat"]));
+        assert!(lines[0].contains("PR open by @dana"), "{lines:?}");
+        assert!(lines[0].contains("jjpr won't submit or merge it"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("mergeable")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("CI")), "foreign shows mergeability only: {lines:?}");
+    }
+
+    #[test]
+    fn renders_foreign_merged_stale_with_cleanup_hint() {
+        let mut merged_map = HashMap::new();
+        merged_map.insert("gone".to_string(), pr_with("dana", false, Some("2026-04-20T00:00:00Z")));
+        let (pr_map, status_map, my) = (HashMap::new(), HashMap::new(), HashSet::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        // Remote branch deleted (has_remote = false) → stale, with cleanup.
+        let lines = r.render_segment(&segment_of(vec![bm("gone", false)]));
+        assert!(lines[0].contains("PR merged by @dana"), "{lines:?}");
+        assert!(!lines[0].contains("won't submit"), "merged carries no slot: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("merged on 2026-04-20")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("local bookmark is stale")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("jj bookmark forget gone")), "{lines:?}");
+    }
+
+    #[test]
+    fn renders_foreign_merged_with_live_remote_omits_cleanup() {
+        let mut merged_map = HashMap::new();
+        merged_map.insert("kept".to_string(), pr_with("dana", false, Some("2026-04-20")));
+        let (pr_map, status_map, my) = (HashMap::new(), HashMap::new(), HashSet::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_segment(&segment_of(vec![bm("kept", true)]));
+        assert!(lines.iter().any(|l| l.contains("merged on 2026-04-20")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("stale")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("forget")), "{lines:?}");
+    }
+
+    #[test]
+    fn recognition_screen_for_an_all_foreign_stack() {
+        let mut merged_map = HashMap::new();
+        merged_map.insert("cycle".to_string(), pr_with("dana", false, Some("2026-04-20")));
+        let (pr_map, status_map, my) = (HashMap::new(), HashMap::new(), HashSet::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let stack = BranchStack {
+            segments: vec![segment_of(vec![bm("cycle", false)])],
+            base_branch: Some("coworker-base".to_string()),
+        };
+        let lines = r.render_foreign_only(&stack);
+        assert_eq!(lines[0], "On cycle \u{2014} someone else's merged branch:");
+        // The foreign base must not be dropped in the recognition path.
+        assert!(lines.iter().any(|l| l == "  (based on coworker-base)"), "{lines:?}");
+        assert_eq!(lines.last().unwrap(), "Nothing of yours to submit here.");
+    }
+
+    #[test]
+    fn render_base_attributes_an_open_foreign_base() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("platform".to_string(), pr_with("dana", false, None));
+        let (merged_map, my, status_map) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_base("platform");
+        assert_eq!(lines[0], "  (based on platform \u{2014} PR open by @dana)");
+        assert!(lines[1].contains("pull/15138"), "{lines:?}");
+    }
+
+    #[test]
+    fn render_base_attributes_a_merged_foreign_base() {
+        let mut merged_map = HashMap::new();
+        merged_map.insert("platform".to_string(), pr_with("dana", false, Some("2026-04-20")));
+        let (pr_map, my, status_map) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_base("platform");
+        assert_eq!(lines[0], "  (based on platform \u{2014} PR merged by @dana)");
+        assert!(lines[1].contains("pull/15138"), "{lines:?}");
+    }
+
+    #[test]
+    fn render_base_stays_bare_without_a_pr() {
+        let (pr_map, merged_map, my, status_map) =
+            (HashMap::new(), HashMap::new(), HashSet::new(), HashMap::new());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+        assert_eq!(r.render_base("platform"), vec!["  (based on platform)".to_string()]);
+    }
+
+    #[test]
+    fn multi_bookmark_segment_is_mine_if_any_bookmark_is_mine() {
+        let (pr_map, merged_map, status_map) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let my: HashSet<String> = ["my-feat".to_string()].into_iter().collect();
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        // A coworker bookmark listed FIRST, yours second — still yours, so it
+        // must not trigger the "nothing of yours" recognition screen.
+        let segment = segment_of(vec![bm("coworker-feat", true), bm("my-feat", true)]);
+        assert!(r.segment_is_mine(&segment));
+        let stack = BranchStack { segments: vec![segment], base_branch: None };
+        assert!(!r.stack_is_all_foreign(&stack));
     }
 }

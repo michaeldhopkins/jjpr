@@ -721,6 +721,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         }
     }
 
@@ -1512,6 +1513,7 @@ mod tests {
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
+                        author: String::new(),
                     }))
                 } else {
                     Ok(None)
@@ -1578,6 +1580,7 @@ mod tests {
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
+                        author: String::new(),
                     }))
                 } else {
                     Ok(None)
@@ -1640,6 +1643,7 @@ mod tests {
                     node_id: String::new(),
                     merged_at: None,
                     requested_reviewers: vec![],
+                    author: String::new(),
                 }])
             }
             fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
@@ -1655,6 +1659,7 @@ mod tests {
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
+                        author: String::new(),
                     }))
                 } else {
                     Ok(None)
@@ -1762,6 +1767,7 @@ mod tests {
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
+                        author: String::new(),
                     }))
                 } else {
                     Ok(None)
@@ -2129,6 +2135,7 @@ mod tests {
                     node_id: String::new(),
                     merged_at: None,
                     requested_reviewers: vec![],
+                    author: String::new(),
                 },
             )]),
         };

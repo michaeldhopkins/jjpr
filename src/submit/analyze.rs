@@ -63,20 +63,33 @@ pub fn infer_target_stack<'a>(
     graph: &'a ChangeGraph,
     jj: &dyn Jj,
 ) -> Result<Option<&'a BranchStack>> {
+    Ok(overlapping_stacks(graph, jj)?.into_iter().next())
+}
+
+/// Every stack whose ancestry the working copy touches. Usually one, but a
+/// merge working copy (a diamond) reaches into both parents' stacks.
+fn overlapping_stacks<'a>(graph: &'a ChangeGraph, jj: &dyn Jj) -> Result<Vec<&'a BranchStack>> {
     let wc_commit_id = jj.get_working_copy_commit_id()?;
     let wc_ancestry = jj.get_changes_to_commit(&wc_commit_id)?;
-    let wc_change_ids: HashSet<String> = wc_ancestry
-        .iter()
-        .map(|e| e.change_id.clone())
-        .collect();
+    let wc_change_ids: HashSet<String> = wc_ancestry.iter().map(|e| e.change_id.clone()).collect();
 
-    Ok(graph.stacks.iter().find(|stack| {
-        stack.segments.iter().any(|seg| {
-            seg.bookmarks
+    Ok(graph
+        .stacks
+        .iter()
+        .filter(|stack| {
+            stack
+                .segments
                 .iter()
-                .any(|b| wc_change_ids.contains(&b.change_id))
+                .any(|seg| seg.bookmarks.iter().any(|b| wc_change_ids.contains(&b.change_id)))
         })
-    }))
+        .collect())
+}
+
+fn stack_contains_mine(stack: &BranchStack, my_names: &HashSet<String>) -> bool {
+    stack
+        .segments
+        .iter()
+        .any(|seg| seg.bookmarks.iter().any(|b| my_names.contains(&b.name)))
 }
 
 /// Infer the target bookmark from the working copy's position in the graph.
@@ -122,6 +135,7 @@ pub fn select_stacks_to_show<'a>(
     bookmark: Option<&str>,
     all: bool,
     jj: &dyn Jj,
+    my_names: &HashSet<String>,
 ) -> Result<StackScope<'a>> {
     if all {
         return Ok(StackScope::Show(graph.stacks.iter().collect()));
@@ -132,7 +146,17 @@ pub fn select_stacks_to_show<'a>(
             None => StackScope::Unknown(bookmark.to_string()),
         });
     }
-    Ok(match infer_target_stack(graph, jj)? {
+    // When the working copy is a merge (a diamond), it overlaps both parents'
+    // stacks. Prefer one that contains YOUR work, so status shows your arm
+    // rather than arbitrarily picking a coworker's and claiming "nothing of
+    // yours". Falls back to the first overlap when none is yours.
+    let overlapping = overlapping_stacks(graph, jj)?;
+    let chosen = overlapping
+        .iter()
+        .copied()
+        .find(|s| stack_contains_mine(s, my_names))
+        .or_else(|| overlapping.first().copied());
+    Ok(match chosen {
         Some(stack) => StackScope::Show(vec![stack]),
         None => StackScope::NoTarget,
     })
@@ -404,7 +428,7 @@ mod tests {
             branch_changes: vec![],
         };
 
-        match select_stacks_to_show(&graph, None, true, &jj).unwrap() {
+        match select_stacks_to_show(&graph, None, true, &jj, &HashSet::new()).unwrap() {
             StackScope::Show(stacks) => assert_eq!(stacks.len(), 2),
             other => panic!("expected Show, got {other:?}"),
         }
@@ -421,7 +445,7 @@ mod tests {
             branch_changes: vec![],
         };
 
-        match select_stacks_to_show(&graph, Some("checkout"), false, &jj).unwrap() {
+        match select_stacks_to_show(&graph, Some("checkout"), false, &jj, &HashSet::new()).unwrap() {
             StackScope::Show(stacks) => {
                 assert_eq!(stacks.len(), 1);
                 assert_eq!(stacks[0].segments[0].bookmarks[0].name, "payments");
@@ -438,7 +462,7 @@ mod tests {
             branch_changes: vec![],
         };
 
-        match select_stacks_to_show(&graph, Some("missing"), false, &jj).unwrap() {
+        match select_stacks_to_show(&graph, Some("missing"), false, &jj, &HashSet::new()).unwrap() {
             StackScope::Unknown(name) => assert_eq!(name, "missing"),
             other => panic!("expected Unknown, got {other:?}"),
         }
@@ -456,7 +480,7 @@ mod tests {
             branch_changes: vec![make_log_entry("ch2")],
         };
 
-        match select_stacks_to_show(&graph, None, false, &jj).unwrap() {
+        match select_stacks_to_show(&graph, None, false, &jj, &HashSet::new()).unwrap() {
             StackScope::Show(stacks) => {
                 assert_eq!(stacks.len(), 1);
                 assert_eq!(stacks[0].segments[0].bookmarks[0].name, "payments");
@@ -473,9 +497,41 @@ mod tests {
             branch_changes: vec![make_log_entry("ch_other")],
         };
 
-        match select_stacks_to_show(&graph, None, false, &jj).unwrap() {
+        match select_stacks_to_show(&graph, None, false, &jj, &HashSet::new()).unwrap() {
             StackScope::NoTarget => {}
             other => panic!("expected NoTarget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_stacks_prefers_your_arm_of_a_diamond() {
+        // Working copy is a merge whose ancestry reaches BOTH a coworker's stack
+        // (first in graph order) and yours.
+        let graph = make_graph_multi(vec![
+            vec![("coworker-feat", "ch_c")],
+            vec![("my-feat", "ch_m")],
+        ]);
+        let jj = StubJj {
+            wc_commit_id: "merge".to_string(),
+            branch_changes: vec![make_log_entry("ch_c"), make_log_entry("ch_m")],
+        };
+
+        // With no ownership info, inference falls back to the first overlap.
+        match select_stacks_to_show(&graph, None, false, &jj, &HashSet::new()).unwrap() {
+            StackScope::Show(stacks) => {
+                assert_eq!(stacks[0].segments[0].bookmarks[0].name, "coworker-feat");
+            }
+            other => panic!("expected Show, got {other:?}"),
+        }
+
+        // Knowing my-feat is yours, status must pick your arm — not arbitrarily
+        // land on the coworker's and hide your work behind "nothing of yours".
+        let mine: HashSet<String> = ["my-feat".to_string()].into_iter().collect();
+        match select_stacks_to_show(&graph, None, false, &jj, &mine).unwrap() {
+            StackScope::Show(stacks) => {
+                assert_eq!(stacks[0].segments[0].bookmarks[0].name, "my-feat");
+            }
+            other => panic!("expected Show, got {other:?}"),
         }
     }
 }
