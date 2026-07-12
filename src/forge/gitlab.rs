@@ -74,6 +74,7 @@ fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
                     .collect()
             })
             .unwrap_or_default(),
+        author: mr["author"]["username"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -776,6 +777,34 @@ mod tests {
         let mr: serde_json::Value = serde_json::from_str(GITLAB_MR_RESPONSE).unwrap();
         let pr = parse_mr(&mr).unwrap();
         assert!(pr.requested_reviewers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_mr_author_from_username() {
+        let mr: serde_json::Value = serde_json::from_str(
+            r#"{
+                "iid": 42,
+                "web_url": "https://gitlab.com/o/r/-/merge_requests/42",
+                "title": "Auth",
+                "description": null,
+                "target_branch": "main",
+                "source_branch": "auth",
+                "draft": false,
+                "merged_at": null,
+                "source_project_id": 1,
+                "target_project_id": 1,
+                "author": {"username": "dana", "id": 7}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(parse_mr(&mr).unwrap().author, "dana");
+    }
+
+    #[test]
+    fn test_parse_mr_author_missing_degrades_to_empty() {
+        let mr: serde_json::Value = serde_json::from_str(GITLAB_MR_RESPONSE).unwrap();
+        // GITLAB_MR_RESPONSE has no author field.
+        assert_eq!(parse_mr(&mr).unwrap().author, "");
     }
 
     #[test]

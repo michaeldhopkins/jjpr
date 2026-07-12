@@ -21,10 +21,21 @@ pub struct ChangeGraph {
     pub stacks: Vec<BranchStack>,
 }
 
-/// Build the change graph from the current jj repo state.
+/// Build the change graph from your own bookmarks (`mine()`-scoped). Used by
+/// the mutating commands (submit/watch/merge) and as the general entry point.
 pub fn build_change_graph(jj: &dyn Jj) -> Result<ChangeGraph> {
-    let bookmarks = jj.get_my_bookmarks()?;
+    build_change_graph_from(jj, jj.get_my_bookmarks()?)
+}
 
+/// Build the change graph for `status`: author-agnostic, so a coworker's branch
+/// you've stacked on becomes a visible segment rather than an invisible base.
+/// `all_owned_stacks` broadens discovery beyond the working copy's ancestry to
+/// all your stacks (needed for a positional bookmark or `--all`).
+pub fn build_status_graph(jj: &dyn Jj, all_owned_stacks: bool) -> Result<ChangeGraph> {
+    build_change_graph_from(jj, jj.get_status_bookmarks(all_owned_stacks)?)
+}
+
+fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<ChangeGraph> {
     let mut all_bookmarks: HashMap<String, Bookmark> = HashMap::new();
     let mut bookmark_to_change_id: HashMap<String, String> = HashMap::new();
     let mut adjacency_list: HashMap<String, String> = HashMap::new();

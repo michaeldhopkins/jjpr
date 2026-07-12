@@ -97,6 +97,27 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn get_status_bookmarks(&self, all_owned_stacks: bool) -> Result<Vec<Bookmark>> {
+        // Author-agnostic, so a coworker's branch you've stacked on (or are
+        // sitting directly on) shows up in `status`. The bare working-copy view
+        // needs only `@`'s ancestry; `::mine()` (ancestors of every commit you
+        // authored) is a large, wasted closure there, so add it only when we
+        // must also find your other stacks by name (positional / --all).
+        let revset = if all_owned_stacks {
+            "::(@ | mine()) ~ trunk()"
+        } else {
+            "::@ ~ trunk()"
+        };
+        let output = self.run_jj(&["bookmark", "list", "--revisions", revset, "--template", BOOKMARK_TEMPLATE])?;
+        let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
+        for name in warnings {
+            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)");
+            eprintln!("    To clean up the stale local bookmark:");
+            eprintln!("      jj bookmark forget {name} && jj git push --deleted");
+        }
+        Ok(bookmarks)
+    }
+
     fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
         let output = self.run_jj(&[
             "bookmark",

@@ -25,6 +25,26 @@ pub struct PullRequest {
     pub merged_at: Option<String>,
     #[serde(default, deserialize_with = "deserialize_reviewer_logins")]
     pub requested_reviewers: Vec<String>,
+    /// PR author's login (GitHub/Forgejo `user.login`, GitLab `author.username`).
+    /// Empty when the forge omits it (e.g. a deleted account).
+    #[serde(default, rename = "user", deserialize_with = "deserialize_user_login")]
+    pub author: String,
+}
+
+/// Extract a single author login from a nested user object. GitHub/Forgejo
+/// expose the PR author at `user.login` (the field is renamed from `user`);
+/// a null or missing user yields an empty string.
+fn deserialize_user_login<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .get("login")
+        .or_else(|| value.get("username"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// Deserialize an array of user objects into a Vec of login/username strings.

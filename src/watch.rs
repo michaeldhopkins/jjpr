@@ -1118,6 +1118,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         }
     }
 
@@ -1628,6 +1629,7 @@ mod tests {
             node_id: String::new(),
             merged_at: None,
             requested_reviewers: vec![],
+            author: String::new(),
         }
     }
 

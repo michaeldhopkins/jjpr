@@ -590,4 +590,49 @@ mod tests {
         let pr: PullRequest = serde_json::from_str(json).unwrap();
         assert!(pr.requested_reviewers.is_empty());
     }
+
+    #[test]
+    fn test_parse_pr_author_from_user_login() {
+        let json = r#"{
+            "number": 42,
+            "html_url": "https://github.com/o/r/pull/42",
+            "title": "Auth",
+            "body": null,
+            "base": {"ref": "main", "label": ""},
+            "head": {"ref": "auth", "label": ""},
+            "draft": false,
+            "node_id": "",
+            "user": {"login": "octocat", "id": 583231}
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.author, "octocat");
+    }
+
+    #[test]
+    fn test_parse_pr_author_missing_or_null() {
+        // No `user` key at all.
+        let json = r#"{
+            "number": 42,
+            "html_url": "https://github.com/o/r/pull/42",
+            "title": "Auth",
+            "body": null,
+            "base": {"ref": "main", "label": ""},
+            "head": {"ref": "auth", "label": ""}
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.author, "");
+
+        // `user` present but null (e.g. a deleted account).
+        let json_null = r#"{
+            "number": 42,
+            "html_url": "https://github.com/o/r/pull/42",
+            "title": "Auth",
+            "body": null,
+            "base": {"ref": "main", "label": ""},
+            "head": {"ref": "auth", "label": ""},
+            "user": null
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json_null).unwrap();
+        assert_eq!(pr.author, "");
+    }
 }
