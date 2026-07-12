@@ -21,6 +21,7 @@ use jjpr::forge::types::{ChecksStatus, MergeMethod, PrMergeability, PullRequest,
 use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
 use jjpr::forge::token as forge_token;
 use jjpr::graph::change_graph;
+use jjpr::jj::types::Bookmark;
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
 use jjpr::submit::{analyze, execute, plan, resolve};
@@ -348,7 +349,6 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
 
     // Try to resolve forge remote for PR info
     let info = try_load_pr_info(&jj, &cfg, &graph).unwrap_or(PrInfoResult {
-        forge_kind: ForgeKind::GitHub,
         pr_map: HashMap::new(),
         forge: None,
         repo_info: None,
@@ -383,21 +383,14 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
             let bookmark_names: Vec<&str> =
                 segment.bookmarks.iter().map(|b| b.name.as_str()).collect();
             let name = bookmark_names.join(", ");
-            let sync_status = if segment.bookmarks.iter().all(|b| b.is_synced) {
-                "synced"
-            } else {
-                "needs push"
-            };
+            let sync_status = sync_status_label(&segment.bookmarks);
             let change_count = segment.changes.len();
 
             let pr_label = segment
                 .bookmarks
                 .first()
                 .and_then(|b| info.pr_map.get(&b.name))
-                .map(|pr| {
-                    let state = if pr.draft { "draft" } else { "open" };
-                    format!(", {} {state}", info.forge_kind.format_ref(pr.number))
-                })
+                .map(|pr| if pr.draft { ", PR draft" } else { ", PR open" })
                 .unwrap_or_default();
 
             let merge_label = if segment.merge_source_names.is_empty() {
@@ -416,14 +409,24 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
                 sync_status
             );
 
-            // Show status details if available
-            if let Some(bookmark) = segment.bookmarks.first()
-                && let Some(pr) = info.pr_map.get(&bookmark.name)
-                && let Some(status) = status_map.get(&bookmark.name)
-            {
-                let line = format_status_line(status, pr.draft);
-                if !line.is_empty() {
-                    println!("{line}");
+            // Under each segment: the PR link (or a hint when unsubmitted),
+            // then the CI/review detail for non-draft PRs.
+            if let Some(bookmark) = segment.bookmarks.first() {
+                if let Some(pr) = info.pr_map.get(&bookmark.name) {
+                    println!("    {}", pr.html_url);
+                    if !pr.draft
+                        && let Some(status) = status_map.get(&bookmark.name)
+                    {
+                        let line = format_status_line(status);
+                        if !line.is_empty() {
+                            println!("{line}");
+                        }
+                    }
+                } else if info.forge.is_some() {
+                    // Only when we could actually query the forge and it has no
+                    // open PR — not when the forge was unreachable (pr_map is
+                    // then empty for every segment, which is not "no PR yet").
+                    println!("    no PR yet — run `jjpr submit`");
                 }
             }
         }
@@ -436,7 +439,6 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
 }
 
 struct PrInfoResult {
-    forge_kind: ForgeKind,
     pr_map: HashMap<String, PullRequest>,
     forge: Option<Box<dyn Forge>>,
     repo_info: Option<RepoInfo>,
@@ -449,7 +451,7 @@ fn try_load_pr_info(
 ) -> Option<PrInfoResult> {
     let remotes = jj.get_git_remotes().ok()?;
     let resolved = resolve_forge(&remotes, cfg, None).ok()?;
-    let ResolvedForge { forge, kind, repo_info, .. } = resolved;
+    let ResolvedForge { forge, repo_info, .. } = resolved;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -458,7 +460,6 @@ fn try_load_pr_info(
                 eprintln!("hint: run `jjpr auth test` to check authentication for stack overview");
             }
             return Some(PrInfoResult {
-                forge_kind: kind,
                 pr_map: HashMap::new(),
                 forge: None,
                 repo_info: None,
@@ -468,7 +469,6 @@ fn try_load_pr_info(
 
     let pr_map = jjpr::forge::build_pr_map(all_prs, &repo_info.owner);
     Some(PrInfoResult {
-        forge_kind: kind,
         pr_map,
         forge: Some(forge),
         repo_info: Some(repo_info),
@@ -499,11 +499,22 @@ fn fetch_segment_status(
     SegmentDisplayStatus { mergeability, checks, reviews }
 }
 
-fn format_status_line(status: &SegmentDisplayStatus, is_draft: bool) -> String {
-    if is_draft {
-        return "    draft".to_string();
+/// Where a segment's local commits stand relative to the pushed PR branch.
+///
+/// `is_synced` means the remote bookmark points at the same commit as local;
+/// `has_remote` means it was pushed at least once. The three states let a
+/// never-pushed segment say so instead of falsely claiming it "needs push".
+fn sync_status_label(bookmarks: &[Bookmark]) -> &'static str {
+    if !bookmarks.is_empty() && bookmarks.iter().all(|b| b.is_synced) {
+        "push up to date"
+    } else if bookmarks.iter().any(|b| b.has_remote) {
+        "push needs updating"
+    } else {
+        "not pushed yet"
     }
+}
 
+fn format_status_line(status: &SegmentDisplayStatus) -> String {
     let mut parts = Vec::new();
 
     if let Some(m) = &status.mergeability {
@@ -1105,5 +1116,75 @@ fn find_repo_root() -> Result<PathBuf> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jjpr::forge::types::PrMergeability;
+
+    fn bookmark(has_remote: bool, is_synced: bool) -> Bookmark {
+        Bookmark {
+            name: "b".to_string(),
+            commit_id: "c".to_string(),
+            change_id: "z".to_string(),
+            has_remote,
+            is_synced,
+        }
+    }
+
+    #[test]
+    fn sync_status_all_synced_is_up_to_date() {
+        let bms = [bookmark(true, true), bookmark(true, true)];
+        assert_eq!(sync_status_label(&bms), "push up to date");
+    }
+
+    #[test]
+    fn sync_status_pushed_but_ahead_needs_updating() {
+        // Pushed at least once (has_remote) but the remote no longer matches.
+        let bms = [bookmark(true, false)];
+        assert_eq!(sync_status_label(&bms), "push needs updating");
+    }
+
+    #[test]
+    fn sync_status_never_pushed_is_not_pushed_yet() {
+        let bms = [bookmark(false, false)];
+        assert_eq!(sync_status_label(&bms), "not pushed yet");
+    }
+
+    #[test]
+    fn sync_status_mixed_synced_and_ahead_needs_updating() {
+        // One bookmark is up to date, another has unpushed changes: the
+        // segment as a whole still needs a push.
+        let bms = [bookmark(true, true), bookmark(true, false)];
+        assert_eq!(sync_status_label(&bms), "push needs updating");
+    }
+
+    #[test]
+    fn sync_status_empty_is_not_pushed_yet() {
+        assert_eq!(sync_status_label(&[]), "not pushed yet");
+    }
+
+    #[test]
+    fn status_line_renders_mergeability_checks_and_reviews() {
+        let status = SegmentDisplayStatus {
+            mergeability: Some(PrMergeability {
+                mergeable: Some(true),
+                mergeable_state: "clean".to_string(),
+            }),
+            checks: Some(ChecksStatus::Pass),
+            reviews: Some(ReviewSummary { approved_count: 1, changes_requested: false }),
+        };
+        let line = format_status_line(&status);
+        assert!(line.contains("mergeable"), "got: {line}");
+        assert!(line.contains("CI passing"), "got: {line}");
+        assert!(line.contains("1 approval"), "got: {line}");
+    }
+
+    #[test]
+    fn status_line_empty_when_no_signals() {
+        let status = SegmentDisplayStatus { mergeability: None, checks: None, reviews: None };
+        assert_eq!(format_status_line(&status), "");
     }
 }
