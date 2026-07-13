@@ -12,24 +12,15 @@ hint when a bookmark is present but unowned. Note: Tier 2 auto-fetch needs the
 token's `user` scope; without it (e.g. a `repo`-only gh token) it degrades to
 the config backstop, which the new hint guides the user to. Remaining:
 
-- **Command-level laziness tests (D/L/M).** Recording forge stubs proving: the
-  beancounter path fixes the label with `get_authenticated_emails` never called;
-  submit auto-recovers via Tier 2; the happy path fetches neither endpoint.
+- **Laziness assertion (M).** E2E now covers the login match (Tier 1, real
+  forge), the config backstop, and Tier 2 when the token has `user` scope
+  (`tests/e2e.rs`). Still unproven by an automated test: that the happy path
+  fetches NEITHER endpoint — needs a recording forge stub (a 16-method impl), so
+  left as a lower-priority unit follow-up.
 
-### Docs to write (hand-edited prose — facts to cover)
-
-- **`configuration.md` — `[identity]` section.** Fields: `emails` (extra author
-  emails beyond local `user.email`), `logins` (extra forge logins). What it
-  affects: the ownership set every command uses. When you need it: second
-  account, an email not registered on your forge account, offline. When you
-  don't: single account is auto-recognized (login match + fetched verified
-  emails). TOML example with both keys.
-- **`how-it-works.md` — "which commits are yours".** Ownership = local
-  `user.email`, plus PR author-login match against your authenticated login,
-  plus auto-fetched verified account emails, plus `[identity]` config. Note
-  cross-machine same-account works without config.
-- **`status.md`** — a line that cross-machine work under one account is
-  recognized as yours (no longer "someone else's").
+Docs: nothing *needs* changing — the feature is automatic, and the `[identity]`
+backstop is surfaced by the "unowned bookmark" error. Optional judgment call:
+add an `[identity]` entry to `configuration.md` for reference completeness.
 
 
 ## Status whole-stack redesign — DONE (jjpr 0.32.0)

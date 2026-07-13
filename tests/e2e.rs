@@ -3,9 +3,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jjpr::forge::{AuthScheme, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
+use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
 use jjpr::forge::types::RepoInfo;
 use jjpr::graph::change_graph;
+use jjpr::identity::Identity;
 use jjpr::submit::{analyze, execute, plan, resolve};
 
 use tempfile::TempDir;
@@ -71,6 +72,24 @@ impl E2eContext {
 
     fn runner(&self) -> jjpr::jj::JjRunner {
         jjpr::jj::JjRunner::new(self.repo_path.clone()).expect("create JjRunner")
+    }
+
+    /// Create a commit authored under `email` (simulating another machine's git
+    /// identity — distinct from the local `user.email`), containing `file`, and
+    /// bookmark it. `jj new` under `email` stamps the author; `jj commit`
+    /// finalizes the working-copy file into that described commit.
+    fn commit_as(&self, email: &str, file: &str, content: &str, msg: &str, bookmark: &str) {
+        // Base on trunk() directly, not the clone's empty working-copy commit,
+        // so no empty/undescribed commit lands between main and the branch.
+        let cfg = format!("--config=user.email={email}");
+        run_jj(&self.repo_path, &["new", "trunk()", &cfg]);
+        self.write_file(file, content);
+        run_jj(&self.repo_path, &["commit", &cfg, "-m", msg]);
+        run_jj(&self.repo_path, &["bookmark", "set", bookmark, "-r", "@-"]);
+    }
+
+    fn local_email(&self) -> String {
+        run_jj(&self.repo_path, &["config", "get", "user.email"]).trim().to_string()
     }
 }
 
@@ -702,5 +721,177 @@ fn test_watch_target_findable_through_bottom_squash_merge() {
     assert!(
         segments.iter().any(|s| s.bookmark.name == top_name),
         "resolved stack must still contain the top target after the squash merge"
+    );
+}
+
+fn github_forge() -> GitHubForge {
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let client = ForgeClient::new(
+        "https://api.github.com",
+        token,
+        AuthScheme::Bearer,
+        PaginationStyle::LinkHeader,
+    );
+    GitHubForge::new(client)
+}
+
+/// Tier 1 (login match): a PR authored by YOU (your forge login) but committed
+/// under a DIFFERENT email — the reported "same account, another machine" case.
+/// `status` must classify it as yours, using the PR author login, not the email.
+#[test]
+fn test_status_recognizes_your_pr_committed_under_another_email() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+    if !common::jj_available() {
+        println!("Skipping E2E test (jj not available)");
+        return;
+    }
+
+    let ctx = E2eContext::new();
+    let name = ctx.bookmark_name("othermachine");
+    let other_email = "e2e-other-machine@invalid.example";
+    ctx.commit_as(other_email, &format!("{name}.rs"), "// other machine\n", "Work from another machine", &name);
+
+    // Create the PR (opened by the authenticated user) using an identity that
+    // includes the foreign email, so setup discovery finds the branch.
+    let mut jj = ctx.runner();
+    jj.set_identity(&Identity { emails: vec![other_email.to_string()], logins: vec![] });
+    let github = github_forge();
+    let repo_info = RepoInfo { owner: OWNER.to_string(), repo: REPO.to_string() };
+    let graph = change_graph::build_change_graph(&jj).unwrap();
+    let analysis = analyze::analyze_submission_graph(&graph, &name).unwrap();
+    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
+    let submission_plan = plan::create_submission_plan(
+        &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main",
+        &plan::SubmitOptions {
+            draft_mode: plan::DraftMode::Default,
+            reviewers: &[],
+            reviewer_scope: jjpr::forge::types::ReviewerScope::Bottom,
+            stack_base: None,
+            stack_nav: jjpr::config::StackNavMode::Comment,
+            dry_run: false,
+        },
+    )
+    .unwrap();
+    execute::execute_submission_plan(&jj, &github, &submission_plan).unwrap();
+    assert!(find_pr(&name).is_some(), "PR should be created");
+
+    // Now the display: the binary uses its OWN default identity (local email +
+    // no config), so the commit is foreign by email. It must still read as yours
+    // because the PR's author is your authenticated login.
+    let output = Command::new(env!("CARGO_BIN_EXE_jjpr"))
+        .args(["status", &name, "--no-fetch"])
+        .current_dir(&ctx.repo_path)
+        .output()
+        .expect("run jjpr status");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(&name), "status should show the branch: {stdout}");
+    assert!(!stdout.contains("someone else's"), "must not read as someone else's: {stdout}");
+    assert!(!stdout.contains("won't submit or merge"), "must be actionable as yours: {stdout}");
+    assert!(!stdout.contains(" by @"), "yours must not be attributed to another: {stdout}");
+}
+
+/// Tier 2 (auto-augmentation): `submit` recognizes a branch authored under a
+/// VERIFIED account email that jjpr fetches from `/user/emails`. Needs the
+/// token's `user` scope and a verified email distinct from the local one; skips
+/// otherwise (that path degrades to the `[identity]` config backstop).
+#[test]
+fn test_submit_auto_fetches_verified_emails_for_other_machine_work() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+    if !common::jj_available() {
+        println!("Skipping E2E test (jj not available)");
+        return;
+    }
+
+    let ctx = E2eContext::new();
+    // Precondition, via the SAME token jjpr uses: a fetchable verified email
+    // distinct from the local one. No such thing (missing `user` scope, or only
+    // one verified email) → Tier 2 can't auto-recover here; skip.
+    let verified = github_forge().get_authenticated_emails().unwrap_or_default();
+    let local = ctx.local_email();
+    let Some(other_email) = verified.into_iter().find(|e| *e != local) else {
+        println!(
+            "Skipping Tier 2 E2E: no verified account email distinct from local \
+             (missing `user` scope, or a single verified email)"
+        );
+        return;
+    };
+
+    let name = ctx.bookmark_name("tier2");
+    ctx.commit_as(&other_email, &format!("{name}.rs"), "// tier2\n", "Other-machine work", &name);
+
+    // `submit --dry-run` with no bookmark: the seed (local email) can't see this
+    // branch, but Tier 2 fetches the verified emails, recognizes it, and infers.
+    let output = Command::new(env!("CARGO_BIN_EXE_jjpr"))
+        .args(["submit", "--dry-run", "--no-fetch"])
+        .current_dir(&ctx.repo_path)
+        .output()
+        .expect("run jjpr submit");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&name),
+        "Tier 2 should infer the other-email branch. stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !stdout.contains("isn't recognized as yours"),
+        "Tier 2 should have recognized it, not fallen back to the config hint: {stdout}"
+    );
+}
+
+/// Config backstop: `[identity] emails` makes `submit` recognize a branch
+/// authored under that email — no forge scope needed. Exercises the whole
+/// config → seed → owned() → discovery path through the real binary, so it
+/// runs even where Tier 2's `/user/emails` auto-fetch can't (as above).
+#[test]
+fn test_submit_recognizes_other_email_branch_via_identity_config() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+    if !common::jj_available() {
+        println!("Skipping E2E test (jj not available)");
+        return;
+    }
+
+    let ctx = E2eContext::new();
+    let other_email = "e2e-config-backstop@invalid.example";
+    let name = ctx.bookmark_name("configid");
+    ctx.commit_as(other_email, &format!("{name}.rs"), "// config backstop\n", "Other-machine work", &name);
+
+    // Declare the email as one of yours — no forge fetch involved.
+    std::fs::write(
+        ctx.repo_path.join(".jj").join("jjpr.toml"),
+        format!("[identity]\nemails = [\"{other_email}\"]\n"),
+    )
+    .expect("write repo config");
+
+    // `submit --dry-run` (no bookmark): the seed now covers the email, so
+    // inference recognizes the branch without any network augmentation.
+    let output = Command::new(env!("CARGO_BIN_EXE_jjpr"))
+        .args(["submit", "--dry-run", "--no-fetch"])
+        .current_dir(&ctx.repo_path)
+        .output()
+        .expect("run jjpr submit");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&name),
+        "config identity should let submit infer the branch. stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !stdout.contains("isn't recognized as yours"),
+        "the branch should be recognized via [identity] config: {stdout}"
     );
 }
