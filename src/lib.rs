@@ -4,6 +4,7 @@ pub mod config;
 pub mod forge;
 pub mod graph;
 pub mod heartbeat;
+pub mod identity;
 pub mod jj;
 pub mod merge;
 pub mod submit;

@@ -99,6 +99,22 @@ pub fn build_pr_map(prs: Vec<PullRequest>, owner: &str) -> HashMap<String, PullR
         .collect()
 }
 
+/// Verified emails from a GitHub/Forgejo `/user/emails` array
+/// (`[{"email": …, "verified": true}, …]`). Unverified entries are dropped —
+/// an unverified email isn't a trustworthy identity signal.
+pub(crate) fn parse_verified_emails(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e["verified"].as_bool().unwrap_or(false))
+                .filter_map(|e| e["email"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Trait abstracting forge operations (GitHub, GitLab, Forgejo) for testability.
 pub trait Forge: Send + Sync {
     fn list_open_prs(
@@ -174,6 +190,15 @@ pub trait Forge: Send + Sync {
 
     fn get_authenticated_user(&self) -> Result<String>;
 
+    /// The authenticated account's verified email addresses. Best-effort: a
+    /// token without the email scope, or a forge that doesn't expose this,
+    /// returns an empty list rather than failing a command. Used to recognize
+    /// your own commits authored under a different email (another machine).
+    /// Defaults to empty so stubs and unsupported forges need no override.
+    fn get_authenticated_emails(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     fn find_merged_pr(
         &self,
         owner: &str,
@@ -221,6 +246,25 @@ pub trait Forge: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_verified_emails_keeps_only_verified() {
+        let json = serde_json::json!([
+            {"email": "primary@x.com", "verified": true, "primary": true},
+            {"email": "unverified@x.com", "verified": false},
+            {"email": "work@x.com", "verified": true}
+        ]);
+        assert_eq!(parse_verified_emails(&json), vec!["primary@x.com", "work@x.com"]);
+    }
+
+    #[test]
+    fn parse_verified_emails_tolerates_non_array_and_missing_fields() {
+        assert!(parse_verified_emails(&serde_json::json!(null)).is_empty());
+        assert!(parse_verified_emails(&serde_json::json!({})).is_empty());
+        // An entry missing `verified` is treated as unverified.
+        let json = serde_json::json!([{"email": "x@x.com"}]);
+        assert!(parse_verified_emails(&json).is_empty());
+    }
 
     fn make_pr(ref_name: &str, label: &str) -> PullRequest {
         PullRequest {

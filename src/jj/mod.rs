@@ -10,6 +10,11 @@ use anyhow::Result;
 /// Trait abstracting jj operations for testability.
 pub trait Jj: Send + Sync {
     fn git_fetch(&self) -> Result<()>;
+    /// The configured local `user.email`, or empty if unset. Seeds the set of
+    /// identities that count as you. Defaults to empty for stubs.
+    fn get_user_email(&self) -> Result<String> {
+        Ok(String::new())
+    }
     fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>>;
     /// Bookmarks to display in `status`, regardless of author (unlike
     /// [`Jj::get_my_bookmarks`], which is author-scoped for the mutating

@@ -1,5 +1,39 @@
 # jjpr TODO
 
+## Multi-identity ownership — Tier 1 shipped (0.33.0), Tier 2 remaining
+
+Full spec: `docs-dev/identity-ownership.md`. Shipped: `owned()` email-union
+discovery (`Identity`, `JjRunner::set_identity`), config `[identity]`, seeded in
+status/submit/merge, and the Tier-1 login match that fixes the reported status
+label (verified in beancounter) with no `/user/emails` call. Remaining:
+
+- **Tier 2 lazy `/user/emails` auto-augmentation.** When a mutating command's
+  `owned()` (local + config) discovers nothing but `::@ ~ trunk()` is non-empty,
+  auto-fetch `get_authenticated_emails`, extend the identity, rebuild, retry
+  once. Makes `submit` recognize an other-email branch with zero config.
+- **Seed the `watch` flow.** `cmd_watch` and the watch loop build their own `jj`
+  instances (main.rs ~962, watch.rs ~1018) that don't yet call `set_identity`;
+  wire them like `resolve_stack` so watch honors `[identity]`/Tier 2.
+- **Command-level laziness tests (D/L/M).** Recording forge stubs proving: the
+  beancounter path fixes the label with `get_authenticated_emails` never called;
+  submit auto-recovers via Tier 2; the happy path fetches neither endpoint.
+
+### Docs to write (hand-edited prose — facts to cover)
+
+- **`configuration.md` — `[identity]` section.** Fields: `emails` (extra author
+  emails beyond local `user.email`), `logins` (extra forge logins). What it
+  affects: the ownership set every command uses. When you need it: second
+  account, an email not registered on your forge account, offline. When you
+  don't: single account is auto-recognized (login match + fetched verified
+  emails). TOML example with both keys.
+- **`how-it-works.md` — "which commits are yours".** Ownership = local
+  `user.email`, plus PR author-login match against your authenticated login,
+  plus auto-fetched verified account emails, plus `[identity]` config. Note
+  cross-machine same-account works without config.
+- **`status.md`** — a line that cross-machine work under one account is
+  recognized as yours (no longer "someone else's").
+
+
 ## Status whole-stack redesign — DONE (jjpr 0.32.0)
 
 Shipped: author-agnostic discovery for `status` (`::(@ | mine()) ~ trunk()`)
