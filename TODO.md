@@ -12,9 +12,6 @@ hint when a bookmark is present but unowned. Note: Tier 2 auto-fetch needs the
 token's `user` scope; without it (e.g. a `repo`-only gh token) it degrades to
 the config backstop, which the new hint guides the user to. Remaining:
 
-- **Seed the `watch` flow.** `cmd_watch` and the watch loop build their own `jj`
-  instances (main.rs ~962, watch.rs ~1018) that don't yet call `set_identity`;
-  wire them like `resolve_stack` so watch honors `[identity]`/Tier 2.
 - **Command-level laziness tests (D/L/M).** Recording forge stubs proving: the
   beancounter path fixes the label with `get_authenticated_emails` never called;
   submit auto-recovers via Tier 2; the happy path fetches neither endpoint.

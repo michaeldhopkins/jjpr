@@ -1023,7 +1023,13 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         Some(name.to_string())
     } else {
         let repo_path = find_repo_root()?;
-        let jj = jjpr::jj::runner::JjRunner::new(repo_path)?;
+        let mut jj = jjpr::jj::runner::JjRunner::new(repo_path.clone())?;
+        // Seed identities (local + config) so watch's bookmark inference and the
+        // wait-for-bookmark loop recognize work under a configured email —
+        // matching resolve_stack, which seeds the jj used for the watch loop.
+        let cfg = config::load_config_with_repo(Some(&repo_path))?;
+        let local_email = jj.get_user_email().unwrap_or_default();
+        jj.set_identity(&Identity::seed(&local_email, &cfg.identity.emails, &cfg.identity.logins));
         let graph = change_graph::build_change_graph(&jj)?;
         match analyze::infer_target_bookmark(&graph, &jj)? {
             Some(name) => Some(name),
