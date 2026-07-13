@@ -213,18 +213,51 @@ fn resolve_stack(
 
     // Recognize work authored under any of your emails (local + configured), so
     // discovery isn't blind to a branch you wrote under a different machine's
-    // email. Free and no-network; `/user/emails` augmentation is a follow-up.
+    // email. Free and no-network; the forge's verified emails are added lazily
+    // (Tier 2) below only if this seed can't find your work.
     let local_email = jj.get_user_email().unwrap_or_default();
-    jj.set_identity(&Identity::seed(&local_email, &cfg.identity.emails, &cfg.identity.logins));
+    let mut identity = Identity::seed(&local_email, &cfg.identity.emails, &cfg.identity.logins);
+    jj.set_identity(&identity);
+
+    if !no_fetch {
+        eprintln!("Fetching remotes...");
+        jj.git_fetch()?;
+    }
+
+    // Resolve the forge up front so Tier 2 can consult it, but tolerate its
+    // absence: the no-bookmark case below should still report "no bookmark",
+    // not a forge error.
+    let remotes = jj.get_git_remotes()?;
+    let forge_result = resolve_forge(&remotes, &cfg, preferred_remote);
 
     let target_bookmark = match bookmark {
         Some(name) => name.to_string(),
         None => {
             let graph = change_graph::build_change_graph(&jj)?;
-            match analyze::infer_target_bookmark(&graph, &jj)? {
+            let mut inferred = analyze::infer_target_bookmark(&graph, &jj)?;
+            // Tier 2: nothing of yours under the working copy, but there IS a
+            // bookmark there — your work may be under an email we don't know.
+            // Fetch the account's verified emails and try once more.
+            let unowned_bookmark = inferred.is_none() && working_copy_has_bookmark(&jj);
+            if unowned_bookmark
+                && let Ok(resolved) = &forge_result
+                && augment_identity_from_forge(&mut jj, resolved.forge.as_ref(), &mut identity)
+            {
+                let graph = change_graph::build_change_graph(&jj)?;
+                inferred = analyze::infer_target_bookmark(&graph, &jj)?;
+            }
+            match inferred {
                 Some(inferred) => {
                     println!("{command_verb} stack for '{inferred}' (inferred from working copy)\n");
                     inferred
+                }
+                // A bookmark is present but authored under an email jjpr doesn't
+                // recognize as yours (and it couldn't confirm via the forge).
+                None if unowned_bookmark => {
+                    println!("A bookmark in the working copy isn't recognized as yours —");
+                    println!("likely authored under a different email. Add it with");
+                    println!("`[identity] emails = [\"...\"]` in the jjpr config, or name it explicitly.");
+                    return Ok(None);
                 }
                 None => {
                     println!("No bookmark found in the working copy's ancestry.");
@@ -235,18 +268,22 @@ fn resolve_stack(
         }
     };
 
-    if !no_fetch {
-        eprintln!("Fetching remotes...");
-        jj.git_fetch()?;
-    }
-
-    let remotes = jj.get_git_remotes()?;
-    let resolved = resolve_forge(&remotes, &cfg, preferred_remote)?;
-    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = resolved;
+    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = forge_result?;
 
     let default_branch = jj.get_default_branch()?;
-    let graph = change_graph::build_change_graph(&jj)?;
-    let analysis = analyze::analyze_submission_graph(&graph, &target_bookmark)?;
+    let mut graph = change_graph::build_change_graph(&jj)?;
+    let analysis = match analyze::analyze_submission_graph(&graph, &target_bookmark) {
+        Ok(analysis) => analysis,
+        // Tier 2 for an explicit bookmark authored under an unknown email.
+        Err(err) => {
+            if augment_identity_from_forge(&mut jj, forge.as_ref(), &mut identity) {
+                graph = change_graph::build_change_graph(&jj)?;
+                analyze::analyze_submission_graph(&graph, &target_bookmark)?
+            } else {
+                return Err(err);
+            }
+        }
+    };
     let interactive = std::io::stdout().is_terminal();
     let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
     let stack_base = analysis.base_branch;
@@ -263,6 +300,33 @@ fn resolve_stack(
         target_bookmark,
         stack_base,
     }))
+}
+
+/// Tier 2: fetch the account's verified emails and fold them into `identity`,
+/// re-applying to `jj`. Returns whether it added anything (caller rebuilds).
+/// Best-effort — a token without the email scope simply doesn't augment.
+fn augment_identity_from_forge(
+    jj: &mut JjRunner,
+    forge: &dyn Forge,
+    identity: &mut Identity,
+) -> bool {
+    let Ok(emails) = forge.get_authenticated_emails() else {
+        return false;
+    };
+    let before = identity.emails.len();
+    identity.extend_emails(emails);
+    let grew = identity.emails.len() > before;
+    if grew {
+        jj.set_identity(identity);
+    }
+    grew
+}
+
+/// Whether the working copy sits on any bookmarked stack, regardless of author.
+/// Gates the Tier 2 forge call: only reach for `/user/emails` when there's work
+/// we might be failing to recognize as yours.
+fn working_copy_has_bookmark(jj: &dyn Jj) -> bool {
+    change_graph::build_status_graph(jj, false).map(|g| !g.stacks.is_empty()).unwrap_or(false)
 }
 
 struct SubmitOptions<'a> {
