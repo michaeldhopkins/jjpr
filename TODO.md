@@ -4,13 +4,14 @@
 
 Full spec: `docs-dev/identity-ownership.md`. Shipped: `owned()` email-union
 discovery (`Identity`, `JjRunner::set_identity`), config `[identity]`, seeded in
-status/submit/merge, and the Tier-1 login match that fixes the reported status
-label (verified in beancounter) with no `/user/emails` call. Remaining:
+status/submit/merge, the Tier-1 login match that fixes the reported status label
+(verified in beancounter) with no `/user/emails` call, and Tier-2 lazy
+augmentation in `resolve_stack` (on an inference/analyze miss, fetch
+`get_authenticated_emails`, extend, retry once) plus an `[identity]`-pointing
+hint when a bookmark is present but unowned. Note: Tier 2 auto-fetch needs the
+token's `user` scope; without it (e.g. a `repo`-only gh token) it degrades to
+the config backstop, which the new hint guides the user to. Remaining:
 
-- **Tier 2 lazy `/user/emails` auto-augmentation.** When a mutating command's
-  `owned()` (local + config) discovers nothing but `::@ ~ trunk()` is non-empty,
-  auto-fetch `get_authenticated_emails`, extend the identity, rebuild, retry
-  once. Makes `submit` recognize an other-email branch with zero config.
 - **Seed the `watch` flow.** `cmd_watch` and the watch loop build their own `jj`
   instances (main.rs ~962, watch.rs ~1018) that don't yet call `set_identity`;
   wire them like `resolve_stack` so watch honors `[identity]`/Tier 2.
