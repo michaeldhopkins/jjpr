@@ -248,6 +248,10 @@ impl Forge for GitHubForge {
             .ok_or_else(|| anyhow::anyhow!("user response missing login field"))
     }
 
+    fn get_authenticated_emails(&self) -> Result<Vec<String>> {
+        Ok(crate::forge::parse_verified_emails(&self.client.get("user/emails")?))
+    }
+
     fn merge_pr(
         &self,
         owner: &str,

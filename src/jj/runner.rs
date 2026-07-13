@@ -13,6 +13,10 @@ use super::Jj;
 /// Real jj implementation that shells out to the jj binary.
 pub struct JjRunner {
     repo_path: PathBuf,
+    /// The revset matching commits that are "yours" for ownership-scoped
+    /// discovery. Defaults to jj's built-in `mine()` (single local email);
+    /// [`JjRunner::set_identity`] widens it to all of your identities.
+    owned_revset: String,
 }
 
 impl JjRunner {
@@ -25,7 +29,15 @@ impl JjRunner {
             anyhow::bail!("{} is not a jj repository", repo_path.display());
         }
 
-        Ok(Self { repo_path })
+        Ok(Self { repo_path, owned_revset: "mine()".to_string() })
+    }
+
+    /// Widen ownership discovery to every identity in `identity` (multiple
+    /// commit emails across machines). Call once, after resolving the forge, and
+    /// before discovery. Left unset, discovery uses `mine()` — the prior
+    /// single-local-email behavior.
+    pub fn set_identity(&mut self, identity: &crate::identity::Identity) {
+        self.owned_revset = identity.owned_revset();
     }
 
     /// Run jj **working-copy-agnostically** — never snapshots or moves the
@@ -104,11 +116,11 @@ impl Jj for JjRunner {
         // authored) is a large, wasted closure there, so add it only when we
         // must also find your other stacks by name (positional / --all).
         let revset = if all_owned_stacks {
-            "::(@ | mine()) ~ trunk()"
+            format!("::(@ | ({})) ~ trunk()", self.owned_revset)
         } else {
-            "::@ ~ trunk()"
+            "::@ ~ trunk()".to_string()
         };
-        let output = self.run_jj(&["bookmark", "list", "--revisions", revset, "--template", BOOKMARK_TEMPLATE])?;
+        let output = self.run_jj(&["bookmark", "list", "--revisions", &revset, "--template", BOOKMARK_TEMPLATE])?;
         let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
         for name in warnings {
             eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)");
@@ -118,12 +130,19 @@ impl Jj for JjRunner {
         Ok(bookmarks)
     }
 
+    fn get_user_email(&self) -> Result<String> {
+        // Unset user.email → `config get` errors; treat as empty rather than
+        // failing the whole command.
+        Ok(self.run_jj(&["config", "get", "user.email"]).unwrap_or_default())
+    }
+
     fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+        let revset = format!("({}) ~ trunk()", self.owned_revset);
         let output = self.run_jj(&[
             "bookmark",
             "list",
             "--revisions",
-            "mine() ~ trunk()",
+            &revset,
             "--template",
             BOOKMARK_TEMPLATE,
         ])?;

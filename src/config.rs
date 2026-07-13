@@ -55,6 +55,23 @@ pub struct Config {
     /// "comment" posts a separate comment on each PR.
     /// "description" embeds the stack nav in the PR body.
     pub stack_nav: StackNavMode,
+
+    /// Additional identities that count as you. The common single-account,
+    /// multiple-machines case needs nothing here — jjpr fetches your verified
+    /// emails from the forge automatically. This is the backstop for a second
+    /// account, an unregistered email, or offline use.
+    pub identity: IdentityConfig,
+}
+
+/// Extra identities to union into ownership, from `[identity]` in the config.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct IdentityConfig {
+    /// Author emails that are yours, beyond the local `user.email` and any
+    /// verified emails fetched from your forge account.
+    pub emails: Vec<String>,
+    /// Forge logins that are yours (e.g. a second account jjpr can't enumerate).
+    pub logins: Vec<String>,
 }
 
 impl Default for Config {
@@ -67,6 +84,7 @@ impl Default for Config {
             forge_token_env: None,
             reconcile_strategy: ReconcileStrategy::Rebase,
             stack_nav: StackNavMode::Comment,
+            identity: IdentityConfig::default(),
         }
     }
 }

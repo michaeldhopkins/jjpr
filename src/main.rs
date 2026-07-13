@@ -21,6 +21,7 @@ use jjpr::forge::types::{ChecksStatus, MergeMethod, PrMergeability, PullRequest,
 use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
 use jjpr::forge::token as forge_token;
 use jjpr::graph::change_graph;
+use jjpr::identity::Identity;
 use jjpr::jj::types::{Bookmark, BookmarkSegment, BranchStack};
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
@@ -201,7 +202,7 @@ fn resolve_stack(
     snapshot: bool,
 ) -> Result<Option<ResolvedStack>> {
     let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path.clone())?;
+    let mut jj = JjRunner::new(repo_path.clone())?;
     // jjpr is otherwise working-copy-agnostic; for user-invoked commands
     // (submit/merge) snapshot once so we act on the user's latest edits. The
     // autonomous watch loop passes false — it operates on committed state.
@@ -209,6 +210,12 @@ fn resolve_stack(
         jj.snapshot()?;
     }
     let cfg = config::load_config_with_repo(Some(&repo_path))?;
+
+    // Recognize work authored under any of your emails (local + configured), so
+    // discovery isn't blind to a branch you wrote under a different machine's
+    // email. Free and no-network; `/user/emails` augmentation is a follow-up.
+    let local_email = jj.get_user_email().unwrap_or_default();
+    jj.set_identity(&Identity::seed(&local_email, &cfg.identity.emails, &cfg.identity.logins));
 
     let target_bookmark = match bookmark {
         Some(name) => name.to_string(),
@@ -318,13 +325,23 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
 
 fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Result<()> {
     let repo_path = find_repo_root()?;
-    let jj = JjRunner::new(repo_path.clone())?;
+    let mut jj = JjRunner::new(repo_path.clone())?;
     let cfg = config::load_config_with_repo(Some(&repo_path))?;
 
     if !no_fetch {
         eprintln!("Fetching remotes...");
         jj.git_fetch()?;
     }
+
+    // Seed the identities that count as you (local email + config), free and
+    // no-network, so discovery recognizes work authored under a configured
+    // second email. A forge login is added lazily below if it could matter.
+    let mut identity = jjpr::identity::Identity::seed(
+        &jj.get_user_email().unwrap_or_default(),
+        &cfg.identity.emails,
+        &cfg.identity.logins,
+    );
+    jj.set_identity(&identity);
 
     // The bare view infers from the working copy, so it only needs `@`'s
     // ancestry. A positional bookmark or `--all` must also find your other
@@ -406,11 +423,30 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         }
     }
 
+    // Tier 1 (lazy): if a segment is someone else's by email but carries a PR,
+    // that PR's author login can reveal it's actually yours (same forge account,
+    // a different machine's commit email). Fetch your login once — only when it
+    // could change a classification — and never touch `/user/emails` for this.
+    if let Some(forge) = &info.forge {
+        let could_reclassify = stacks_to_show.iter().flat_map(|s| &s.segments).any(|seg| {
+            !segment_is_mine(seg)
+                && seg.bookmarks.first().is_some_and(|b| {
+                    info.pr_map.contains_key(&b.name) || merged_map.contains_key(&b.name)
+                })
+        });
+        if could_reclassify
+            && let Ok(login) = forge.get_authenticated_user()
+        {
+            identity.add_login(&login);
+        }
+    }
+
     let render = StatusRender {
         pr_map: &info.pr_map,
         merged_map: &merged_map,
         status_map: &status_map,
         my_names: &my_names,
+        identity: Some(&identity),
         has_forge: info.forge.is_some(),
     };
 
@@ -583,9 +619,13 @@ struct StatusRender<'a> {
     pr_map: &'a HashMap<String, PullRequest>,
     merged_map: &'a HashMap<String, PullRequest>,
     status_map: &'a HashMap<String, SegmentDisplayStatus>,
-    /// Bookmarks on your own commits (`mine()`). A segment is "yours" iff its
-    /// primary bookmark is here — that's exactly what submit/watch/merge act on.
+    /// Bookmarks on commits by any of your emails. A segment is "yours" iff one
+    /// of its bookmarks is here — exactly what submit/watch/merge act on.
     my_names: &'a HashSet<String>,
+    /// Your identities, for the display-only login supplement: a PR authored by
+    /// your forge account is yours even when its commit email isn't known.
+    /// `None` disables the supplement (email classification only).
+    identity: Option<&'a Identity>,
     has_forge: bool,
 }
 
@@ -604,15 +644,32 @@ impl StatusRender<'_> {
         segment.bookmarks.iter().any(|b| self.my_names.contains(&b.name))
     }
 
+    /// "Yours" for display = mine by email, OR (login supplement) the segment's
+    /// PR was authored by your forge account.
+    fn segment_is_yours(&self, segment: &BookmarkSegment) -> bool {
+        if self.segment_is_mine(segment) {
+            return true;
+        }
+        let Some(identity) = self.identity else {
+            return false;
+        };
+        segment.bookmarks.first().is_some_and(|b| match self.resolve_pr(&b.name) {
+            SegmentPr::Open(p) | SegmentPr::Merged(p) => identity.owns_login(&p.author),
+            SegmentPr::None => false,
+        })
+    }
+
     fn stack_is_all_foreign(&self, stack: &BranchStack) -> bool {
-        !stack.segments.is_empty() && stack.segments.iter().all(|s| !self.segment_is_mine(s))
+        !stack.segments.is_empty() && stack.segments.iter().all(|s| !self.segment_is_yours(s))
     }
 
     /// The parenthesized third field. For yours it's the push/sync state; for a
     /// coworker's still-open PR it says jjpr leaves it alone; a merged/no-PR
     /// foreign segment has nothing to add.
     fn header_slot(&self, pr: &SegmentPr, mine: bool, bookmarks: &[Bookmark]) -> Option<String> {
-        if mine {
+        if matches!(pr, SegmentPr::Merged(_)) {
+            None // a merged branch's push/sync state is moot
+        } else if mine {
             Some(sync_status_label(bookmarks).to_string())
         } else if matches!(pr, SegmentPr::Open(_)) {
             Some("jjpr won't submit or merge it".to_string())
@@ -631,7 +688,7 @@ impl StatusRender<'_> {
             format!(", merge of {}", segment.merge_source_names.join(" + "))
         };
 
-        let mine = self.segment_is_mine(segment);
+        let mine = self.segment_is_yours(segment);
         let pr = segment
             .bookmarks
             .first()
@@ -1516,7 +1573,7 @@ mod tests {
         my_names: &'a HashSet<String>,
         status_map: &'a HashMap<String, SegmentDisplayStatus>,
     ) -> StatusRender<'a> {
-        StatusRender { pr_map, merged_map, status_map, my_names, has_forge: true }
+        StatusRender { pr_map, merged_map, status_map, my_names, identity: None, has_forge: true }
     }
 
     #[test]
@@ -1536,9 +1593,13 @@ mod tests {
             r.header_slot(&SegmentPr::Open(&pr_with("dana", false, None)), false, &bms).as_deref(),
             Some("jjpr won't submit or merge it")
         );
-        // Someone else's merged / PR-less segment → nothing to add.
+        // A merged segment (yours or not) has no push/sync slot.
         assert_eq!(
             r.header_slot(&SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))), false, &bms),
+            None
+        );
+        assert_eq!(
+            r.header_slot(&SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))), true, &bms),
             None
         );
         assert_eq!(r.header_slot(&SegmentPr::None, false, &bms), None);
@@ -1704,6 +1765,37 @@ mod tests {
             (HashMap::new(), HashMap::new(), HashSet::new(), HashMap::new());
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
         assert_eq!(r.render_base("platform"), vec!["  (based on platform)".to_string()]);
+    }
+
+    #[test]
+    fn login_supplement_reclassifies_a_foreign_pr_you_authored() {
+        // Foreign by EMAIL (bookmark not in my_names), but the PR was authored
+        // by your forge login — your own work from another machine's email.
+        let mut merged_map = HashMap::new();
+        merged_map.insert("feat".to_string(), pr_with("michaeldhopkins", false, Some("2026-03-12")));
+        let (pr_map, my, status_map) = (HashMap::new(), HashSet::new(), HashMap::new());
+        let mut identity = Identity::default();
+        identity.add_login("michaeldhopkins");
+
+        let r = StatusRender {
+            pr_map: &pr_map,
+            merged_map: &merged_map,
+            status_map: &status_map,
+            my_names: &my,
+            identity: Some(&identity),
+            has_forge: true,
+        };
+        let seg = segment_of(vec![bm("feat", false)]);
+        assert!(r.segment_is_yours(&seg), "your own PR (by login) must count as yours");
+        let stack = BranchStack { segments: vec![seg], base_branch: None };
+        assert!(
+            !r.stack_is_all_foreign(&stack),
+            "an all-foreign-by-email stack that is yours by login must not trigger recognition"
+        );
+
+        // Without the login supplement (identity None) it stays foreign.
+        let r2 = render_with(&pr_map, &merged_map, &my, &status_map);
+        assert!(!r2.segment_is_yours(&segment_of(vec![bm("feat", false)])));
     }
 
     #[test]

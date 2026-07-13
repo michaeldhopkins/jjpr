@@ -89,6 +89,22 @@ fn parse_note(note: &serde_json::Value) -> Option<IssueComment> {
     Some(IssueComment { id, body })
 }
 
+/// Confirmed emails from a GitLab `/user/emails` array
+/// (`[{"email": …, "confirmed_at": "…"}, …]`). Unconfirmed entries (a null
+/// `confirmed_at`) are dropped — GitLab's equivalent of "verified".
+fn parse_gitlab_emails(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|e| e["confirmed_at"].as_str().is_some())
+                .filter_map(|e| e["email"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Map a GitLab pipeline status string to `ChecksStatus`.
 fn parse_pipeline_status(pipeline: Option<&serde_json::Value>) -> ChecksStatus {
     let Some(latest) = pipeline else {
@@ -314,6 +330,10 @@ impl Forge for GitLabForge {
             .ok_or_else(|| anyhow::anyhow!("user response missing username field"))
     }
 
+    fn get_authenticated_emails(&self) -> Result<Vec<String>> {
+        Ok(parse_gitlab_emails(&self.client.get("user/emails")?))
+    }
+
     fn find_merged_pr(
         &self,
         owner: &str,
@@ -451,6 +471,16 @@ impl Forge for GitLabForge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_gitlab_emails_keeps_only_confirmed() {
+        let json = serde_json::json!([
+            {"id": 1, "email": "primary@x.com", "confirmed_at": "2021-01-01T00:00:00Z"},
+            {"id": 2, "email": "pending@x.com", "confirmed_at": null},
+            {"id": 3, "email": "work@x.com", "confirmed_at": "2022-02-02T00:00:00Z"}
+        ]);
+        assert_eq!(parse_gitlab_emails(&json), vec!["primary@x.com", "work@x.com"]);
+    }
 
     // --- JSON fixture tests: verify parsing without any HTTP ---
 
