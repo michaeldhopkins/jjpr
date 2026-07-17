@@ -271,15 +271,27 @@ impl Forge for GitHubForge {
         head_ref: &str,
     ) -> Result<ChecksStatus> {
         let encoded_ref = super::http::url_encode(head_ref);
+
+        // Both endpoints wrap their array in an envelope and default to 30 per
+        // page. Reading only the first page let a failing check outside it pass
+        // as green — and `jjpr merge` gates on this when CI is required — so ask
+        // for the largest page and follow the Link header for the rest.
         let check_runs_path =
-            format!("repos/{owner}/{repo}/commits/{encoded_ref}/check-runs");
-        let check_runs = self.client.get(&check_runs_path)?;
+            format!("repos/{owner}/{repo}/commits/{encoded_ref}/check-runs?per_page=100");
+        let check_runs = self
+            .client
+            .get_paginated_envelope(&check_runs_path, "check_runs")?;
 
         let status_path =
-            format!("repos/{owner}/{repo}/commits/{encoded_ref}/status");
-        let status = self.client.get(&status_path)?;
+            format!("repos/{owner}/{repo}/commits/{encoded_ref}/status?per_page=100");
+        let statuses = self
+            .client
+            .get_paginated_envelope(&status_path, "statuses")?;
 
-        Ok(parse_checks_status(&check_runs, &status))
+        Ok(parse_checks_status(
+            &serde_json::json!({ "check_runs": check_runs }),
+            &serde_json::json!({ "statuses": statuses }),
+        ))
     }
 
     fn get_pr_reviews(
