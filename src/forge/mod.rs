@@ -4,6 +4,7 @@ pub mod github;
 pub mod gitlab;
 pub mod http;
 pub mod remote;
+pub mod status;
 pub mod token;
 pub mod types;
 
