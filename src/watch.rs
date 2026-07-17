@@ -115,13 +115,7 @@ fn promote_ready_drafts(
             continue;
         }
 
-        let checks_ref = if pr.head.sha.is_empty() {
-            &pr.head.ref_name
-        } else {
-            &pr.head.sha
-        };
-
-        let Ok(status) = forge.get_pr_checks_status(owner, repo, checks_ref) else {
+        let Ok(status) = forge.get_pr_checks_status(owner, repo, pr.checks_ref()) else {
             continue;
         };
 

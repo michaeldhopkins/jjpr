@@ -143,17 +143,10 @@ pub fn evaluate_segment(
     }
 
     if options.require_ci_pass {
-        // Query by commit SHA to avoid stale results after a push.
-        // Fall back to branch ref if SHA is unavailable.
-        let checks_ref = if pr.head.sha.is_empty() {
-            &pr.head.ref_name
-        } else {
-            &pr.head.sha
-        };
         match github.get_pr_checks_status(
             &repo_info.owner,
             &repo_info.repo,
-            checks_ref,
+            pr.checks_ref(),
         ) {
             Ok(ChecksStatus::Fail) => reasons.push(BlockReason::ChecksFailing),
             Ok(ChecksStatus::Pending) => reasons.push(BlockReason::ChecksPending),
