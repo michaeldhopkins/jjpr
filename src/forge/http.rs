@@ -69,6 +69,13 @@ impl ForgeClient {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(30)))
             .http_status_as_error(false)
+            // ureq keeps 3 idle connections per host by default, which is fewer
+            // than jjpr issues at once. The surplus would be closed on return and
+            // re-handshaked (~90ms of TCP+TLS) on the next wave, so the pool is
+            // sized to the fan-out. This caps reuse, not concurrency: ureq never
+            // throttles in-flight requests on the pool.
+            .max_idle_connections_per_host(crate::parallel::MAX_CONCURRENT_REQUESTS)
+            .max_idle_connections(crate::parallel::MAX_CONCURRENT_REQUESTS)
             .build()
             .into();
 
@@ -300,9 +307,7 @@ impl ForgeClient {
                 .body_mut()
                 .read_json()
                 .with_context(|| format!("failed to parse paginated JSON from GET {path}"))?;
-            if let Some(items) = page.get(key).and_then(|v| v.as_array()) {
-                all_items.extend(items.iter().cloned());
-            }
+            all_items.extend(envelope_items(&page, key));
 
             match next {
                 Some(next_url) => {
@@ -434,6 +439,18 @@ impl fmt::Display for GraphQlError {
 
 impl std::error::Error for GraphQlError {}
 
+/// Pull the array at `key` out of one envelope page.
+///
+/// A missing or non-array key yields nothing rather than an error, matching how
+/// the check parsers already treat an absent array: as "none reported". Erroring
+/// instead would turn an unfamiliar payload into a failed command.
+fn envelope_items(page: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
+    page.get(key)
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
 /// Truncate a string to a maximum byte length, appending "…" if truncated.
 fn truncate_body(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -484,6 +501,26 @@ fn extract_next_link(resp: &http::Response<ureq::Body>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_pool_is_sized_to_the_fan_out() {
+        // ureq's default keeps 3 idle connections per host. Left there, every
+        // wave past the third concurrent request would re-handshake TCP+TLS.
+        // This pins the pool to the fan-out so raising one cannot silently
+        // leave the other behind.
+        let client = ForgeClient::new(
+            "https://api.example.com",
+            "token".to_string(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
+        let config = client.agent.config();
+        assert_eq!(
+            config.max_idle_connections_per_host(),
+            crate::parallel::MAX_CONCURRENT_REQUESTS,
+        );
+        assert!(config.max_idle_connections() >= crate::parallel::MAX_CONCURRENT_REQUESTS);
+    }
 
     // GraphQL reports permission and rate-limit failures inside an HTTP 200, so
     // these pin the shapes that must not be mistaken for success. The bodies are
@@ -539,6 +576,34 @@ mod tests {
         let err = GraphQlError::from_errors(&errors);
         assert_eq!(err.types, vec!["NOT_FOUND", "FORBIDDEN"]);
         assert!(err.message.contains("first") && err.message.contains("second"));
+    }
+
+    // GitHub wraps check-runs and combined statuses in an envelope rather than
+    // returning a bare array, which is why these endpoints need their own
+    // paginator.
+    #[test]
+    fn envelope_items_reads_the_named_array() {
+        let page = serde_json::json!({
+            "total_count": 2,
+            "check_runs": [{"conclusion": "success"}, {"conclusion": "failure"}],
+        });
+        assert_eq!(envelope_items(&page, "check_runs").len(), 2);
+    }
+
+    #[test]
+    fn envelope_items_reads_the_statuses_shape_too() {
+        let page = serde_json::json!({ "state": "success", "statuses": [{"state": "success"}] });
+        assert_eq!(envelope_items(&page, "statuses").len(), 1);
+    }
+
+    #[test]
+    fn envelope_items_treats_a_missing_or_odd_key_as_empty() {
+        // Matches how the check parsers read an absent array: none reported,
+        // rather than a failed command.
+        assert!(envelope_items(&serde_json::json!({"total_count": 0}), "check_runs").is_empty());
+        assert!(envelope_items(&serde_json::json!({"check_runs": null}), "check_runs").is_empty());
+        assert!(envelope_items(&serde_json::json!({"check_runs": "nope"}), "check_runs").is_empty());
+        assert!(envelope_items(&serde_json::json!([]), "check_runs").is_empty());
     }
 
     #[test]

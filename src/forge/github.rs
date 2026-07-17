@@ -86,6 +86,13 @@ const GRAPHQL_PAGE_SIZE: usize = 100;
 /// below stay the single source of truth for how those roll up. The rollup
 /// enums are close to jjpr's own but not identical, and a silent disagreement
 /// between the REST and GraphQL paths is worse than a slightly bigger query.
+///
+/// One deliberate difference from the per-PR path: `commits(last: 1)` resolves
+/// the head as it is *now*, whereas the per-PR path pins to the sha carried by
+/// the earlier PR-list response. If a PR's head moves between those two calls,
+/// this reports the newer commit's checks and the per-PR path reports the older
+/// one's. That makes the batch fresher rather than wrong, so it is left alone;
+/// pinning would mean threading each PR's oid through a second query root.
 const PR_STATUS_FRAGMENT: &str = r"
 fragment PrStatus on PullRequest {
   number
