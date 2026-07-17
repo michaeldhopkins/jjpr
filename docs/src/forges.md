@@ -25,6 +25,13 @@ GitHub Enterprise is auto-detected from the host
 (`*.github.enterprise.example.com`). Credentials come from `gh` if it's
 configured for that host.
 
+`status` reads a whole stack's PR state in one GraphQL query. If your
+token cannot use GraphQL, jjpr asks per PR over REST instead and reports
+the same thing, using more requests. A fine-grained token needs the
+pull-requests permission read; organizations with SAML enforcement need
+the token authorized for the org. Neither is required, and nothing needs
+configuring either way.
+
 ## GitLab
 
 If you use `glab`, jjpr picks up your credentials. Otherwise, export
