@@ -249,6 +249,75 @@ impl ForgeClient {
         Ok(all_items)
     }
 
+    /// GET every page of an endpoint that wraps its array in an object, and
+    /// concatenate the arrays found at `key`.
+    ///
+    /// GitHub's check-runs and combined-status endpoints return
+    /// `{"total_count": N, "check_runs": [...]}` rather than a bare array, so
+    /// [`Self::get_paginated`] cannot read them. Without this, only the first
+    /// page is ever seen and a repo with more checks than fit on one page
+    /// reports a status derived from an arbitrary subset.
+    pub fn get_paginated_envelope(
+        &self,
+        path: &str,
+        key: &str,
+    ) -> Result<Vec<serde_json::Value>> {
+        const MAX_PAGES: usize = 100;
+
+        let mut url = self
+            .full_url(path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (header, value) = self.auth_header();
+        let mut all_items = Vec::new();
+
+        for _ in 0..MAX_PAGES {
+            let mut resp = self
+                .agent
+                .get(&url)
+                .header(header, &value)
+                .header("Accept", "application/json")
+                .call()
+                .with_context(|| format!("GET {url}"))?;
+
+            let status = resp.status().as_u16();
+            if status >= 400 {
+                let body = resp
+                    .body_mut()
+                    .read_to_string()
+                    .unwrap_or_else(|_| String::from("<unreadable>"));
+                return Err(HttpError {
+                    status,
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    body,
+                }
+                .into());
+            }
+
+            let next = extract_next_link(&resp);
+
+            let page: serde_json::Value = resp
+                .body_mut()
+                .read_json()
+                .with_context(|| format!("failed to parse paginated JSON from GET {path}"))?;
+            if let Some(items) = page.get(key).and_then(|v| v.as_array()) {
+                all_items.extend(items.iter().cloned());
+            }
+
+            match next {
+                Some(next_url) => {
+                    url = self
+                        .full_url(&next_url)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                None => return Ok(all_items),
+            }
+        }
+
+        eprintln!("warning: pagination capped at {MAX_PAGES} pages for {path}");
+        Ok(all_items)
+    }
+
     fn get_paginated_page(&self, path: &str, limit: u32) -> Result<Vec<serde_json::Value>> {
         let separator = if path.contains('?') { '&' } else { '?' };
         let mut all_items = Vec::new();
