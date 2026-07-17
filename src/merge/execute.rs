@@ -578,6 +578,11 @@ pub fn execute_merge_plan(
                 &plan.repo_info,
                 map,
                 &plan.options,
+                // Never prefetched here. Merging a segment moves the next one's
+                // base and changes its mergeability, so a batch taken before the
+                // loop would be describing a stack that no longer exists by the
+                // time the later segments are read.
+                None,
             )?
         } else if let Some(action) = plan.actions.get(seg_idx) {
             action.clone()
