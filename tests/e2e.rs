@@ -231,6 +231,84 @@ fn list_comments(pr_number: u64) -> Vec<serde_json::Value> {
 
 // --- E2E Tests (guarded by JJPR_E2E env var) ---
 
+/// The GraphQL batch caps each connection at 100 nodes. A PR with more check
+/// contexts than that must be topped up from REST, which paginates without
+/// limit — otherwise the batch would silently decide CI from an arbitrary 100.
+///
+/// Exercised against a real public PR known to carry >100 contexts rather than
+/// a fixture, because the whole point is the live batch→truncation→refill chain.
+/// The target PR will eventually merge; if it 404s, pick another with >100
+/// contexts via the statusCheckRollup query in the docs.
+#[test]
+fn test_batch_refills_checks_beyond_the_graphql_page_cap() {
+    if std::env::var("JJPR_E2E").is_err() {
+        println!("Skipping E2E test (set JJPR_E2E=1 to run)");
+        return;
+    }
+
+    // denoland/deno #31518 carried 136 check contexts when this was written.
+    let (owner, repo, pr_number) = ("denoland", "deno", 31518u64);
+
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let client =
+        ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+    let github = GitHubForge::new(client);
+
+    // The head sha the batch keys checks off. Skip cleanly if the PR is gone.
+    let Ok(prs) = github.list_open_prs(owner, repo) else {
+        eprintln!("could not list PRs; skipping");
+        return;
+    };
+    let Some(pr) = prs.into_iter().find(|p| p.number == pr_number) else {
+        eprintln!("PR #{pr_number} no longer open; pick another >100-context PR");
+        return;
+    };
+
+    // Guard against silent rot: if this PR's check count has fallen below the
+    // 100-node page, the test would still pass without ever touching the refill.
+    // Count the raw check-runs the same way the fix does, and skip loudly if the
+    // PR no longer exceeds the cap.
+    let count_token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+        .expect("GitHub token required for E2E tests");
+    let counter =
+        ForgeClient::new("https://api.github.com", count_token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+    let encoded = jjpr::forge::http::url_encode(pr.checks_ref());
+    let runs = counter
+        .get_paginated_envelope(
+            &format!("repos/{owner}/{repo}/commits/{encoded}/check-runs?per_page=100"),
+            "check_runs",
+        )
+        .expect("counting check-runs must succeed");
+    if runs.len() <= 100 {
+        eprintln!("PR #{pr_number} now has {} check-runs (<=100); refill not exercised — pick another PR", runs.len());
+        return;
+    }
+
+    let batched = github
+        .batch_pr_status(owner, repo, &[(pr_number, pr.checks_ref().to_string())])
+        .expect("GitHub should batch");
+    let bundle = batched.get(&pr_number).expect("PR must be in the batch");
+
+    // The refill must have populated checks — a truncated batch that gave up
+    // would leave this None, and CI status would silently vanish.
+    let batched_checks = bundle
+        .checks
+        .clone()
+        .expect("checks must be present after refill");
+
+    // And it must equal what full REST pagination sees. If the refill were
+    // skipped, the batch's first-100 view could disagree with the true verdict.
+    let rest_checks = github
+        .get_pr_checks_status(owner, repo, pr.checks_ref())
+        .expect("REST checks must succeed");
+
+    assert_eq!(
+        batched_checks, rest_checks,
+        "refilled batch checks must match full REST pagination",
+    );
+}
+
 #[test]
 fn test_submit_creates_stacked_prs() {
     if std::env::var("JJPR_E2E").is_err() {
