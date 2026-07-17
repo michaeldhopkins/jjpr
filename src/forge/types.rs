@@ -206,6 +206,22 @@ pub struct PrMergeability {
     pub mergeable_state: String,
 }
 
+impl PullRequest {
+    /// The ref this PR's CI checks hang off.
+    ///
+    /// Prefer the head sha: querying by branch name can return checks for a
+    /// commit the branch has since moved past, which reads as a stale pass right
+    /// after a push. Not every forge populates the sha on its PR list, so the
+    /// branch name remains the fallback.
+    pub fn checks_ref(&self) -> &str {
+        if self.head.sha.is_empty() {
+            &self.head.ref_name
+        } else {
+            &self.head.sha
+        }
+    }
+}
+
 /// Everything the status view needs about one pull request.
 ///
 /// Each field is independently optional because a forge may answer some parts
