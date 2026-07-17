@@ -112,6 +112,7 @@ affects PRs where the reviewer isn't already requested.")]
         base: Option<String>,
     },
     /// Show stack status with CI, review, and mergeability details
+    #[command(visible_alias = "st")]
     #[command(long_about = "\
 Show your stacks with detailed CI, review, and mergeability status.
 
