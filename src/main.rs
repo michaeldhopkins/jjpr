@@ -17,9 +17,11 @@ use std::collections::{HashMap, HashSet};
 use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
 use jjpr::config;
 use jjpr::forge::remote;
-use jjpr::forge::types::{ChecksStatus, MergeMethod, PrMergeability, PullRequest, RepoInfo, ReviewSummary};
+use jjpr::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
 use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
 use jjpr::forge::token as forge_token;
+use jjpr::forge::status as forge_status;
+use jjpr::parallel;
 use jjpr::graph::change_graph;
 use jjpr::identity::Identity;
 use jjpr::jj::types::{Bookmark, BookmarkSegment, BranchStack};
@@ -394,7 +396,27 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
 
     if !no_fetch {
         eprintln!("Fetching remotes...");
-        jj.git_fetch()?;
+    }
+
+    // Read the remotes before anything else touches jj concurrently.
+    let remotes = jj.get_git_remotes().unwrap_or_default();
+
+    // `jj git fetch` is a second of network latency that the forge lookups do
+    // not depend on, so run them underneath it. The graph does depend on the
+    // fetch (it decides where trunk() is), so the fetch is joined before any of
+    // it is built.
+    //
+    // Nothing in this scope may touch jj: two jj processes on one repo contend
+    // for the op-log lock, which is why the remotes are read above and the
+    // identity seeding below waits until the scope has closed.
+    let (fetch_result, info) = std::thread::scope(|scope| {
+        let fetch = (!no_fetch).then(|| scope.spawn(|| jj.git_fetch()));
+        let info = load_pr_info(&remotes, &cfg).unwrap_or_default();
+        let fetch_result = fetch.map(|handle| handle.join().expect("fetch thread panicked"));
+        (fetch_result, info)
+    });
+    if let Some(result) = fetch_result {
+        result?;
     }
 
     // Seed the identities that count as you (local email + config), free and
@@ -440,12 +462,14 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         }
     };
 
-    // Try to resolve forge remote for PR info
-    let info = try_load_pr_info(&jj, &cfg, &graph).unwrap_or(PrInfoResult {
-        pr_map: HashMap::new(),
-        forge: None,
-        repo_info: None,
-    });
+    // The PR list ran concurrently with the fetch above. Its failure only earns
+    // an auth hint once the graph shows there is a stack to report on.
+    if let Some(forge) = &info.failed_forge
+        && !graph.stacks.is_empty()
+        && forge.get_authenticated_user().is_err()
+    {
+        eprintln!("hint: run `jjpr auth test` to check authentication for stack overview");
+    }
 
     // Per-segment forge state. list_open_prs returns everyone's open PRs in the
     // repo, so a coworker's open base lands in pr_map keyed by branch name. A
@@ -456,21 +480,25 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
     let mut status_map: HashMap<String, SegmentDisplayStatus> = HashMap::new();
     let mut merged_map: HashMap<String, PullRequest> = HashMap::new();
     if let (Some(forge), Some(repo_info)) = (&info.forge, &info.repo_info) {
+        // Decide every call up front, then issue them together. Each lookup is
+        // independent, so walking the stack and blocking on each in turn made
+        // latency scale with the stack's height for no reason.
+        let mut status_targets: Vec<(String, PullRequest)> = Vec::new();
+        let mut merged_lookups: Vec<String> = Vec::new();
         for stack in &stacks_to_show {
             for segment in &stack.segments {
                 let Some(bookmark) = segment.bookmarks.first() else {
                     continue;
                 };
                 if let Some(pr) = info.pr_map.get(&bookmark.name) {
-                    status_map.insert(
-                        bookmark.name.clone(),
-                        fetch_segment_status(forge.as_ref(), repo_info, pr),
-                    );
-                } else if !segment_is_mine(segment)
-                    && let Ok(Some(pr)) =
-                        forge.find_merged_pr(&repo_info.owner, &repo_info.repo, &bookmark.name)
-                {
-                    merged_map.insert(bookmark.name.clone(), pr);
+                    // A diamond puts the shared segments in more than one stack;
+                    // without this the same PR is queried once per stack it
+                    // appears in.
+                    if !status_targets.iter().any(|(name, _)| name == &bookmark.name) {
+                        status_targets.push((bookmark.name.clone(), pr.clone()));
+                    }
+                } else if !segment_is_mine(segment) && !merged_lookups.contains(&bookmark.name) {
+                    merged_lookups.push(bookmark.name.clone());
                 }
             }
             // A foreign base (a coworker's branch you rebased onto with no local
@@ -479,10 +507,22 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
             // already in pr_map.
             if let Some(base) = &stack.base_branch
                 && !info.pr_map.contains_key(base)
-                && !merged_map.contains_key(base)
-                && let Ok(Some(pr)) = forge.find_merged_pr(&repo_info.owner, &repo_info.repo, base)
+                && !merged_lookups.contains(base)
             {
-                merged_map.insert(base.clone(), pr);
+                merged_lookups.push(base.clone());
+            }
+        }
+
+        status_map = fetch_all_segment_status(forge.as_ref(), repo_info, &status_targets);
+
+        let merged = parallel::map_bounded(
+            &merged_lookups,
+            parallel::MAX_CONCURRENT_REQUESTS,
+            |name| forge.find_merged_pr(&repo_info.owner, &repo_info.repo, name),
+        );
+        for (name, result) in merged_lookups.iter().zip(merged) {
+            if let Ok(Some(pr)) = result {
+                merged_map.insert(name.clone(), pr);
             }
         }
     }
@@ -546,31 +586,36 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
     Ok(())
 }
 
+#[derive(Default)]
 struct PrInfoResult {
     pr_map: HashMap<String, PullRequest>,
     forge: Option<Box<dyn Forge>>,
     repo_info: Option<RepoInfo>,
+    /// Set when the PR list call failed.
+    ///
+    /// The forge lands here rather than in `forge` so the rest of the command
+    /// behaves exactly as it does with no forge at all, while the auth hint can
+    /// still probe once the graph has shown there are stacks worth hinting
+    /// about. Probing here instead would spend a request on every repo that has
+    /// no stacks.
+    failed_forge: Option<Box<dyn Forge>>,
 }
 
-fn try_load_pr_info(
-    jj: &dyn Jj,
-    cfg: &config::Config,
-    graph: &change_graph::ChangeGraph,
-) -> Option<PrInfoResult> {
-    let remotes = jj.get_git_remotes().ok()?;
-    let resolved = resolve_forge(&remotes, cfg, None).ok()?;
+/// Resolve the forge and pull the repo's open PRs.
+///
+/// Deliberately free of any `jj` access: the caller runs this concurrently with
+/// `jj git fetch`, and a second jj process on the same repo would contend for
+/// the op-log lock. Take the remotes before calling.
+fn load_pr_info(remotes: &[jjpr::jj::GitRemote], cfg: &config::Config) -> Option<PrInfoResult> {
+    let resolved = resolve_forge(remotes, cfg, None).ok()?;
     let ResolvedForge { forge, repo_info, .. } = resolved;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
         Err(_) => {
-            if !graph.stacks.is_empty() && forge.get_authenticated_user().is_err() {
-                eprintln!("hint: run `jjpr auth test` to check authentication for stack overview");
-            }
             return Some(PrInfoResult {
-                pr_map: HashMap::new(),
-                forge: None,
-                repo_info: None,
+                failed_forge: Some(forge),
+                ..Default::default()
             });
         }
     };
@@ -580,31 +625,31 @@ fn try_load_pr_info(
         pr_map,
         forge: Some(forge),
         repo_info: Some(repo_info),
+        failed_forge: None,
     })
 }
 
-struct SegmentDisplayStatus {
-    mergeability: Option<PrMergeability>,
-    checks: Option<ChecksStatus>,
-    reviews: Option<ReviewSummary>,
-}
+/// The same shape the forge layer returns from a batch lookup; kept as an alias
+/// so the batched and per-PR paths cannot drift apart.
+type SegmentDisplayStatus = jjpr::forge::PrStatusBundle;
 
-fn fetch_segment_status(
+/// Resolve display status for every segment that has an open PR, keyed by the
+/// bookmark the render looks it up by.
+fn fetch_all_segment_status(
     forge: &dyn Forge,
     repo_info: &RepoInfo,
-    pr: &PullRequest,
-) -> SegmentDisplayStatus {
-    let mergeability = forge
-        .get_pr_mergeability(&repo_info.owner, &repo_info.repo, pr.number)
-        .ok();
-    let checks = forge
-        .get_pr_checks_status(&repo_info.owner, &repo_info.repo,
-            if pr.head.sha.is_empty() { &pr.head.ref_name } else { &pr.head.sha })
-        .ok();
-    let reviews = forge
-        .get_pr_reviews(&repo_info.owner, &repo_info.repo, pr.number)
-        .ok();
-    SegmentDisplayStatus { mergeability, checks, reviews }
+    targets: &[(String, PullRequest)],
+) -> HashMap<String, SegmentDisplayStatus> {
+    let prs: Vec<&PullRequest> = targets.iter().map(|(_, pr)| pr).collect();
+    let by_number = forge_status::fetch_all(forge, repo_info, &prs);
+    targets
+        .iter()
+        .filter_map(|(name, pr)| {
+            by_number
+                .get(&pr.number)
+                .map(|status| (name.clone(), status.clone()))
+        })
+        .collect()
 }
 
 /// Where a segment's local commits stand relative to the pushed PR branch.
@@ -1462,7 +1507,7 @@ fn find_repo_root() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jjpr::forge::types::PrMergeability;
+    use jjpr::forge::types::{PrMergeability, ReviewSummary};
 
     fn bookmark(has_remote: bool, is_synced: bool) -> Bookmark {
         Bookmark {
@@ -1560,6 +1605,204 @@ mod tests {
             requested_reviewers: vec![],
             author: author.to_string(),
         }
+    }
+
+    /// A forge whose batch path can be told to answer fully, partially, or not
+    /// at all, and which records every per-PR call so a test can prove the
+    /// batch actually avoided them.
+    struct BatchStub {
+        /// PR numbers the batch answers. `None` means "no batch path at all",
+        /// which is what a GraphQL failure or a non-GitHub forge looks like.
+        batched: Option<Vec<u64>>,
+        per_pr_calls: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl BatchStub {
+        fn new(batched: Option<Vec<u64>>) -> Self {
+            Self {
+                batched,
+                per_pr_calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<u64> {
+            let mut v = self.per_pr_calls.lock().unwrap().clone();
+            v.sort_unstable();
+            v
+        }
+    }
+
+    impl Forge for BatchStub {
+        fn batch_pr_status(
+            &self,
+            _o: &str,
+            _r: &str,
+            prs: &[(u64, String)],
+        ) -> Option<HashMap<u64, jjpr::forge::PrStatusBundle>> {
+            let answerable = self.batched.as_ref()?;
+            Some(
+                prs.iter()
+                    .filter(|(n, _)| answerable.contains(n))
+                    .map(|(n, _)| {
+                        (
+                            *n,
+                            jjpr::forge::PrStatusBundle {
+                                mergeability: Some(PrMergeability {
+                                    mergeable: Some(true),
+                                    mergeable_state: "clean".to_string(),
+                                }),
+                                checks: Some(ChecksStatus::Pass),
+                                reviews: Some(ReviewSummary {
+                                    approved_count: 7,
+                                    changes_requested: false,
+                                }),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        fn get_pr_mergeability(&self, _o: &str, _r: &str, n: u64) -> Result<PrMergeability> {
+            self.per_pr_calls.lock().unwrap().push(n);
+            Ok(PrMergeability {
+                mergeable: Some(false),
+                mergeable_state: "dirty".to_string(),
+            })
+        }
+        fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+            Ok(ChecksStatus::Fail)
+        }
+        fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+            Ok(ReviewSummary {
+                approved_count: 0,
+                changes_requested: true,
+            })
+        }
+        fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+            unimplemented!()
+        }
+        fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> {
+            unimplemented!()
+        }
+        fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _rev: &[String]) -> Result<()> {
+            unimplemented!()
+        }
+        fn list_comments(&self, _o: &str, _r: &str, _n: u64) -> Result<Vec<jjpr::forge::types::IssueComment>> {
+            unimplemented!()
+        }
+        fn create_comment(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<jjpr::forge::types::IssueComment> {
+            unimplemented!()
+        }
+        fn update_comment(&self, _o: &str, _r: &str, _c: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            unimplemented!()
+        }
+        fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+            unimplemented!()
+        }
+        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<jjpr::forge::types::PrState> {
+            unimplemented!()
+        }
+    }
+
+    fn numbered_pr(number: u64) -> PullRequest {
+        let mut pr = pr_with("me", false, None);
+        pr.number = number;
+        pr
+    }
+
+    fn targets(numbers: &[u64]) -> Vec<(String, PullRequest)> {
+        numbers
+            .iter()
+            .map(|n| (format!("bm-{n}"), numbered_pr(*n)))
+            .collect()
+    }
+
+    fn repo() -> RepoInfo {
+        RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        }
+    }
+
+    #[test]
+    fn batch_answers_everything_and_no_per_pr_calls_are_made() {
+        let stub = BatchStub::new(Some(vec![1, 2, 3]));
+        let out = fetch_all_segment_status(&stub, &repo(), &targets(&[1, 2, 3]));
+        assert_eq!(out.len(), 3);
+        assert!(stub.calls().is_empty(), "batch should have avoided per-PR calls");
+        // The batched values, not the per-PR stub's, must be what lands.
+        assert_eq!(out["bm-1"].reviews.as_ref().unwrap().approved_count, 7);
+        assert_eq!(out["bm-1"].checks, Some(ChecksStatus::Pass));
+    }
+
+    #[test]
+    fn no_batch_path_falls_back_to_every_pr() {
+        // What a GraphQL failure, or GitLab/Forgejo, looks like.
+        let stub = BatchStub::new(None);
+        let out = fetch_all_segment_status(&stub, &repo(), &targets(&[1, 2, 3]));
+        assert_eq!(out.len(), 3, "fallback must still cover every PR");
+        assert_eq!(stub.calls(), vec![1, 2, 3]);
+        // The per-PR values must land, proving the fallback data is used.
+        assert_eq!(out["bm-2"].mergeability.as_ref().unwrap().mergeable, Some(false));
+        assert_eq!(out["bm-2"].checks, Some(ChecksStatus::Fail));
+    }
+
+    #[test]
+    fn a_partial_batch_only_fetches_the_gaps() {
+        // A backend that can answer some PRs but not others must not lose the
+        // rest, and must not re-fetch what it already has.
+        let stub = BatchStub::new(Some(vec![1, 3]));
+        let out = fetch_all_segment_status(&stub, &repo(), &targets(&[1, 2, 3]));
+        assert_eq!(out.len(), 3, "batched and fetched PRs must both appear");
+        assert_eq!(stub.calls(), vec![2], "only the gap should be fetched");
+        assert_eq!(out["bm-1"].checks, Some(ChecksStatus::Pass), "from batch");
+        assert_eq!(out["bm-2"].checks, Some(ChecksStatus::Fail), "from fallback");
+        assert_eq!(out["bm-3"].checks, Some(ChecksStatus::Pass), "from batch");
+    }
+
+    #[test]
+    fn no_targets_makes_no_calls() {
+        let stub = BatchStub::new(Some(vec![1]));
+        let out = fetch_all_segment_status(&stub, &repo(), &[]);
+        assert!(out.is_empty());
+        assert!(stub.calls().is_empty());
+    }
+
+    #[test]
+    fn results_are_keyed_by_bookmark_not_pr_number() {
+        // The render looks status up by bookmark name; mapping the wrong PR to a
+        // bookmark would mislabel a whole segment.
+        let stub = BatchStub::new(Some(vec![10, 20]));
+        let out = fetch_all_segment_status(&stub, &repo(), &targets(&[10, 20]));
+        assert!(out.contains_key("bm-10") && out.contains_key("bm-20"));
+    }
+
+    #[test]
+    fn checks_ref_prefers_sha_and_falls_back_to_branch() {
+        use jjpr::forge::types::PullRequestRef;
+        let mut pr = numbered_pr(1);
+        pr.head = PullRequestRef {
+            ref_name: "my-branch".to_string(),
+            label: String::new(),
+            sha: "abc123".to_string(),
+        };
+        assert_eq!(pr.checks_ref(), "abc123");
+        pr.head.sha = String::new();
+        assert_eq!(pr.checks_ref(), "my-branch");
     }
 
     fn seg(names: &[&str]) -> BookmarkSegment {
