@@ -8,9 +8,12 @@ fetches the latest state but doesn't push or modify anything.
 ```
 jjpr                                  # current stack (inferred from working copy)
 jjpr status                           # same
+jjpr st                               # same, using the short alias
 jjpr status profile                   # scope to the stack containing 'profile'
 jjpr status --all                     # show every local stack
 ```
+
+`st` is a short alias for `status`, matching jj's own `jj st`.
 
 The default scope matches `submit`, `merge`, and `watch`: the stack
 inferred from the working copy. Pass a bookmark to scope to a specific

@@ -79,6 +79,19 @@ fn test_help_shows_usage() {
 }
 
 #[test]
+fn test_status_alias_st_dispatches_to_status() {
+    // `st` is a visible alias for `status`, matching jj's built-in. Checked via
+    // --help so there's no repo dependency: an unknown subcommand would instead
+    // exit non-zero with "unrecognized subcommand".
+    jjpr()
+        .args(["st", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mergeability"))
+        .stdout(predicate::str::contains("--all"));
+}
+
+#[test]
 fn test_submit_help() {
     jjpr()
         .args(["submit", "--help"])
