@@ -90,6 +90,31 @@ stacked on appears as its own segment — attributed to them, and marked
 so it's clear the mutating commands leave it alone. See
 [status](commands/status.md).
 
+## Talking to the forge
+
+A stack's status needs four things per PR: whether it merges cleanly, its
+CI result, its reviews, and where its branch stands. Asked one at a time,
+that is four network round trips per PR, and the wait grows with every PR
+you stack.
+
+On GitHub, jjpr asks for the whole stack in a single GraphQL query
+instead. A four-PR stack costs one request rather than sixteen, so status
+takes about as long for a tall stack as for a short one.
+
+GraphQL is not always available. It requires a token even on public
+repositories, where REST does not, and it can be refused by SAML
+enforcement, a fine-grained token missing the pull-requests permission, or
+an exhausted GraphQL budget while the REST budget is untouched. Whenever
+the batch query fails for any reason, jjpr falls back to asking per PR.
+The fallback is the same code path GitLab and Forgejo always take, neither
+offers a GraphQL API that jjpr can use, and it issues its requests
+concurrently rather than one after another. The result is identical
+either way. Only the number of requests changes.
+
+`jj git fetch` runs at the same time as the forge lookups, since neither
+needs the other's answer. The stack graph waits for the fetch, because the
+fetch decides where trunk is.
+
 ## What jjpr never does
 
 - Modify the working copy without an explicit user-driven command.
@@ -104,6 +129,8 @@ For contributors, the source is laid out as follows.
   out to the `jj` binary.
 - `src/forge/`: `Forge` trait and per-forge backends (GitHub, GitLab,
   Forgejo) over a shared `ureq` HTTP client.
+- `src/parallel.rs`: bounded, order-preserving fan-out for the forge
+  calls that have no batch path.
 - `src/graph/`: change graph construction and traversal.
 - `src/submit/`: analysis, planning, and execution for `submit`.
 - `src/merge/`: merge planning, execution, and the watch loop.
