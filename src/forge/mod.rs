@@ -241,6 +241,27 @@ pub trait Forge: Send + Sync {
         repo: &str,
         number: u64,
     ) -> Result<PrState>;
+
+    /// Fetch mergeability, checks, and reviews for many PRs at once.
+    ///
+    /// Answering a stack one PR at a time costs four serial round trips each,
+    /// so a forge that can batch should. `prs` pairs each PR number with the
+    /// head ref its checks hang off, since not every forge keys checks by number.
+    ///
+    /// Returning `None` means "no batch path here, ask per-PR instead" — it is
+    /// the default, and it is also what a backend should return when its batch
+    /// call fails for any reason. The per-PR path stays the reference
+    /// implementation; batching is only ever an optimization over it, so a
+    /// backend that cannot batch a given PR should omit it from the map rather
+    /// than guess, and the caller will fill the gap.
+    fn batch_pr_status(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        _prs: &[(u64, String)],
+    ) -> Option<HashMap<u64, PrStatusBundle>> {
+        None
+    }
 }
 
 #[cfg(test)]

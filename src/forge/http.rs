@@ -344,7 +344,14 @@ impl ForgeClient {
         Ok(all_items)
     }
 
-    /// POST to a GraphQL endpoint (GitHub-specific).
+    /// POST to a GraphQL endpoint (GitHub-specific), returning the `data` object.
+    ///
+    /// GraphQL reports almost every failure as HTTP 200 with a top-level
+    /// `errors` array, so a status-code check alone sees a permission denial or
+    /// a malformed query as success. Only transport-level failures (a rejected
+    /// token is 401) surface as an [`HttpError`]. This checks both, and treats
+    /// any `errors` entry as a failure even when partial `data` came back —
+    /// a half-populated result would silently understate a PR's real status.
     pub fn graphql(
         &self,
         endpoint: &str,
@@ -355,9 +362,77 @@ impl ForgeClient {
             "query": query,
             "variables": variables,
         });
-        self.post(endpoint, &body)
+        let response = self.post(endpoint, &body)?;
+
+        if let Some(errors) = response.get("errors").and_then(|e| e.as_array())
+            && !errors.is_empty()
+        {
+            return Err(GraphQlError::from_errors(errors).into());
+        }
+
+        response
+            .get("data")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("GraphQL response had neither data nor errors"))
     }
 }
+
+/// A GraphQL request that failed inside an HTTP 200 response.
+///
+/// Callers are expected to treat any of these as "fall back to REST". The type
+/// is kept for diagnostics rather than for branching: GitHub does not publish
+/// an exhaustive list of `type` values, and it deliberately reports a repo the
+/// token cannot read as `NOT_FOUND` rather than `FORBIDDEN` so as not to leak
+/// whether the repo exists — so `NOT_FOUND` cannot be read as "really absent".
+#[derive(Debug)]
+pub struct GraphQlError {
+    /// The `type` GitHub attaches to each error: `NOT_FOUND`, `FORBIDDEN`,
+    /// `RATE_LIMITED`, `INSUFFICIENT_SCOPES`. Query-level mistakes (a bad field
+    /// name) carry no type at all, so this can legitimately be empty.
+    pub types: Vec<String>,
+    pub message: String,
+}
+
+impl GraphQlError {
+    fn from_errors(errors: &[serde_json::Value]) -> Self {
+        let types: Vec<String> = errors
+            .iter()
+            .filter_map(|e| e.get("type").and_then(|t| t.as_str()))
+            .map(str::to_string)
+            .collect();
+        let message = errors
+            .iter()
+            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Self {
+            types,
+            message: if message.is_empty() {
+                String::from("<no message>")
+            } else {
+                message
+            },
+        }
+    }
+
+}
+
+impl fmt::Display for GraphQlError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.types.is_empty() {
+            write!(f, "GraphQL error: {}", truncate_body(&self.message, 500))
+        } else {
+            write!(
+                f,
+                "GraphQL error [{}]: {}",
+                self.types.join(", "),
+                truncate_body(&self.message, 500)
+            )
+        }
+    }
+}
+
+impl std::error::Error for GraphQlError {}
 
 /// Truncate a string to a maximum byte length, appending "…" if truncated.
 fn truncate_body(s: &str, max: usize) -> String {
@@ -409,6 +484,62 @@ fn extract_next_link(resp: &http::Response<ureq::Body>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // GraphQL reports permission and rate-limit failures inside an HTTP 200, so
+    // these pin the shapes that must not be mistaken for success. The bodies are
+    // taken from live responses.
+    #[test]
+    fn graphql_error_captures_type_and_message() {
+        let errors = vec![serde_json::json!({
+            "type": "NOT_FOUND",
+            "message": "Could not resolve to a Repository with the name 'a/b'.",
+        })];
+        let err = GraphQlError::from_errors(&errors);
+        assert_eq!(err.types, vec!["NOT_FOUND"]);
+        assert!(err.message.contains("Could not resolve"));
+        assert!(err.to_string().contains("NOT_FOUND"));
+    }
+
+    #[test]
+    fn graphql_saml_denial_is_a_forbidden_error() {
+        let errors = vec![serde_json::json!({
+            "type": "FORBIDDEN",
+            "message": "Resource protected by organization SAML enforcement.",
+            "extensions": { "saml_failure": true },
+        })];
+        let err = GraphQlError::from_errors(&errors);
+        assert_eq!(err.types, vec!["FORBIDDEN"]);
+    }
+
+    #[test]
+    fn graphql_syntax_errors_carry_no_type() {
+        // A malformed query returns errors with no `type` at all. It must still
+        // be recognized as a failure rather than parsed as data.
+        let errors = vec![serde_json::json!({
+            "message": "Field 'nope' doesn't exist on type 'PullRequest'",
+        })];
+        let err = GraphQlError::from_errors(&errors);
+        assert!(err.types.is_empty());
+        assert!(err.to_string().contains("doesn't exist"));
+    }
+
+    #[test]
+    fn graphql_error_without_message_still_displays() {
+        let err = GraphQlError::from_errors(&[serde_json::json!({ "type": "RATE_LIMITED" })]);
+        assert!(err.to_string().contains("RATE_LIMITED"));
+        assert!(err.to_string().contains("<no message>"));
+    }
+
+    #[test]
+    fn graphql_error_joins_multiple_entries() {
+        let errors = vec![
+            serde_json::json!({"type": "NOT_FOUND", "message": "first"}),
+            serde_json::json!({"type": "FORBIDDEN", "message": "second"}),
+        ];
+        let err = GraphQlError::from_errors(&errors);
+        assert_eq!(err.types, vec!["NOT_FOUND", "FORBIDDEN"]);
+        assert!(err.message.contains("first") && err.message.contains("second"));
+    }
 
     #[test]
     fn test_extract_next_link_present() {

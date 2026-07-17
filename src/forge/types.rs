@@ -199,5 +199,21 @@ pub struct PrMergeability {
     /// `None` means the forge is still computing.
     pub mergeable: Option<bool>,
     /// "clean", "dirty", "blocked", "behind", "unknown", etc.
+    ///
+    /// Advisory only, and not uniform across forges: Forgejo has no equivalent
+    /// field and synthesizes one, as does GitHub's batch path. Branch on
+    /// [`Self::mergeable`] instead.
     pub mergeable_state: String,
+}
+
+/// Everything the status view needs about one pull request.
+///
+/// Each field is independently optional because a forge may answer some parts
+/// and not others; a missing field means "unknown", which renders as nothing
+/// rather than as a false negative.
+#[derive(Debug, Clone, Default)]
+pub struct PrStatusBundle {
+    pub mergeability: Option<PrMergeability>,
+    pub checks: Option<ChecksStatus>,
+    pub reviews: Option<ReviewSummary>,
 }
