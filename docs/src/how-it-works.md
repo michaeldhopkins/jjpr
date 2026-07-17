@@ -108,8 +108,12 @@ an exhausted GraphQL budget while the REST budget is untouched. Whenever
 the batch query fails for any reason, jjpr falls back to asking per PR.
 The fallback is the same code path GitLab and Forgejo always take, neither
 offers a GraphQL API that jjpr can use, and it issues its requests
-concurrently rather than one after another. The result is identical
-either way. Only the number of requests changes.
+concurrently rather than one after another. It reports the same thing,
+using more requests. The one difference is which commit a PR's CI is read
+from: the batch reads the head as it stands when it asks, while the
+fallback reads the head recorded a moment earlier when the PR list was
+fetched. They differ only if you push mid-command, and then the batch is
+the fresher of the two.
 
 `jj git fetch` runs at the same time as the forge lookups, since neither
 needs the other's answer. The stack graph waits for the fetch, because the
