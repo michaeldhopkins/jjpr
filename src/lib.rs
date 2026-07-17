@@ -7,5 +7,6 @@ pub mod heartbeat;
 pub mod identity;
 pub mod jj;
 pub mod merge;
+pub mod parallel;
 pub mod submit;
 pub mod watch;
