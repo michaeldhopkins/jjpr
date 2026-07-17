@@ -101,6 +101,18 @@ On GitHub, jjpr asks for the whole stack in a single GraphQL query
 instead. A four-PR stack costs one request rather than sixteen, so status
 takes about as long for a tall stack as for a short one.
 
+`merge` and `watch` read the same state and use the same query, but they
+ask for less of it. `merge` reads CI only when it is going to require it,
+and `watch` reads nothing but CI, because that is all it acts on. Both
+matter more than they look: `watch` re-reads on every poll, and on GitLab
+a review lookup by itself is three requests.
+
+Two places deliberately keep asking one PR at a time. `merge` re-reads
+each segment as it merges the one below it, and `watch` does the same in
+its merge phase, because every merge moves the next PR's base and changes
+whether it still merges cleanly. A batch taken before that loop started
+would be describing a stack that no longer exists.
+
 GraphQL is not always available. It requires a token even on public
 repositories, where REST does not, and it can be refused by SAML
 enforcement, a fine-grained token missing the pull-requests permission, or
@@ -133,6 +145,8 @@ For contributors, the source is laid out as follows.
   out to the `jj` binary.
 - `src/forge/`: `Forge` trait and per-forge backends (GitHub, GitLab,
   Forgejo) over a shared `ureq` HTTP client.
+- `src/forge/status.rs`: reading PR state for a set of PRs at once,
+  shared by `status`, `merge`, and `watch`.
 - `src/parallel.rs`: bounded, order-preserving fan-out for the forge
   calls that have no batch path.
 - `src/graph/`: change graph construction and traversal.
