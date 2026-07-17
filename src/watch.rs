@@ -107,6 +107,17 @@ fn promote_ready_drafts(
     let owner = &repo_info.owner;
     let repo = &repo_info.repo;
 
+    // Read every draft's CI in one go. This runs on every poll, so the old
+    // request-per-draft added up; batching keeps a wide stack's poll the same
+    // cost as a narrow one. Only CI is asked for: nothing below reads the rest
+    // of a status bundle, and on GitLab a review lookup alone is three requests.
+    let drafts: Vec<&PullRequest> = segments
+        .iter()
+        .filter_map(|seg| pr_map.get(&seg.bookmark.name))
+        .filter(|pr| pr.draft)
+        .collect();
+    let checks = crate::forge::status::fetch_checks(forge, repo_info, &drafts);
+
     for seg in segments {
         let Some(pr) = pr_map.get(&seg.bookmark.name) else {
             continue;
@@ -115,11 +126,13 @@ fn promote_ready_drafts(
             continue;
         }
 
-        let Ok(status) = forge.get_pr_checks_status(owner, repo, pr.checks_ref()) else {
+        // Absent means the CI read failed; leave the draft alone rather than
+        // promote it on an unknown.
+        let Some(status) = checks.get(&pr.number) else {
             continue;
         };
 
-        if status == ChecksStatus::Pass {
+        if *status == ChecksStatus::Pass {
             if let Err(e) = forge.mark_pr_ready(owner, repo, pr.number) {
                 eprintln!(
                     "  Warning: failed to mark {} as ready: {e}",
@@ -307,6 +320,11 @@ fn run_merge_phase(
             &merge_plan.repo_info,
             &pr_map,
             merge_options,
+            // Not prefetched, for the same reason execute doesn't: this loop
+            // merges as it goes, and each merge moves the next segment's base.
+            // A batch taken before it started would be stale by the time the
+            // later segments were read.
+            None,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1165,6 +1183,12 @@ mod tests {
             self
         }
 
+        /// Register a PR with no checks entry, so the lookup errors.
+        fn with_unreadable_checks(mut self, pr: PullRequest) -> Self {
+            self.prs.insert(pr.head.ref_name.clone(), pr);
+            self
+        }
+
         fn calls(&self) -> Vec<String> {
             self.calls.lock().expect("poisoned").clone()
         }
@@ -1313,6 +1337,40 @@ mod tests {
         let promoted = promote_ready_drafts(&forge, &segments, &pr_map, &repo_info(), ForgeKind::GitHub);
 
         assert!(promoted.is_empty());
+    }
+
+    #[test]
+    fn test_no_promote_when_ci_cannot_be_read() {
+        // An unreadable CI result must leave the draft alone. Promoting on an
+        // unknown would mark a PR ready off the back of a failed request.
+        let forge = PromotionForge::new().with_unreadable_checks(make_pr("auth", 1, true));
+        let segments = vec![make_segment("auth")];
+        let pr_map: HashMap<String, PullRequest> = forge.prs.clone();
+
+        let promoted = promote_ready_drafts(&forge, &segments, &pr_map, &repo_info(), ForgeKind::GitHub);
+
+        assert!(promoted.is_empty());
+        assert!(!forge.calls().iter().any(|c| c.starts_with("mark_pr_ready")));
+    }
+
+    #[test]
+    fn test_promotion_reads_ci_once_per_poll_not_per_draft() {
+        // This runs every 30s, so a request per draft added up. Only CI is read:
+        // nothing here looks at reviews, and on GitLab that alone is 3 requests.
+        let forge = PromotionForge::new()
+            .with_pr(make_pr("auth", 1, true), ChecksStatus::Pass)
+            .with_pr(make_pr("api", 2, true), ChecksStatus::Pass)
+            .with_pr(make_pr("ui", 3, true), ChecksStatus::Pass);
+        let segments = vec![make_segment("auth"), make_segment("api"), make_segment("ui")];
+        let pr_map: HashMap<String, PullRequest> = forge.prs.clone();
+
+        let promoted = promote_ready_drafts(&forge, &segments, &pr_map, &repo_info(), ForgeKind::GitHub);
+
+        assert_eq!(promoted.len(), 3);
+        assert!(
+            !forge.calls().iter().any(|c| c.starts_with("get_pr_reviews")),
+            "promotion must never pay for reviews it does not read",
+        );
     }
 
     #[test]

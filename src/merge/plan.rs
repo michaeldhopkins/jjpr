@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
+use crate::forge::types::{ChecksStatus, MergeMethod, PrStatusBundle, PullRequest, RepoInfo};
 use crate::forge::{Forge, ForgeKind};
 use crate::jj::types::NarrowedSegment;
 
@@ -90,13 +90,48 @@ pub struct MergePlan {
     pub stack_nav: crate::config::StackNavMode,
 }
 
-/// Evaluate a single bookmark's merge readiness against current GitHub state.
+/// Fetch, over the per-PR endpoints, exactly the fields this merge will consult.
+///
+/// `require_ci_pass` gates the CI lookup the same way the evaluation below does:
+/// without it the result is never read, and fetching it anyway would spend
+/// requests per PR filling a field that gets dropped.
+fn fetch_for_merge(
+    github: &dyn Forge,
+    repo_info: &RepoInfo,
+    pr: &PullRequest,
+    options: &MergeOptions,
+) -> PrStatusBundle {
+    PrStatusBundle {
+        mergeability: github
+            .get_pr_mergeability(&repo_info.owner, &repo_info.repo, pr.number)
+            .ok(),
+        checks: options
+            .require_ci_pass
+            .then(|| {
+                github
+                    .get_pr_checks_status(&repo_info.owner, &repo_info.repo, pr.checks_ref())
+                    .ok()
+            })
+            .flatten(),
+        reviews: github
+            .get_pr_reviews(&repo_info.owner, &repo_info.repo, pr.number)
+            .ok(),
+    }
+}
+
+/// Evaluate a single bookmark's merge readiness against current forge state.
+///
+/// `prefetched` is the forge's batched answer for this PR when it had one. It is
+/// only ever an optimization: absent, every field is fetched here instead, and
+/// the outcome is the same either way. Errors and prefetch gaps both read as
+/// "unknown", which blocks rather than waves the merge through.
 pub fn evaluate_segment(
     github: &dyn Forge,
     bookmark_name: &str,
     repo_info: &RepoInfo,
     pr_map: &HashMap<String, PullRequest>,
     options: &MergeOptions,
+    prefetched: Option<&PrStatusBundle>,
 ) -> Result<PrMergeStatus> {
     let Some(pr) = pr_map.get(bookmark_name).cloned() else {
         // No open PR — check if it was already merged
@@ -123,42 +158,55 @@ pub fn evaluate_segment(
     };
 
     let mut reasons = Vec::new();
+    let mut prefetched = prefetched;
 
     if pr.draft {
         if options.ready {
             github.mark_pr_ready(&repo_info.owner, &repo_info.repo, pr.number)?;
+            // Anything batched for this PR predates the mutation. Reading it now
+            // would describe the draft the PR no longer is, so drop it and let
+            // the reads below happen after the change, as they always have.
+            prefetched = None;
         } else {
             reasons.push(BlockReason::Draft);
         }
     }
 
-    // API errors block the merge rather than silently skipping the check
-    match github.get_pr_mergeability(&repo_info.owner, &repo_info.repo, pr.number) {
-        Ok(mergeability) => match mergeability.mergeable {
+    // Fall back to the per-PR endpoints when the forge could not batch, or when
+    // marking the PR ready just invalidated what it did batch.
+    let owned;
+    let status = match prefetched {
+        Some(bundle) => bundle,
+        None => {
+            owned = fetch_for_merge(github, repo_info, &pr, options);
+            &owned
+        }
+    };
+
+    // A field the forge could not answer blocks the merge rather than silently
+    // skipping the check.
+    match &status.mergeability {
+        Some(mergeability) => match mergeability.mergeable {
             Some(false) => reasons.push(BlockReason::Conflicted),
             None => reasons.push(BlockReason::MergeabilityUnknown),
             Some(true) => {}
         },
-        Err(_) => reasons.push(BlockReason::MergeabilityUnknown),
+        None => reasons.push(BlockReason::MergeabilityUnknown),
     }
 
     if options.require_ci_pass {
-        match github.get_pr_checks_status(
-            &repo_info.owner,
-            &repo_info.repo,
-            pr.checks_ref(),
-        ) {
-            Ok(ChecksStatus::Fail) => reasons.push(BlockReason::ChecksFailing),
-            Ok(ChecksStatus::Pending) => reasons.push(BlockReason::ChecksPending),
-            Ok(ChecksStatus::Pass) => {}
+        match &status.checks {
+            Some(ChecksStatus::Fail) => reasons.push(BlockReason::ChecksFailing),
+            Some(ChecksStatus::Pending) => reasons.push(BlockReason::ChecksPending),
+            Some(ChecksStatus::Pass) => {}
             // No checks exist for this commit — CI hasn't started yet.
-            Ok(ChecksStatus::None) => reasons.push(BlockReason::ChecksPending),
-            Err(_) => reasons.push(BlockReason::ChecksPending),
+            Some(ChecksStatus::None) => reasons.push(BlockReason::ChecksPending),
+            None => reasons.push(BlockReason::ChecksPending),
         }
     }
 
-    match github.get_pr_reviews(&repo_info.owner, &repo_info.repo, pr.number) {
-        Ok(reviews) => {
+    match &status.reviews {
+        Some(reviews) => {
             if reviews.changes_requested {
                 reasons.push(BlockReason::ChangesRequested);
             }
@@ -169,7 +217,7 @@ pub fn evaluate_segment(
                 });
             }
         }
-        Err(_) => {
+        None => {
             if options.required_approvals > 0 {
                 reasons.push(BlockReason::InsufficientApprovals {
                     have: 0,
@@ -209,11 +257,26 @@ pub fn create_merge_plan(
     let all_open_prs = github.list_open_prs(&repo_info.owner, &repo_info.repo)?;
     let pr_map = crate::forge::build_pr_map(all_open_prs, &repo_info.owner);
 
+    // One batched read for the whole stack, where the forge can do it. Where it
+    // cannot this is empty and each segment falls back to its own requests,
+    // which keeps the early exit below honest: a stack blocked at its first
+    // segment must not pay for the segments the plan never reaches. On a forge
+    // that batches, that prefetch is a single request, so reaching past the
+    // block costs less than evaluating one segment used to.
+    let stack_prs: Vec<&PullRequest> = segments
+        .iter()
+        .filter_map(|segment| pr_map.get(&segment.bookmark.name))
+        .collect();
+    let prefetched = crate::forge::status::prefetch(github, repo_info, &stack_prs);
+
     let mut actions = Vec::new();
 
     for segment in segments {
+        let bundle = pr_map
+            .get(&segment.bookmark.name)
+            .and_then(|pr| prefetched.get(&pr.number));
         let status = evaluate_segment(
-            github, &segment.bookmark.name, repo_info, &pr_map, options,
+            github, &segment.bookmark.name, repo_info, &pr_map, options, bundle,
         )?;
         let is_blocked = matches!(&status, PrMergeStatus::Blocked { .. });
         actions.push(status);
@@ -290,6 +353,223 @@ mod tests {
             requested_reviewers: vec![],
             author: String::new(),
         }
+    }
+
+    /// A forge that records every per-PR read, so a test can prove a prefetch
+    /// actually replaced them rather than merely sitting alongside them.
+    struct CountingForge {
+        inner: StubGitHub,
+        mergeability_calls: std::sync::Mutex<Vec<u64>>,
+        checks_calls: std::sync::Mutex<Vec<String>>,
+        reviews_calls: std::sync::Mutex<Vec<u64>>,
+        batch: Option<HashMap<u64, PrStatusBundle>>,
+    }
+
+    impl CountingForge {
+        fn new(inner: StubGitHub, batch: Option<HashMap<u64, PrStatusBundle>>) -> Self {
+            Self {
+                inner,
+                mergeability_calls: std::sync::Mutex::new(Vec::new()),
+                checks_calls: std::sync::Mutex::new(Vec::new()),
+                reviews_calls: std::sync::Mutex::new(Vec::new()),
+                batch,
+            }
+        }
+        fn per_pr_reads(&self) -> usize {
+            self.mergeability_calls.lock().unwrap().len()
+                + self.checks_calls.lock().unwrap().len()
+                + self.reviews_calls.lock().unwrap().len()
+        }
+    }
+
+    impl Forge for CountingForge {
+        fn batch_pr_status(
+            &self,
+            _o: &str,
+            _r: &str,
+            prs: &[(u64, String)],
+        ) -> Option<HashMap<u64, PrStatusBundle>> {
+            let batch = self.batch.as_ref()?;
+            Some(
+                prs.iter()
+                    .filter_map(|(n, _)| batch.get(n).map(|b| (*n, b.clone())))
+                    .collect(),
+            )
+        }
+        fn get_pr_mergeability(&self, o: &str, r: &str, n: u64) -> Result<PrMergeability> {
+            self.mergeability_calls.lock().unwrap().push(n);
+            self.inner.get_pr_mergeability(o, r, n)
+        }
+        fn get_pr_checks_status(&self, o: &str, r: &str, h: &str) -> Result<ChecksStatus> {
+            self.checks_calls.lock().unwrap().push(h.to_string());
+            self.inner.get_pr_checks_status(o, r, h)
+        }
+        fn get_pr_reviews(&self, o: &str, r: &str, n: u64) -> Result<ReviewSummary> {
+            self.reviews_calls.lock().unwrap().push(n);
+            self.inner.get_pr_reviews(o, r, n)
+        }
+        fn list_open_prs(&self, o: &str, r: &str) -> Result<Vec<PullRequest>> {
+            self.inner.list_open_prs(o, r)
+        }
+        fn find_merged_pr(&self, o: &str, r: &str, h: &str) -> Result<Option<PullRequest>> {
+            self.inner.find_merged_pr(o, r, h)
+        }
+        fn mark_pr_ready(&self, o: &str, r: &str, n: u64) -> Result<()> {
+            self.inner.mark_pr_ready(o, r, n)
+        }
+        fn create_pr(&self, o: &str, r: &str, t: &str, b: &str, h: &str, ba: &str, d: bool) -> Result<PullRequest> {
+            self.inner.create_pr(o, r, t, b, h, ba, d)
+        }
+        fn update_pr_base(&self, o: &str, r: &str, n: u64, b: &str) -> Result<()> {
+            self.inner.update_pr_base(o, r, n, b)
+        }
+        fn request_reviewers(&self, o: &str, r: &str, n: u64, v: &[String]) -> Result<()> {
+            self.inner.request_reviewers(o, r, n, v)
+        }
+        fn list_comments(&self, o: &str, r: &str, n: u64) -> Result<Vec<IssueComment>> {
+            self.inner.list_comments(o, r, n)
+        }
+        fn create_comment(&self, o: &str, r: &str, n: u64, b: &str) -> Result<IssueComment> {
+            self.inner.create_comment(o, r, n, b)
+        }
+        fn update_comment(&self, o: &str, r: &str, c: u64, b: &str) -> Result<()> {
+            self.inner.update_comment(o, r, c, b)
+        }
+        fn update_pr_body(&self, o: &str, r: &str, n: u64, b: &str) -> Result<()> {
+            self.inner.update_pr_body(o, r, n, b)
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            self.inner.get_authenticated_user()
+        }
+        fn merge_pr(&self, o: &str, r: &str, n: u64, m: MergeMethod) -> Result<()> {
+            self.inner.merge_pr(o, r, n, m)
+        }
+        fn get_pr_state(&self, o: &str, r: &str, n: u64) -> Result<PrState> {
+            self.inner.get_pr_state(o, r, n)
+        }
+    }
+
+    fn green_bundle() -> PrStatusBundle {
+        PrStatusBundle {
+            mergeability: Some(PrMergeability {
+                mergeable: Some(true),
+                mergeable_state: "clean".to_string(),
+            }),
+            checks: Some(ChecksStatus::Pass),
+            reviews: Some(ReviewSummary {
+                approved_count: 1,
+                changes_requested: false,
+            }),
+        }
+    }
+
+    // The prefetch must be a pure optimization: same decision, fewer requests.
+    #[test]
+    fn a_prefetched_bundle_replaces_the_per_pr_reads() {
+        let batch = HashMap::from([(1, green_bundle())]);
+        let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), Some(batch));
+        let plan = create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &default_options(), None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+        assert!(matches!(plan.actions[0], PrMergeStatus::Mergeable { .. }));
+        assert_eq!(forge.per_pr_reads(), 0, "the batch should have answered everything");
+    }
+
+    #[test]
+    fn without_a_batch_path_the_per_pr_reads_still_happen() {
+        let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), None);
+        let plan = create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &default_options(), None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+        assert!(matches!(plan.actions[0], PrMergeStatus::Mergeable { .. }));
+        assert_eq!(forge.per_pr_reads(), 3, "mergeability + checks + reviews");
+    }
+
+    #[test]
+    fn batched_and_unbatched_reach_the_same_verdict() {
+        let blocked = PrStatusBundle {
+            mergeability: Some(PrMergeability {
+                mergeable: Some(false),
+                mergeable_state: "dirty".to_string(),
+            }),
+            checks: Some(ChecksStatus::Fail),
+            reviews: Some(ReviewSummary {
+                approved_count: 0,
+                changes_requested: true,
+            }),
+        };
+        let stub = || {
+            let mut s = StubGitHub::new().with_mergeable_pr("auth", 1);
+            s.mergeability.insert(1, PrMergeability {
+                mergeable: Some(false),
+                mergeable_state: "dirty".to_string(),
+            });
+            s.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
+            s.reviews.insert(1, ReviewSummary { approved_count: 0, changes_requested: true });
+            s
+        };
+        let opts = default_options();
+        let plan_batched = create_merge_plan(
+            &CountingForge::new(stub(), Some(HashMap::from([(1, blocked)]))),
+            &[make_segment("auth")], &repo_info(), ForgeKind::GitHub, "main", "origin",
+            &opts, None, crate::config::StackNavMode::Comment,
+        ).unwrap();
+        let plan_direct = create_merge_plan(
+            &CountingForge::new(stub(), None),
+            &[make_segment("auth")], &repo_info(), ForgeKind::GitHub, "main", "origin",
+            &opts, None, crate::config::StackNavMode::Comment,
+        ).unwrap();
+        assert_eq!(
+            format!("{:?}", plan_batched.actions),
+            format!("{:?}", plan_direct.actions),
+            "the batch must not change the verdict, only how it was reached",
+        );
+    }
+
+    #[test]
+    fn a_gap_in_the_batch_blocks_rather_than_passes() {
+        // An empty bundle is what a forge that could not answer looks like. It
+        // must fail closed, never wave the merge through.
+        let batch = HashMap::from([(1, PrStatusBundle::default())]);
+        let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), Some(batch));
+        let plan = create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &default_options(), None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+        match &plan.actions[0] {
+            PrMergeStatus::Blocked { reasons, .. } => {
+                assert!(reasons.contains(&BlockReason::MergeabilityUnknown));
+                assert!(reasons.contains(&BlockReason::ChecksPending));
+                assert!(reasons.iter().any(|r| matches!(r, BlockReason::InsufficientApprovals { .. })));
+            }
+            other => panic!("an unanswered PR must block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ci_is_not_fetched_when_it_is_not_required() {
+        // Without require_ci_pass the result is never read, so paying for it
+        // would be pure waste on the per-PR path.
+        let mut opts = default_options();
+        opts.require_ci_pass = false;
+        let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), None);
+        create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &opts, None, crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+        assert!(
+            forge.checks_calls.lock().unwrap().is_empty(),
+            "CI must not be fetched when it is not required",
+        );
     }
 
     fn default_options() -> MergeOptions {
