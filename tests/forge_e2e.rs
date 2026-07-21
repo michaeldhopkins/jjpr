@@ -10,7 +10,9 @@
 
 mod forge_e2e_harness;
 
-use forge_e2e_harness::{configured_drivers, ForgeE2eContext, MergeMethod, OWNER, REPO};
+use forge_e2e_harness::{
+    configured_drivers, ForgeE2eContext, ForgeTestDriver, MergeMethod, OWNER, REPO,
+};
 
 /// Poll jjpr's detection until it reports `want` (forge config propagates
 /// asynchronously), returning the last value seen.
@@ -112,5 +114,161 @@ fn feature2_dismiss_stale_detection_all_forges() {
         assert_eq!(detect(&*forge, &branch, Some(false)), Some(false), "{name}: detect OFF");
 
         eprintln!("=== {name}: detection round-trip OK ===");
+    }
+}
+
+/// Poll until a PR appears for `bookmark`'s prefixed head (forge indexing after
+/// `jjpr submit` is asynchronous).
+fn find_pr(ctx: &ForgeE2eContext, bookmark: &str) -> u64 {
+    let head = ctx.prefixed(bookmark);
+    for _ in 0..8 {
+        if let Some(n) = ctx.driver.find_request_by_head(&head) {
+            return n;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    panic!("no PR found for head '{head}'");
+}
+
+/// The unchanged case is stable immediately; the changed case needs the
+/// force-push to propagate, so poll until it differs. Returns the last SHA seen
+/// so a failed expectation still reports a concrete value.
+fn poll_head_sha(ctx: &ForgeE2eContext, number: u64, before: &str, expect_changed: bool) -> String {
+    let mut last = ctx.driver.request_head_sha(number);
+    if !expect_changed {
+        return last;
+    }
+    for _ in 0..8 {
+        if last != before {
+            return last;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        last = ctx.driver.request_head_sha(number);
+    }
+    last
+}
+
+/// Feature 1 e2e: when jjpr merges the bottom PR of a two-stack, its post-merge
+/// reconcile force-pushes the descendant only when it genuinely must.
+///
+/// - **Merge-commit** landing leaves the bottom's commit in trunk, so the
+///   descendant already sits on trunk: jjpr skips the rebase and force-push, and
+///   the descendant's remote head SHA is **unchanged** (approvals would survive
+///   under dismiss-stale).
+/// - **Squash** landing orphans the descendant's parent, so the rebase and
+///   force-push are unavoidable: the head SHA **changes** (the control case).
+///
+/// Either way jjpr retargets the descendant's base to trunk. To let jjpr merge
+/// the bottom itself (the real Feature 1 code path) while leaving the descendant
+/// open for inspection, the descendant is marked draft after submit — so jjpr
+/// merges the bottom, reconciles the still-draft top, then stops at it.
+#[test]
+fn feature1_skip_rebase_preserves_descendant_sha_all_forges() {
+    let drivers = configured_drivers();
+    if drivers.is_empty() {
+        return;
+    }
+    if !forge_e2e_harness::tool_available("jj") {
+        return;
+    }
+
+    for driver in drivers {
+        let name = driver.name();
+        let squash_rewrites = driver.squash_rewrites_history();
+        eprintln!("=== feature1 skip-rebase: {name} ===");
+        // The feature: a merge-commit landing keeps the descendant's SHA.
+        feature1_scenario(driver.boxed(), MergeMethod::MergeCommit, false, name);
+        // Control: a squash landing that rewrites history forces the rebase.
+        if squash_rewrites {
+            feature1_scenario(driver.boxed(), MergeMethod::Squash, true, name);
+        } else {
+            eprintln!(
+                "=== {name}: squash control skipped (single-commit squash fast-forwards; \
+                 rebase direction covered by GitHub e2e + unit tests) ==="
+            );
+        }
+        eprintln!("=== {name}: feature1 OK ===");
+    }
+}
+
+fn feature1_scenario(
+    driver: Box<dyn ForgeTestDriver>,
+    method: MergeMethod,
+    expect_sha_changed: bool,
+    name: &str,
+) {
+    let method_flag = match method {
+        MergeMethod::MergeCommit => "merge",
+        MergeMethod::Squash => "squash",
+        MergeMethod::Rebase => "rebase",
+    };
+    let ctx = ForgeE2eContext::new(driver);
+    // A two-high stack rooted on trunk: bottom ← top. Titles are unique per run
+    // and distinct from each other so Codeberg's "similarly named issues"
+    // anti-spam throttle doesn't fire on the shared sandbox.
+    ctx.commit_bookmark("f1bot", "f1bot.txt", &format!("f1 base {}", ctx.prefix));
+    ctx.commit_bookmark("f1top", "f1top.txt", &format!("f1 leaf {}", ctx.prefix));
+
+    let top_bookmark = ctx.prefixed("f1top");
+    let out = ctx.run_jjpr(&["submit", &top_bookmark]);
+    assert!(
+        out.status.success(),
+        "{name}: jjpr submit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let bottom = find_pr(&ctx, "f1bot");
+    let top = find_pr(&ctx, "f1top");
+    let sha_before = ctx.driver.request_head_sha(top);
+    assert!(!sha_before.is_empty(), "{name}: descendant head sha present before merge");
+
+    // Mark only the top draft (blocked) so jjpr merges the bottom and reconciles
+    // the top without merging it.
+    ctx.driver.make_draft(top);
+    let out = ctx.run_jjpr(&[
+        "merge",
+        "--merge-method",
+        method_flag,
+        "--required-approvals",
+        "0",
+        "--no-ci-check",
+        &top_bookmark,
+    ]);
+    assert!(
+        out.status.success(),
+        "{name}: jjpr merge failed ({method:?}): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        ctx.driver.request_state(bottom),
+        "merged",
+        "{name}: jjpr should have merged the bottom ({method:?})\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // The draft top must survive for inspection; if a forge ignored the draft on
+    // create, jjpr would have merged it too and this catches it clearly.
+    assert_eq!(
+        ctx.driver.request_state(top),
+        "open",
+        "{name}: draft descendant should stay open ({method:?})"
+    );
+
+    assert_eq!(
+        ctx.driver.request_base(top),
+        "main",
+        "{name}: descendant base retargeted to trunk ({method:?})"
+    );
+
+    let sha_after = poll_head_sha(&ctx, top, &sha_before, expect_sha_changed);
+    if expect_sha_changed {
+        assert_ne!(
+            sha_after, sha_before,
+            "{name}: squash landing must rebase and force-push the descendant"
+        );
+    } else {
+        assert_eq!(
+            sha_after, sha_before,
+            "{name}: merge-commit landing must skip the rebase and preserve the descendant SHA"
+        );
     }
 }

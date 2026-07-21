@@ -72,6 +72,28 @@ impl ForgeTestDriver for ForgejoDriver {
         req("GET", &repo_path(&format!("pulls/{number}")), None)["base"]["ref"].as_str().unwrap_or("").to_string()
     }
 
+    fn boxed(&self) -> Box<dyn ForgeTestDriver> {
+        Box::new(ForgejoDriver)
+    }
+
+    fn squash_rewrites_history(&self) -> bool {
+        // Like GitLab, a single-commit squash can fast-forward unchanged here.
+        false
+    }
+
+    fn make_draft(&self, number: u64) {
+        // Forgejo derives `draft` from a WIP title prefix.
+        let title = req("GET", &repo_path(&format!("pulls/{number}")), None)["title"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        req(
+            "PATCH",
+            &repo_path(&format!("pulls/{number}")),
+            Some(json!({ "title": format!("WIP: {title}") })),
+        );
+    }
+
     fn request_state(&self, number: u64) -> String {
         let pr = req("GET", &repo_path(&format!("pulls/{number}")), None);
         if pr["merged"].as_bool() == Some(true) {
