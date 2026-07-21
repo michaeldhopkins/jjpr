@@ -243,6 +243,22 @@ pub trait Forge: Send + Sync {
         number: u64,
     ) -> Result<PrState>;
 
+    /// Read the repo's native pull-request stacks, if the forge exposes them.
+    ///
+    /// `Ok(None)` means "no native-stack surface here": GitLab/Forgejo have no
+    /// equivalent, and GitHub's endpoint 404s unless the preview is enabled for
+    /// the repo — so a `None` doubles as the capability probe. `Ok(Some(vec))`
+    /// (possibly empty) means the feature is live. Read-only: this never
+    /// creates or mutates a stack. Defaults to `None` so most backends and all
+    /// stubs need no override.
+    fn native_stacks(
+        &self,
+        _owner: &str,
+        _repo: &str,
+    ) -> Result<Option<Vec<Stack>>> {
+        Ok(None)
+    }
+
     /// Fetch mergeability, checks, and reviews for many PRs at once.
     ///
     /// Answering a stack one PR at a time costs four serial round trips each,

@@ -109,6 +109,43 @@ pub struct PullRequestRef {
     pub sha: String,
 }
 
+/// A native pull-request stack (GitHub preview feature).
+///
+/// Populated from `GET /repos/{owner}/{repo}/stacks`. Read-only for now; jjpr
+/// does not create or mutate native stacks. The `number` shares the repo's
+/// issue/PR numbering space (a stack consumes a number), and `pull_requests`
+/// is ordered bottom-to-top (index 0 targets `base`, each later PR targets the
+/// previous one's head — GitHub requires a fully linear chain).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Stack {
+    pub number: u64,
+    #[serde(default)]
+    pub node_id: String,
+    /// The stack's ultimate target. Only `ref` is set at the list level; the
+    /// copy embedded on a PR also carries `sha`.
+    pub base: PullRequestRef,
+    #[serde(default)]
+    pub open: bool,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub pull_requests: Vec<StackPr>,
+}
+
+/// One pull request as it appears inside a `Stack`. Leaner than a full
+/// `PullRequest`: the list endpoint returns only these fields.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StackPr {
+    pub number: u64,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub merged_at: Option<String>,
+    pub head: PullRequestRef,
+}
+
 /// A comment on an issue or pull request.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssueComment {
