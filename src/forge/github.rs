@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use super::http::ForgeClient;
-use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PrStatusBundle, PullRequest, ReviewSummary};
+use super::http::{ForgeClient, HttpError};
+use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PrStatusBundle, PullRequest, ReviewSummary, Stack};
 use super::Forge;
 
 /// GitHub implementation using direct HTTP via `ForgeClient`.
@@ -435,6 +435,23 @@ impl Forge for GitHubForge {
         Ok(crate::forge::parse_verified_emails(&self.client.get("user/emails")?))
     }
 
+    fn native_stacks(&self, owner: &str, repo: &str) -> Result<Option<Vec<Stack>>> {
+        let path = format!("repos/{owner}/{repo}/stacks");
+        match self.client.get(&path) {
+            Ok(value) => {
+                let stacks = serde_json::from_value(value)
+                    .context("failed to parse native stacks response")?;
+                Ok(Some(stacks))
+            }
+            // A 404 is the documented "preview not enabled for this repo"
+            // signal, which we treat as "no native stacks" rather than an error.
+            Err(e) => match e.downcast_ref::<HttpError>() {
+                Some(http) if http.status == 404 => Ok(None),
+                _ => Err(e),
+            },
+        }
+    }
+
     fn merge_pr(
         &self,
         owner: &str,
@@ -639,6 +656,41 @@ impl Forge for GitHubForge {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `GET /repos/{owner}/{repo}/stacks` list payload (captured live,
+    /// SHAs truncated): one open 3-PR stack and one merged 2-PR stack.
+    const STACKS_LIST_JSON: &str = r#"[
+      {"id":12634,"number":16306,"node_id":"PRS_kwDOABcQ480xWg","url":"https://api.github.com/repos/o/r/stacks/16306","base":{"ref":"master"},"open":true,"created_at":"2026-07-21T17:07:25Z","pull_requests":[
+        {"number":16298,"state":"open","draft":false,"merged_at":null,"head":{"ref":"feat/llm-confidence-scoring-module","sha":"c00dded0"}},
+        {"number":16300,"state":"open","draft":false,"merged_at":null,"head":{"ref":"feat/work-type-classifier-confidence-rubric","sha":"afc6a11b"}},
+        {"number":16301,"state":"open","draft":false,"merged_at":null,"head":{"ref":"feat/rap-exclusions-confidence-rubric","sha":"68dc10e1"}}
+      ]},
+      {"id":12612,"number":16305,"node_id":"PRS_kwDOABcQ480xRA","url":"https://api.github.com/repos/o/r/stacks/16305","base":{"ref":"master"},"open":false,"created_at":"2026-07-21T17:03:49Z","pull_requests":[
+        {"number":16303,"state":"closed","draft":false,"merged_at":"2026-07-21T18:23:59Z","head":{"ref":"rap-exclusion-rule-objects","sha":"230f7568"}},
+        {"number":16304,"state":"closed","draft":false,"merged_at":"2026-07-21T18:52:01Z","head":{"ref":"rap-work-location-proximity","sha":"ab6ca106"}}
+      ]}
+    ]"#;
+
+    #[test]
+    fn native_stacks_payload_deserializes_to_ordered_stacks() {
+        let stacks: Vec<Stack> = serde_json::from_str(STACKS_LIST_JSON).unwrap();
+        assert_eq!(stacks.len(), 2);
+
+        let open = &stacks[0];
+        assert_eq!(open.number, 16306);
+        assert!(open.open);
+        assert_eq!(open.base.ref_name, "master");
+        assert!(open.node_id.starts_with("PRS_"));
+        // pull_requests are bottom-to-top; every PR here is still open/unmerged.
+        let numbers: Vec<u64> = open.pull_requests.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, vec![16298, 16300, 16301]);
+        assert!(open.pull_requests.iter().all(|p| p.merged_at.is_none()));
+        assert_eq!(open.pull_requests[0].head.ref_name, "feat/llm-confidence-scoring-module");
+
+        let merged = &stacks[1];
+        assert!(!merged.open);
+        assert!(merged.pull_requests.iter().all(|p| p.state == "closed" && p.merged_at.is_some()));
+    }
 
     /// Build a GraphQL CheckRun context node.
     fn check_run(conclusion: Option<&str>, status: &str) -> serde_json::Value {
