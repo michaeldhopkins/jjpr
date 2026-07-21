@@ -12,7 +12,7 @@ use jjpr::submit::{analyze, execute, plan, resolve};
 use tempfile::TempDir;
 
 const OWNER: &str = "michaeldhopkins";
-const REPO: &str = "jjpr-testing-environment";
+const REPO: &str = "forge-e2e-sandbox";
 
 /// E2E test context: clones the testing repo, provides helpers, cleans up on Drop.
 struct E2eContext {

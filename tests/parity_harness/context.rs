@@ -6,7 +6,7 @@ use tempfile::TempDir;
 use super::scenario::{AdminMergeMethod, StackEntry};
 
 pub const OWNER: &str = "michaeldhopkins";
-pub const REPO: &str = "jjpr-testing-environment";
+pub const REPO: &str = "forge-e2e-sandbox";
 
 /// Per-scenario test context. Clones the testing repo into a temp dir,
 /// mints a unique bookmark prefix so concurrent runs don't collide, and
