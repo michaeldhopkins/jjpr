@@ -89,6 +89,21 @@ fn reconcile_local_state(
         return vec![concurrent_gate_warning(false, &ids)];
     }
 
+    // Merge-commit / rebase-merge landings leave the merged commit in trunk, so
+    // the remaining stack is already based on `effective_base` and needs no
+    // rebase — only the PR base retarget, which reconcile_forge_state does
+    // separately. Skip the rebase+force-push: rewriting descendant SHAs here
+    // would dismiss standing approvals under branch protection for nothing.
+    // (A squash landing drops the merged commit from trunk, so the descendant's
+    // parent is orphaned and this is false — the rebase genuinely runs.)
+    if seg_idx + 1 < segments.len() {
+        let root = rebase_root(&segments[seg_idx + 1]);
+        if jj.is_rooted_in(root, effective_base).unwrap_or(false) {
+            println!("  Remaining stack already based on {effective_base}; skipping rebase");
+            return warnings;
+        }
+    }
+
     // Track which bookmarks to push. With merge strategy, only push bookmarks
     // whose merge_into succeeded and are conflict-free.
     let bookmarks_to_push: Vec<&str> = match strategy {
@@ -1031,12 +1046,23 @@ mod tests {
 
     struct RecordingJj {
         calls: Mutex<Vec<String>>,
+        is_rooted: bool,
     }
 
     impl RecordingJj {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
+                is_rooted: false,
+            }
+        }
+
+        /// The remaining stack is already based on trunk (merge-commit landing);
+        /// `is_rooted_in` reports true so the reconcile skips the rebase+push.
+        fn rooted() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                is_rooted: true,
             }
         }
 
@@ -1049,6 +1075,9 @@ mod tests {
         fn git_fetch(&self) -> Result<()> {
             self.calls.lock().expect("poisoned").push("git_fetch".to_string());
             Ok(())
+        }
+        fn is_rooted_in(&self, _root: &str, _base: &str) -> Result<bool> {
+            Ok(self.is_rooted)
         }
         fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
             self.calls.lock().expect("poisoned").push(format!("push:{name}:{remote}"));
@@ -1216,6 +1245,54 @@ mod tests {
 
         // Happy path: no local warnings
         assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+    }
+
+    #[test]
+    fn test_merge_commit_landing_skips_rebase_but_still_retargets() {
+        // Same 2-stack as above, but the bottom landed via merge commit, so the
+        // remaining descendant is already based on trunk (is_rooted_in → true).
+        // The reconcile must fetch, SKIP the rebase+force-push (preserving the
+        // descendant's SHA and any standing approvals), yet STILL retarget the
+        // descendant PR's base auth → main via the forge API.
+        let jj = RecordingJj::rooted();
+        let mut gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        assert_eq!(result.merged.len(), 1);
+
+        let jj_calls = jj.calls();
+        assert!(jj_calls.contains(&"git_fetch".to_string()), "still fetches");
+        assert!(!jj_calls.iter().any(|c| c.starts_with("rebase:")), "must not rebase: {jj_calls:?}");
+        assert!(!jj_calls.iter().any(|c| c.starts_with("push:")), "must not force-push: {jj_calls:?}");
+        // Forge retarget is independent of the local skip and must still happen.
+        assert!(gh.calls().iter().any(|c| c == "update_base:#2:main"), "still retargets base");
+        assert!(result.local_warnings.is_empty());
     }
 
     #[test]
@@ -2564,6 +2641,7 @@ mod tests {
         divergent: Vec<String>,
         divergent_after_rebase: Vec<String>,
         divergent_errors: bool,
+        is_rooted: bool,
         fetched: Mutex<bool>,
         rebased: Mutex<bool>,
         restored: Mutex<Vec<String>>,
@@ -2575,6 +2653,7 @@ mod tests {
                 divergent: vec![],
                 divergent_after_rebase: vec![],
                 divergent_errors: false,
+                is_rooted: false,
                 fetched: Mutex::new(false),
                 rebased: Mutex::new(false),
                 restored: Mutex::new(vec![]),
@@ -2583,6 +2662,12 @@ mod tests {
         }
         fn divergent(mut self, v: &[&str]) -> Self {
             self.divergent = v.iter().map(|s| s.to_string()).collect();
+            self
+        }
+        /// The remaining stack is already based on trunk (merge-commit landing),
+        /// so `is_rooted_in` reports true and the reconcile should skip the rebase.
+        fn rooted_in_base(mut self) -> Self {
+            self.is_rooted = true;
             self
         }
         /// The divergence read fails (models lock contention from a concurrent
@@ -2623,6 +2708,9 @@ mod tests {
         fn restore_operation(&self, op: &str) -> Result<()> {
             self.restored.lock().expect("poisoned").push(op.to_string());
             Ok(())
+        }
+        fn is_rooted_in(&self, _root: &str, _base: &str) -> Result<bool> {
+            Ok(self.is_rooted)
         }
         fn push_bookmark(&self, name: &str, _: &str) -> Result<()> {
             self.pushed.lock().expect("poisoned").push(name.to_string());
@@ -2693,6 +2781,23 @@ mod tests {
         );
         assert!(*jj.rebased.lock().unwrap());
         assert_eq!(*jj.pushed.lock().unwrap(), vec!["top".to_string()]);
+        assert!(jj.restored.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_skips_rebase_when_stack_already_based_on_trunk() {
+        // Merge-commit landing: the descendant's parent is still in trunk, so the
+        // remaining stack is already based on `main` (is_rooted_in → true). The
+        // reconcile must fetch but then SKIP the rebase and push — rewriting the
+        // descendant's SHA would dismiss standing approvals for nothing. The PR
+        // base retarget is a separate concern (reconcile_forge_state).
+        let jj = FakeReconcileJj::new().rooted_in_base();
+        let warnings = reconcile_two(&jj);
+
+        assert!(warnings.is_empty(), "clean skip, no warnings: {warnings:?}");
+        assert!(*jj.fetched.lock().unwrap(), "still fetches to learn trunk moved");
+        assert!(!*jj.rebased.lock().unwrap(), "must not rebase an already-based stack");
+        assert!(jj.pushed.lock().unwrap().is_empty(), "must not force-push descendants");
         assert!(jj.restored.lock().unwrap().is_empty());
     }
 

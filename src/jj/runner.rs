@@ -247,6 +247,15 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn is_rooted_in(&self, root: &str, base: &str) -> Result<bool> {
+        // Parents of `root` that are NOT ancestors of `base`. Empty ⇒ every
+        // parent is already under `base`, so the subtree sits cleanly on it.
+        // Working-copy-agnostic (via run_jj) so the check never snapshots edits.
+        let revset = format!("parents({root}) ~ ::{base}");
+        let out = self.run_jj(&["log", "-r", &revset, "--no-graph", "-T", r#""x""#])?;
+        Ok(out.trim().is_empty())
+    }
+
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
         let msg = format!("Merge {dest} into {bookmark}");
         // Same working-copy-awareness as the rebase: only snapshot when the
