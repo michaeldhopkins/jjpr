@@ -36,13 +36,19 @@ fn divergence(jj: &dyn Jj) -> Divergence {
 ///
 /// Returns warnings for any local failures (fetch, divergence, rebase, push)
 /// instead of propagating errors. An empty vec means full success.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_local_state(
     jj: &dyn Jj,
+    forge: &dyn Forge,
+    owner: &str,
+    repo: &str,
+    pr_map: Option<&HashMap<String, PullRequest>>,
     segments: &[NarrowedSegment],
     seg_idx: usize,
     effective_base: &str,
     remote_name: &str,
     strategy: crate::config::ReconcileStrategy,
+    fk: ForgeKind,
 ) -> Vec<LocalDivergenceWarning> {
     let mut warnings = Vec::new();
 
@@ -200,11 +206,30 @@ fn reconcile_local_state(
         };
     }
 
+    let mut dismiss_cache: HashMap<String, Option<bool>> = HashMap::new();
     for name in &bookmarks_to_push {
+        // Read approvals-at-risk BEFORE the push — the push dismisses them, so a
+        // read afterward would already show them gone. Best-effort: fires only
+        // when the landing base resets approvals on push, and the reviews call
+        // is skipped entirely otherwise (Feature 1 already returns early for
+        // merge-commit landings, so this only ever runs for a real restack).
+        let dismissed = pr_map.and_then(|m| m.get(*name)).and_then(|pr| {
+            crate::forge::approvals_dismissed_by_push(
+                forge, owner, repo, effective_base, pr.number, &mut dismiss_cache,
+            )
+            .map(|n| (n, pr.number))
+        });
         println!("  Pushing '{name}'...");
         if let Err(e) = jj.push_bookmark(name, remote_name) {
             warnings.push(mk(format!("Failed to push '{name}': {e}")));
             break;
+        }
+        if let Some((n, number)) = dismissed {
+            println!(
+                "    \u{26a0} dismissed {n} approval{} on {} — base '{effective_base}' resets approvals on push",
+                if n == 1 { "" } else { "s" },
+                fk.format_ref(number),
+            );
         }
     }
 
@@ -369,6 +394,7 @@ pub(crate) fn reconcile_after_merge(
     seg_idx: usize,
     plan: &MergePlan,
     fk: ForgeKind,
+    pr_map: Option<&HashMap<String, PullRequest>>,
     state: &mut ReconcileState,
 ) -> Option<HashMap<String, PullRequest>> {
     let owner = &plan.repo_info.owner;
@@ -387,8 +413,8 @@ pub(crate) fn reconcile_after_merge(
          caller forgot to gate or reset state"
     );
     let warnings = reconcile_local_state(
-        jj, segments, seg_idx, effective_base, &plan.remote_name,
-        plan.options.reconcile_strategy,
+        jj, forge, owner, repo, pr_map, segments, seg_idx, effective_base,
+        &plan.remote_name, plan.options.reconcile_strategy, fk,
     );
     // Ordinary local-sync failures need a manual rebase (local_failed). A
     // concurrent op-log reconcile was handled work-preservingly (Concurrent
@@ -668,7 +694,7 @@ pub fn execute_merge_plan(
         // Reconcile after any resolved segment (merged or already-merged).
         if needs_reconcile && seg_idx + 1 < segments.len() {
             let fresh_map = reconcile_after_merge(
-                jj, github, segments, seg_idx, plan, fk, &mut state,
+                jj, github, segments, seg_idx, plan, fk, pr_map.as_ref(), &mut state,
             );
             pr_map = fresh_map;
 
@@ -929,6 +955,7 @@ mod tests {
         mergeability: HashMap<u64, PrMergeability>,
         checks: HashMap<String, ChecksStatus>,
         reviews: HashMap<u64, ReviewSummary>,
+        dismiss_stale: HashMap<String, Option<bool>>,
     }
 
     impl RecordingGitHub {
@@ -940,6 +967,7 @@ mod tests {
                 mergeability: HashMap::new(),
                 checks: HashMap::new(),
                 reviews: HashMap::new(),
+                dismiss_stale: HashMap::new(),
             }
         }
 
@@ -1029,6 +1057,10 @@ mod tests {
                 .get(&n)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no reviews stub for PR #{n}"))
+        }
+        fn base_dismisses_stale_approvals(&self, _o: &str, _r: &str, base: &str) -> Result<Option<bool>> {
+            self.calls.lock().expect("poisoned").push(format!("dismiss:{base}"));
+            Ok(self.dismiss_stale.get(base).copied().flatten())
         }
         fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
         fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
@@ -2726,11 +2758,37 @@ mod tests {
         fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
     }
 
+    #[test]
+    fn approvals_dismissed_by_push_gates_on_base_and_approvals() {
+        use crate::forge::approvals_dismissed_by_push;
+
+        let mut gh = RecordingGitHub::new();
+        gh.dismiss_stale.insert("main".to_string(), Some(true));
+        gh.dismiss_stale.insert("release".to_string(), Some(false));
+        gh.reviews.insert(1, ReviewSummary { approved_count: 2, changes_requested: false });
+        gh.reviews.insert(2, ReviewSummary { approved_count: 0, changes_requested: false });
+
+        let mut cache = HashMap::new();
+        // Base resets approvals on push AND the PR is approved → how many are lost.
+        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "main", 1, &mut cache), Some(2));
+        // Base resets, but nothing is approved → nothing to warn about.
+        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "main", 2, &mut cache), None);
+        // Base does not reset approvals → no warning regardless of approvals.
+        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "release", 1, &mut cache), None);
+        // Base protection undetermined (no rule / no permission) → no warning.
+        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "unknown", 1, &mut cache), None);
+
+        // The per-base lookup is cached: `main` was queried once despite two calls.
+        let main_lookups = gh.calls().iter().filter(|c| *c == "dismiss:main").count();
+        assert_eq!(main_lookups, 1, "base dismiss lookup should be deduped per base");
+    }
+
     fn reconcile_two(jj: &dyn Jj) -> Vec<LocalDivergenceWarning> {
         let segments = vec![make_segment("bottom"), make_segment("top")];
+        let gh = RecordingGitHub::new();
         reconcile_local_state(
-            jj, &segments, 0, "main", "origin",
-            crate::config::ReconcileStrategy::Rebase,
+            jj, &gh, "o", "r", None, &segments, 0, "main", "origin",
+            crate::config::ReconcileStrategy::Rebase, ForgeKind::GitHub,
         )
     }
 
@@ -2976,7 +3034,7 @@ mod tests {
             warnings: vec![],
         };
         // Should panic in debug builds.
-        reconcile_after_merge(&StubJj, &gh, &segments, 0, &plan, ForgeKind::GitHub, &mut state);
+        reconcile_after_merge(&StubJj, &gh, &segments, 0, &plan, ForgeKind::GitHub, None, &mut state);
     }
 
     #[test]
@@ -3011,7 +3069,7 @@ mod tests {
         let segments = vec![make_segment("auth"), make_segment("profile")];
         let mut state = ReconcileState::default();
 
-        reconcile_after_merge(&FailingFetchJj, &gh, &segments, 0, &plan, ForgeKind::GitHub, &mut state);
+        reconcile_after_merge(&FailingFetchJj, &gh, &segments, 0, &plan, ForgeKind::GitHub, None, &mut state);
 
         assert!(state.local_failed, "fetch failure must set local_failed");
         assert!(
@@ -3063,7 +3121,7 @@ mod tests {
         let jj = RecordingJj::new();
         let mut state = ReconcileState::default();
 
-        reconcile_after_merge(&jj, &ListFailGitHub, &segments, 0, &plan, ForgeKind::GitHub, &mut state);
+        reconcile_after_merge(&jj, &ListFailGitHub, &segments, 0, &plan, ForgeKind::GitHub, None, &mut state);
 
         assert!(state.forge_failed, "list_open_prs failure must set forge_failed");
         assert!(

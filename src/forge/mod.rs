@@ -100,6 +100,40 @@ pub fn build_pr_map(prs: Vec<PullRequest>, owner: &str) -> HashMap<String, PullR
         .collect()
 }
 
+/// How many standing approvals a head-advancing push would dismiss.
+///
+/// `Some(n)` when a PR targeting `base_branch` resets approvals on push (the
+/// forge's dismiss-stale rule) AND PR `pr_number` currently has `n > 0`
+/// approvals; `None` when the base doesn't dismiss, can't be determined, or
+/// there is no approval to lose. A tool force-push lands a fresh SHA with no
+/// re-association, so the approval goes stale and is dismissed — see
+/// `notes/forges/github-native-stacks.md`.
+///
+/// Read the answer *before* pushing: the push itself is what dismisses the
+/// approvals, so a read afterward would already show them gone. `base_cache`
+/// dedupes the per-base lookup across a stack, and the reviews call is skipped
+/// entirely when the base won't dismiss — so the common (no-dismiss) case costs
+/// at most one detection call per distinct base.
+pub fn approvals_dismissed_by_push(
+    forge: &dyn Forge,
+    owner: &str,
+    repo: &str,
+    base_branch: &str,
+    pr_number: u64,
+    base_cache: &mut HashMap<String, Option<bool>>,
+) -> Option<u32> {
+    let dismisses = base_cache
+        .entry(base_branch.to_string())
+        .or_insert_with(|| {
+            forge.base_dismisses_stale_approvals(owner, repo, base_branch).ok().flatten()
+        });
+    if *dismisses != Some(true) {
+        return None;
+    }
+    let approved = forge.get_pr_reviews(owner, repo, pr_number).ok()?.approved_count;
+    (approved > 0).then_some(approved)
+}
+
 /// Verified emails from a GitHub/Forgejo `/user/emails` array
 /// (`[{"email": …, "verified": true}, …]`). Unverified entries are dropped —
 /// an unverified email isn't a trustworthy identity signal.

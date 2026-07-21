@@ -462,7 +462,7 @@ fn run_merge_phase(
         // Reconcile after advancing
         if seg_idx > prev_seg_idx && seg_idx < segments.len() {
             let fresh = reconcile_after_merge(
-                jj, forge, segments, prev_seg_idx, merge_plan, forge_kind, state,
+                jj, forge, segments, prev_seg_idx, merge_plan, forge_kind, Some(&pr_map), state,
             );
             if let Some(fresh_map) = fresh {
                 pr_map = fresh_map;

@@ -549,11 +549,15 @@ built theirs surfaces things jjpr can apply to its own implementation.
   would dismiss** — a tool force-push always lands a fresh SHA with no
   re-association, so the approval goes stale and is dismissed. jjpr cannot make
   GitHub treat its push as a re-associating rebase (that is internal to the
-  stack machinery). Two mitigations, both partial:
+  stack machinery). Two mitigations, both partial — **both now implemented**
+  (v0.35.0), across GitHub, GitLab, and Forgejo:
 
-  - **(a) Don't rewrite descendants that don't need it.** After a merge-commit
-    landing the descendant's parent stays in trunk, so the descendant is already
-    a clean commit on trunk — only its PR base needs retargeting (`update_pr_base`,
+  - **(a) Don't rewrite descendants that don't need it.** ✅ Implemented via
+    `Jj::is_rooted_in` + a skip in `reconcile_local_state`
+    (`src/merge/execute.rs`): a merge-commit/rebase-merge landing skips the
+    rebase and force-push and only retargets the next PR's base. After a
+    merge-commit landing the descendant's parent stays in trunk, so the
+    descendant is already a clean commit on trunk — only its PR base needs retargeting (`update_pr_base`,
     a PATCH, no push). jjpr's default post-merge reconcile instead runs
     `jj rebase -s <root> -d <trunk>` (`src/merge/execute.rs`), reparenting every
     descendant onto the trunk *tip*, which rewrites SHAs and dismisses the
@@ -563,8 +567,14 @@ built theirs surfaces things jjpr can apply to its own implementation.
     local stack sits one commit behind the trunk tip until the next natural
     rebase; the remote PR is clean either way. Does not help squash landings,
     where the descendant genuinely must be rebased (parent gone from trunk).
-  - **(b) Warn before a dismissing push — from GraphQL, no extra REST calls.**
-    The dismiss-stale setting is in GraphQL: classic protection on
+  - **(b) Warn before a dismissing push.** ✅ Implemented as
+    `Forge::base_dismisses_stale_approvals` (GraphQL classic +
+    `dismissesStaleReviews`, REST `rules/branches` fallback for rulesets; GitLab
+    `reset_approvals_on_push`; Forgejo `dismiss_stale_approvals`) surfaced three
+    ways: a forward-looking `status` note ("a squash-landing of #N would dismiss
+    N approvals"), and a report at the actual push in `submit` and the merge
+    reconcile. The detection call is spent only when an approval is genuinely at
+    risk. The dismiss-stale setting is in GraphQL: classic protection on
     `pullRequest.baseRef.branchProtectionRule.dismissesStaleReviews`; rulesets
     (which the classic field reports as `null` — verified) on
     `repository.rulesets` (repo-level, fetched once, matched client-side to the

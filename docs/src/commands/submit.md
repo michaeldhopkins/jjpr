@@ -34,6 +34,17 @@ When no bookmark is specified, jjpr infers the target from the working
 copy's position. It finds which stack overlaps `trunk()..@` and
 submits up to the topmost bookmark.
 
+If pushing new commits to an already-approved PR whose base resets
+approvals on push (GitHub's "dismiss stale reviews", GitLab's "reset
+approvals on push", Forgejo's "dismiss stale approvals"), jjpr reports
+the approvals the push dropped so the loss isn't silent:
+
+```
+  Pushing 'auth'...
+    https://github.com/o/r/pull/42
+    ⚠ dismissed 1 approval on #42 — base 'main' resets approvals on push
+```
+
 ## Flags
 
 | Flag | Effect |

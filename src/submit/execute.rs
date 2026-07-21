@@ -26,6 +26,8 @@ pub fn execute_submission_plan(
     let reviewers = plan.reviewers.as_slice();
     let dry_run = plan.dry_run;
     let mut completed_actions: Vec<String> = Vec::new();
+    // Per-base dismiss-stale lookups, deduped across the push loop.
+    let mut dismiss_cache: HashMap<String, Option<bool>> = HashMap::new();
 
     // Report merged bookmarks
     for item in &plan.bookmarks_already_merged {
@@ -41,6 +43,14 @@ pub fn execute_submission_plan(
             println!("  Would push bookmark '{}' to {}", bookmark.name, plan.remote_name);
             continue;
         }
+        // Read approvals-at-risk BEFORE pushing — the push itself dismisses
+        // them, so a read afterward would already show them gone.
+        let dismissed = plan.existing_prs.get(&bookmark.name).and_then(|pr| {
+            crate::forge::approvals_dismissed_by_push(
+                github, owner, repo, &pr.base.ref_name, pr.number, &mut dismiss_cache,
+            )
+        });
+
         println!("  Pushing '{}'...", bookmark.name);
         if let Err(e) = jj.push_bookmark(&bookmark.name, &plan.remote_name) {
             report_partial_failure(&completed_actions);
@@ -53,6 +63,14 @@ pub fn execute_submission_plan(
         // is no longer ahead of base).
         if let Some(pr) = plan.existing_prs.get(&bookmark.name) {
             println!("    {}", pr.html_url);
+            if let Some(n) = dismissed {
+                println!(
+                    "    \u{26a0} dismissed {n} approval{} on {} — base '{}' resets approvals on push",
+                    if n == 1 { "" } else { "s" },
+                    fk.format_ref(pr.number),
+                    pr.base.ref_name,
+                );
+            }
             if let Ok(state) = github.get_pr_state(owner, repo, pr.number)
                 && state.state == "closed" && !state.merged
             {
