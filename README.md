@@ -52,7 +52,7 @@ Test tiers:
   [forge-e2e-sandbox](https://github.com/michaeldhopkins/forge-e2e-sandbox)
   (shared across forges), gated by `JJPR_E2E`.
 
-Contributor conventions live in [`CLAUDE.md`](CLAUDE.md).
+Contributor conventions live in [`AGENTS.md`](AGENTS.md).
 
 ## License
 
