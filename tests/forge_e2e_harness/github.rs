@@ -93,6 +93,14 @@ impl ForgeTestDriver for GitHubDriver {
             .to_string()
     }
 
+    fn boxed(&self) -> Box<dyn ForgeTestDriver> {
+        Box::new(GitHubDriver)
+    }
+
+    fn make_draft(&self, number: u64) {
+        gh(&["pr", "ready", &number.to_string(), "--undo", "--repo", &repo_slug()]);
+    }
+
     fn request_state(&self, number: u64) -> String {
         gh(&["pr", "view", &number.to_string(), "--repo", &repo_slug(), "--json", "state", "-q", ".state"])
             .trim()

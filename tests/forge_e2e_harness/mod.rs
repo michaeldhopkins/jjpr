@@ -54,6 +54,16 @@ pub trait ForgeTestDriver: Send + Sync {
     fn request_base(&self, number: u64) -> String;
     /// `open` | `merged` | `closed`.
     fn request_state(&self, number: u64) -> String;
+    /// A fresh boxed instance of this driver. Drivers are stateless, so this
+    /// lets one forge back several independent test contexts (each its own
+    /// clone + prefix) in a single test.
+    fn boxed(&self) -> Box<dyn ForgeTestDriver>;
+    /// Mark a request as draft/WIP so jjpr treats it as blocked and leaves it
+    /// open. Used to keep the descendant open while jjpr merges and reconciles
+    /// the PR below it. Each forge has its own mechanism (a real draft flag on
+    /// GitHub, a `Draft:`/`WIP:` title prefix on GitLab/Forgejo) — all of which
+    /// jjpr reads back as `draft`.
+    fn make_draft(&self, number: u64);
     /// Land the request, bypassing required reviews. `method` selects the
     /// merge strategy where the forge supports it.
     fn admin_merge(&self, number: u64, method: MergeMethod);
@@ -66,6 +76,15 @@ pub trait ForgeTestDriver: Send + Sync {
     /// reset-on-push is a Premium feature and can't be set on a free project, so
     /// its detection e2e is skipped (the parse logic is unit-tested instead).
     fn dismiss_stale_toggle_supported(&self) -> bool {
+        true
+    }
+    /// Whether a squash landing reliably rewrites history (a new commit that
+    /// orphans the descendant's parent) on the shared sandbox. Always true on
+    /// GitHub; on GitLab/Forgejo a single-commit squash can fast-forward the
+    /// original commit unchanged (config-dependent), so the "rebase happens"
+    /// control is skipped there — the merge-commit skip (the actual feature) is
+    /// still exercised, and the rebase direction is covered by GitHub + units.
+    fn squash_rewrites_history(&self) -> bool {
         true
     }
     /// jjpr's own forge client for this forge — so feature tests exercise the
@@ -87,12 +106,25 @@ pub struct ForgeE2eContext {
 
 impl ForgeE2eContext {
     pub fn new(driver: Box<dyn ForgeTestDriver>) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};
+        // A per-run sequence disambiguates contexts created in the same second by
+        // the same process (a single test spins up several).
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_secs();
         let pid = std::process::id() as u64;
-        // Forge letter + time + pid keeps prefixes short and collision-free
-        // across forges and parallel runs.
-        let prefix = format!("{}{:05x}{:05x}", &driver.name()[..1], ts & 0xFFFFF, pid & 0xFFFFF);
+        // Forge letter + time + pid + seq keeps prefixes short and collision-free
+        // across forges, parallel runs, and multiple contexts in one test. Keep
+        // the full 20 bits of pid — a per-context seq disambiguates within a
+        // process without spending pid entropy that guards across processes.
+        let prefix = format!(
+            "{}{:05x}{:05x}{:03x}",
+            &driver.name()[..1],
+            ts & 0xFFFFF,
+            pid & 0xFFFFF,
+            seq & 0xFFF,
+        );
 
         let parent = TempDir::new().expect("temp dir");
         let repo_path = parent.path().join("repo");
@@ -132,6 +164,18 @@ impl ForgeE2eContext {
     /// Push a prefixed bookmark to the remote.
     pub fn push(&self, bookmark: &str) {
         self.run_jj(&["git", "push", "--bookmark", &self.prefixed(bookmark), "--allow-new"]);
+    }
+
+    /// Run the `jjpr` binary in this clone. Inherits the environment so the
+    /// binary's token resolution falls back to the same `gh` / `glab` /
+    /// `FORGEJO_TOKEN` the drivers already use, and detects the forge from the
+    /// clone's remote. Returns the completed output for the caller to assert on.
+    pub fn run_jjpr(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_jjpr"))
+            .args(args)
+            .current_dir(&self.repo_path)
+            .output()
+            .expect("run jjpr")
     }
 }
 

@@ -70,6 +70,17 @@ impl ForgeTestDriver for GitLabDriver {
         api(&format!("projects/{}/merge_requests/{number}", enc()))["target_branch"].as_str().unwrap_or("").to_string()
     }
 
+    fn boxed(&self) -> Box<dyn ForgeTestDriver> {
+        Box::new(GitLabDriver)
+    }
+
+    fn make_draft(&self, number: u64) {
+        // GitLab's `draft` is derived from the title, not a settable field.
+        let path = format!("projects/{}/merge_requests/{number}", enc());
+        let title = api(&path)["title"].as_str().unwrap_or("").to_string();
+        glab(&["api", "-X", "PUT", &path, "-f", &format!("title=Draft: {title}")]);
+    }
+
     fn request_state(&self, number: u64) -> String {
         match api(&format!("projects/{}/merge_requests/{number}", enc()))["state"].as_str().unwrap_or("") {
             "opened" => "open".to_string(),
@@ -90,6 +101,12 @@ impl ForgeTestDriver for GitLabDriver {
     fn dismiss_stale_toggle_supported(&self) -> bool {
         // reset_approvals_on_push is GitLab Premium; a free sandbox silently
         // ignores the write, so we can't build the "on" precondition here.
+        false
+    }
+
+    fn squash_rewrites_history(&self) -> bool {
+        // A single-commit squash fast-forwards the original commit unchanged on
+        // the sandbox project, so the "rebase happens" control can't rely on it.
         false
     }
 
