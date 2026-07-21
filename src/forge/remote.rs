@@ -65,7 +65,13 @@ fn extract_host_and_path(url: &str) -> Option<(&str, &str)> {
     // HTTPS/HTTP
     for prefix in &["https://", "http://"] {
         if let Some(rest) = url.strip_prefix(prefix) {
-            return rest.split_once('/');
+            let (host, path) = rest.split_once('/')?;
+            // Strip optional `user[:token]@` userinfo from credential-embedded
+            // remotes (e.g. `https://user:token@host/owner/repo`). The last `@`
+            // separates userinfo from the host (any `@` inside userinfo is
+            // percent-encoded per the URL spec).
+            let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+            return Some((host, path));
         }
     }
     None
@@ -318,6 +324,25 @@ mod tests {
     #[test]
     fn test_forgejo_rejects_github_url() {
         assert!(parse_forgejo_url("https://github.com/owner/repo.git").is_none());
+    }
+
+    #[test]
+    fn test_detect_forge_https_with_embedded_credentials() {
+        // Credential-embedded HTTPS remotes (`https://user:token@host/...`) must
+        // still resolve host, owner, and repo — the userinfo is stripped.
+        let (kind, info) =
+            detect_forge("https://me:ghp_secret@codeberg.org/owner/repo.git").unwrap();
+        assert_eq!(kind, ForgeKind::Forgejo);
+        assert_eq!(info.owner, "owner");
+        assert_eq!(info.repo, "repo");
+
+        let (kind, info) = detect_forge("https://x-access-token:tok@github.com/o/r.git").unwrap();
+        assert_eq!(kind, ForgeKind::GitHub);
+        assert_eq!(info.owner, "o");
+        assert_eq!(info.repo, "r");
+
+        // The extracted host carries no userinfo, so the API base URL is clean.
+        assert_eq!(extract_host("https://user:token@gitlab.com/o/r.git"), Some("gitlab.com"));
     }
 
     // detect_forge tests
