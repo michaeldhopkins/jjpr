@@ -11,6 +11,7 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 - `src/graph/` — Change graph construction from bookmarks, traversal toward trunk
 - `src/submit/` — Analyze target stack, resolve multi-bookmark segments, plan submission, execute (push/PR/comments)
 - `src/auth.rs` — Auth test/help commands
+- `notes/forges/` — internal research on forges: feature deep-dives (e.g. GitHub native stacks) and candidate-forge evaluations. Not user docs; those are `docs/src/forges.md`.
 
 ## Key conventions
 
@@ -29,7 +30,7 @@ cargo clippy --locked --tests -- -D warnings  # Must be clean (CI's exact flags)
 JJPR_E2E=1 cargo test  # E2E against real GitHub (slow, requires gh auth)
 ```
 
-E2E tests use `michaeldhopkins/jjpr-testing-environment` (private repo). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
+E2E tests use `michaeldhopkins/forge-e2e-sandbox` (private repo, shared across forges/projects — see the `forge-e2e-testing` skill). Each run creates uniquely-prefixed bookmarks and cleans up PRs/branches on Drop.
 
 ## Commit style
 

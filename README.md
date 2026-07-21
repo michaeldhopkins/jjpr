@@ -49,8 +49,8 @@ Test tiers:
 - **Unit**: fast, no I/O, stub `Jj` and `Forge` traits.
 - **jj integration**: real `jj` binary against temp repos, no network.
 - **E2E**: real `jj` and a real forge against
-  [jjpr-testing-environment](https://github.com/michaeldhopkins/jjpr-testing-environment),
-  gated by `JJPR_E2E`.
+  [forge-e2e-sandbox](https://github.com/michaeldhopkins/forge-e2e-sandbox)
+  (shared across forges), gated by `JJPR_E2E`.
 
 Contributor conventions live in [`CLAUDE.md`](CLAUDE.md).
 
