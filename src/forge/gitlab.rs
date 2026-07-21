@@ -334,6 +334,23 @@ impl Forge for GitLabForge {
         Ok(parse_gitlab_emails(&self.client.get("user/emails")?))
     }
 
+    fn base_dismisses_stale_approvals(
+        &self,
+        owner: &str,
+        repo: &str,
+        _base_branch: &str,
+    ) -> Result<Option<bool>> {
+        // GitLab's "reset approvals on push" is a project-level setting, not
+        // per-branch, so the base branch is irrelevant. `reset_approvals_on_push`
+        // clears all approvals on a new push; `selective_code_owner_removals`
+        // clears only code-owner approvals — treat either as "will dismiss".
+        let path = format!("projects/{}/approvals", Self::encode_project(owner, repo));
+        match self.client.get(&path) {
+            Ok(v) => Ok(Some(parse_gitlab_reset_on_push(&v))),
+            Err(_) => Ok(None),
+        }
+    }
+
     fn find_merged_pr(
         &self,
         owner: &str,
@@ -468,9 +485,32 @@ impl Forge for GitLabForge {
     }
 }
 
+/// Whether a GitLab project-approvals response clears approvals on push.
+/// `reset_approvals_on_push` clears all approvals; `selective_code_owner_removals`
+/// clears only code-owner approvals — either counts as "will dismiss".
+fn parse_gitlab_reset_on_push(v: &serde_json::Value) -> bool {
+    v["reset_approvals_on_push"].as_bool().unwrap_or(false)
+        || v["selective_code_owner_removals"].as_bool().unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gitlab_reset_on_push_reads_project_approval_settings() {
+        assert!(parse_gitlab_reset_on_push(
+            &serde_json::json!({"reset_approvals_on_push": true})
+        ));
+        assert!(parse_gitlab_reset_on_push(
+            &serde_json::json!({"reset_approvals_on_push": false, "selective_code_owner_removals": true})
+        ));
+        assert!(!parse_gitlab_reset_on_push(
+            &serde_json::json!({"reset_approvals_on_push": false})
+        ));
+        // Missing keys → false (don't warn on unknown).
+        assert!(!parse_gitlab_reset_on_push(&serde_json::json!({})));
+    }
 
     #[test]
     fn parse_gitlab_emails_keeps_only_confirmed() {

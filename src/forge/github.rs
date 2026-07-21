@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use super::http::{ForgeClient, HttpError};
+use super::http::{ForgeClient, HttpError, url_encode};
 use super::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PrStatusBundle, PullRequest, ReviewSummary, Stack};
 use super::Forge;
 
@@ -15,6 +15,59 @@ impl GitHubForge {
     pub fn new(client: ForgeClient) -> Self {
         Self { client }
     }
+
+    /// Classic branch-protection "dismiss stale reviews" via GraphQL.
+    /// `Ok(Some(v))` when the branch has a classic protection rule (`v` is its
+    /// setting); `Ok(None)` when `branchProtectionRule` is null (ruleset-only or
+    /// unprotected — the caller then checks rulesets); `Err` on GraphQL/permission
+    /// failure.
+    fn classic_protection_dismisses_stale(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+    ) -> Result<Option<bool>> {
+        let query = "query($owner:String!,$repo:String!,$ref:String!){ \
+             repository(owner:$owner,name:$repo){ ref(qualifiedName:$ref){ \
+             branchProtectionRule{ dismissesStaleReviews } } } }";
+        let vars = serde_json::json!({
+            "owner": owner, "repo": repo, "ref": format!("refs/heads/{base}"),
+        });
+        let data = self.client.graphql("graphql", query, &vars)?;
+        Ok(parse_classic_dismisses(&data))
+    }
+
+    /// Effective branch rules (`GET /repos/{o}/{r}/rules/branches/{branch}`),
+    /// which include rulesets that the classic GraphQL field omits.
+    /// `Ok(Some(true))` if any `pull_request` rule sets
+    /// `dismiss_stale_reviews_on_push`; `Ok(Some(false))` if not; `Ok(None)` on a
+    /// permission/other error (can't tell).
+    fn rules_dismiss_stale(&self, owner: &str, repo: &str, base: &str) -> Result<Option<bool>> {
+        let path = format!("repos/{owner}/{repo}/rules/branches/{}", url_encode(base));
+        match self.client.get(&path) {
+            Ok(value) => Ok(Some(rules_dismiss_stale_on_push(&value))),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+/// Extract `branchProtectionRule.dismissesStaleReviews` from a GraphQL `ref`
+/// response. `None` when there's no classic protection rule (the field is null),
+/// which the caller treats as "check rulesets instead".
+fn parse_classic_dismisses(data: &serde_json::Value) -> Option<bool> {
+    data["repository"]["ref"]["branchProtectionRule"]["dismissesStaleReviews"].as_bool()
+}
+
+/// Whether the effective-rules array (`GET .../rules/branches/{b}`) contains a
+/// `pull_request` rule that dismisses stale reviews on push. Covers rulesets and
+/// classic protection alike (GitHub reports both here).
+fn rules_dismiss_stale_on_push(rules: &serde_json::Value) -> bool {
+    rules.as_array().is_some_and(|rules| {
+        rules.iter().any(|r| {
+            r["type"] == serde_json::json!("pull_request")
+                && r["parameters"]["dismiss_stale_reviews_on_push"].as_bool() == Some(true)
+        })
+    })
 }
 
 /// Parse check-runs and commit status into a `ChecksStatus`.
@@ -452,6 +505,21 @@ impl Forge for GitHubForge {
         }
     }
 
+    fn base_dismisses_stale_approvals(
+        &self,
+        owner: &str,
+        repo: &str,
+        base_branch: &str,
+    ) -> Result<Option<bool>> {
+        // Primary: classic branch protection via GraphQL (one cheap field).
+        if let Ok(Some(v)) = self.classic_protection_dismisses_stale(owner, repo, base_branch) {
+            return Ok(Some(v));
+        }
+        // Fallback (also covers the GraphQL-error and no-classic-rule cases):
+        // effective branch rules, which include rulesets. Errors map to None.
+        Ok(self.rules_dismiss_stale(owner, repo, base_branch).unwrap_or(None))
+    }
+
     fn merge_pr(
         &self,
         owner: &str,
@@ -690,6 +758,37 @@ mod tests {
         let merged = &stacks[1];
         assert!(!merged.open);
         assert!(merged.pull_requests.iter().all(|p| p.state == "closed" && p.merged_at.is_some()));
+    }
+
+    #[test]
+    fn classic_dismisses_reads_branch_protection_rule() {
+        // Protected + dismiss on.
+        let on = serde_json::json!({"repository":{"ref":{"branchProtectionRule":{"dismissesStaleReviews":true}}}});
+        assert_eq!(parse_classic_dismisses(&on), Some(true));
+        // Protected + dismiss off.
+        let off = serde_json::json!({"repository":{"ref":{"branchProtectionRule":{"dismissesStaleReviews":false}}}});
+        assert_eq!(parse_classic_dismisses(&off), Some(false));
+        // No classic rule (null under rulesets / unprotected) → None ⇒ check rulesets.
+        let none = serde_json::json!({"repository":{"ref":{"branchProtectionRule":null}}});
+        assert_eq!(parse_classic_dismisses(&none), None);
+        // Missing branch (ref null) → None.
+        let missing = serde_json::json!({"repository":{"ref":null}});
+        assert_eq!(parse_classic_dismisses(&missing), None);
+    }
+
+    #[test]
+    fn rules_dismiss_reads_pull_request_rule_param() {
+        let with = serde_json::json!([
+            {"type":"required_status_checks","parameters":{}},
+            {"type":"pull_request","parameters":{"dismiss_stale_reviews_on_push":true,"required_approving_review_count":1}}
+        ]);
+        assert!(rules_dismiss_stale_on_push(&with));
+        let without = serde_json::json!([
+            {"type":"pull_request","parameters":{"dismiss_stale_reviews_on_push":false}}
+        ]);
+        assert!(!rules_dismiss_stale_on_push(&without));
+        // No rules at all → false.
+        assert!(!rules_dismiss_stale_on_push(&serde_json::json!([])));
     }
 
     /// Build a GraphQL CheckRun context node.

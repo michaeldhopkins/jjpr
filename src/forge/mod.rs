@@ -259,6 +259,25 @@ pub trait Forge: Send + Sync {
         Ok(None)
     }
 
+    /// Whether pushing new commits to a PR targeting `base_branch` dismisses that
+    /// PR's standing approvals (GitHub "dismiss stale reviews", GitLab "reset
+    /// approvals on push", Forgejo "dismiss stale approvals").
+    ///
+    /// `Ok(None)` means "couldn't determine" — the token lacks permission to read
+    /// the setting, the forge doesn't expose it, or there's no such concept.
+    /// Callers treat `None` as "don't warn". Best-effort: it must never fail a
+    /// command, so a permission error (403/404) maps to `Ok(None)`, not `Err`.
+    /// A separate on-demand call, not part of the hot status path — invoke it
+    /// only when there's an approval actually at risk. Defaults to `None`.
+    fn base_dismisses_stale_approvals(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        _base_branch: &str,
+    ) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
     /// Fetch mergeability, checks, and reviews for many PRs at once.
     ///
     /// Answering a stack one PR at a time costs four serial round trips each,
