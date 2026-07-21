@@ -41,6 +41,22 @@ pub trait Jj: Send + Sync {
     /// Create a merge commit combining `bookmark` and `dest`, then move the
     /// bookmark to it. Used for merge-based reconciliation (avoids force pushes).
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()>;
+
+    /// True if every parent of `root` is already an ancestor of `base` — i.e.
+    /// the change rooted at `root` sits cleanly on `base`'s history, so rebasing
+    /// it onto `base` would only rewrite SHAs without changing the diff.
+    ///
+    /// Used by the post-merge reconcile to skip a needless rebase+force-push of
+    /// descendants after a merge-commit landing (where the merged commit stays
+    /// in trunk): the descendant is already based on trunk, so only the PR base
+    /// needs retargeting. Force-pushing an unchanged rebase would dismiss
+    /// standing approvals under branch protection for nothing.
+    ///
+    /// Defaults to `false` so stubs keep the always-rebase behavior.
+    fn is_rooted_in(&self, root: &str, base: &str) -> Result<bool> {
+        let _ = (root, base);
+        Ok(false)
+    }
     /// Resolve a change ID to its commit IDs. Returns >1 if divergent.
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>>;
     /// Check whether the commit at `revset` has unresolved conflicts.
