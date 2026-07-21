@@ -228,6 +228,28 @@ impl Forge for ForgejoForge {
         Ok(crate::forge::parse_verified_emails(&self.client.get("user/emails")?))
     }
 
+    fn base_dismisses_stale_approvals(
+        &self,
+        owner: &str,
+        repo: &str,
+        base_branch: &str,
+    ) -> Result<Option<bool>> {
+        // Forgejo/Gitea branch protection is per-branch; `dismiss_stale_approvals`
+        // clears approvals when new commits are pushed. A 404 means the branch has
+        // no protection rule ⇒ Some(false); other errors ⇒ None (can't tell).
+        let path = format!(
+            "repos/{owner}/{repo}/branch_protections/{}",
+            super::http::url_encode(base_branch)
+        );
+        match self.client.get(&path) {
+            Ok(v) => Ok(Some(parse_forgejo_dismiss(&v))),
+            Err(e) => match e.downcast_ref::<super::http::HttpError>() {
+                Some(http) if http.status == 404 => Ok(Some(false)),
+                _ => Ok(None),
+            },
+        }
+    }
+
     fn find_merged_pr(
         &self,
         owner: &str,
@@ -334,9 +356,26 @@ impl Forge for ForgejoForge {
     }
 }
 
+/// Whether a Forgejo/Gitea branch-protection response dismisses stale approvals
+/// when new commits are pushed.
+fn parse_forgejo_dismiss(v: &serde_json::Value) -> bool {
+    v["dismiss_stale_approvals"].as_bool().unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forgejo_dismiss_reads_branch_protection() {
+        assert!(parse_forgejo_dismiss(
+            &serde_json::json!({"dismiss_stale_approvals": true})
+        ));
+        assert!(!parse_forgejo_dismiss(
+            &serde_json::json!({"dismiss_stale_approvals": false})
+        ));
+        assert!(!parse_forgejo_dismiss(&serde_json::json!({})));
+    }
 
     // --- JSON fixture tests: verify parsing without any HTTP ---
 
