@@ -545,6 +545,43 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         }
     }
 
+    // Forward-looking dismiss-stale note (Feature 2): each of your approved open
+    // PRs stacked atop another open PR loses its approvals when the lower PR is
+    // squash-landed (the reconcile rebases-and-force-pushes it). Map every
+    // segment to the PR directly below it, then — only when an approval is
+    // actually at risk — spend one call to learn whether trunk resets approvals.
+    let mut below_pr: HashMap<String, u64> = HashMap::new();
+    for stack in &stacks_to_show {
+        for pair in stack.segments.windows(2) {
+            let (Some(upper), Some(lower)) = (pair[0].bookmarks.first(), pair[1].bookmarks.first())
+            else {
+                continue;
+            };
+            if let Some(lower_pr) = info.pr_map.get(&lower.name) {
+                below_pr.entry(upper.name.clone()).or_insert(lower_pr.number);
+            }
+        }
+    }
+    let trunk_dismisses_stale = match (&info.forge, &info.repo_info) {
+        (Some(forge), Some(repo_info))
+            if below_pr.keys().any(|name| {
+                status_map
+                    .get(name)
+                    .and_then(|s| s.reviews.as_ref())
+                    .is_some_and(|r| r.approved_count > 0)
+            }) =>
+        {
+            match jj.get_default_branch() {
+                Ok(trunk) if !trunk.is_empty() => forge
+                    .base_dismisses_stale_approvals(&repo_info.owner, &repo_info.repo, &trunk)
+                    .ok()
+                    .flatten(),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
     let render = StatusRender {
         pr_map: &info.pr_map,
         merged_map: &merged_map,
@@ -552,6 +589,9 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         my_names: &my_names,
         identity: Some(&identity),
         has_forge: info.forge.is_some(),
+        trunk_dismisses_stale,
+        below_pr,
+        forge_kind: info.forge_kind,
     };
 
     let multi = stacks_to_show.len() > 1;
@@ -590,6 +630,7 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
 struct PrInfoResult {
     pr_map: HashMap<String, PullRequest>,
     forge: Option<Box<dyn Forge>>,
+    forge_kind: Option<ForgeKind>,
     repo_info: Option<RepoInfo>,
     /// Set when the PR list call failed.
     ///
@@ -608,7 +649,7 @@ struct PrInfoResult {
 /// the op-log lock. Take the remotes before calling.
 fn load_pr_info(remotes: &[jjpr::jj::GitRemote], cfg: &config::Config) -> Option<PrInfoResult> {
     let resolved = resolve_forge(remotes, cfg, None).ok()?;
-    let ResolvedForge { forge, repo_info, .. } = resolved;
+    let ResolvedForge { forge, repo_info, kind, .. } = resolved;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -624,6 +665,7 @@ fn load_pr_info(remotes: &[jjpr::jj::GitRemote], cfg: &config::Config) -> Option
     Some(PrInfoResult {
         pr_map,
         forge: Some(forge),
+        forge_kind: Some(kind),
         repo_info: Some(repo_info),
         failed_forge: None,
     })
@@ -736,6 +778,16 @@ struct StatusRender<'a> {
     /// `None` disables the supplement (email classification only).
     identity: Option<&'a Identity>,
     has_forge: bool,
+    /// Whether trunk resets approvals on push. `Some(true)` means a squash
+    /// landing of a lower PR rebases-and-force-pushes its descendants, dismissing
+    /// their standing approvals. `None` when undetermined or nothing at risk.
+    trunk_dismisses_stale: Option<bool>,
+    /// Leading-bookmark name → PR number of the segment directly below it, when
+    /// that segment has an open PR. The lower PR whose squash-landing would
+    /// rebase this one; used only to name it in the dismiss-stale note.
+    below_pr: HashMap<String, u64>,
+    /// For formatting the lower PR reference (`#123` vs `!123`).
+    forge_kind: Option<ForgeKind>,
 }
 
 impl StatusRender<'_> {
@@ -814,6 +866,29 @@ impl StatusRender<'_> {
         lines
     }
 
+    /// The forward-looking dismiss-stale note for one of your open, approved PRs
+    /// that sits atop another open PR: a squash landing of the lower PR rebases
+    /// and force-pushes this one, dismissing its approvals. Only speculative
+    /// wording ("would") — a merge-commit landing skips the rebase (see
+    /// `is_rooted_in`), so it's genuinely conditional on how the lower PR lands.
+    fn dismiss_stale_note(&self, name: &str, mine: bool) -> Option<String> {
+        if !mine || self.trunk_dismisses_stale != Some(true) {
+            return None;
+        }
+        let below = self.below_pr.get(name)?;
+        let n = self.status_map.get(name).and_then(|s| s.reviews.as_ref())?.approved_count;
+        if n == 0 {
+            return None;
+        }
+        let reference = self
+            .forge_kind
+            .map_or_else(|| format!("#{below}"), |k| k.format_ref(*below));
+        Some(format!(
+            "    \u{26a0} a squash-landing of {reference} would dismiss {n} approval{}",
+            if n == 1 { "" } else { "s" }
+        ))
+    }
+
     fn render_detail(&self, segment: &BookmarkSegment, pr: &SegmentPr, mine: bool) -> Vec<String> {
         let Some(bookmark) = segment.bookmarks.first() else {
             return vec![];
@@ -832,6 +907,10 @@ impl StatusRender<'_> {
                 };
                 if !detail.is_empty() {
                     lines.push(detail);
+                }
+                // Drafts hide review detail, so they hide the review-loss note too.
+                if !p.draft && let Some(note) = self.dismiss_stale_note(&bookmark.name, mine) {
+                    lines.push(note);
                 }
                 lines
             }
@@ -1886,7 +1965,17 @@ mod tests {
         my_names: &'a HashSet<String>,
         status_map: &'a HashMap<String, SegmentDisplayStatus>,
     ) -> StatusRender<'a> {
-        StatusRender { pr_map, merged_map, status_map, my_names, identity: None, has_forge: true }
+        StatusRender {
+            pr_map,
+            merged_map,
+            status_map,
+            my_names,
+            identity: None,
+            has_forge: true,
+            trunk_dismisses_stale: None,
+            below_pr: HashMap::new(),
+            forge_kind: None,
+        }
     }
 
     #[test]
@@ -1966,6 +2055,124 @@ mod tests {
         assert!(!lines[0].contains("by @"), "yours is not attributed: {lines:?}");
         assert!(lines.iter().any(|l| l.contains("pull/15138")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
+    }
+
+    #[test]
+    fn dismiss_stale_note_conditions() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("upper".to_string(), pr_with("me", false, None));
+        let merged_map = HashMap::new();
+        let my: HashSet<String> = ["upper".to_string()].into_iter().collect();
+
+        let unreviewed = |approved: u32| SegmentDisplayStatus {
+            mergeability: None,
+            checks: None,
+            reviews: Some(ReviewSummary { approved_count: approved, changes_requested: false }),
+        };
+        let mut status_map = HashMap::new();
+        status_map.insert("upper".to_string(), status_all_pass()); // approved_count 1
+        status_map.insert("multi".to_string(), unreviewed(2));
+        status_map.insert("unapproved".to_string(), unreviewed(0));
+
+        let mut below_pr = HashMap::new();
+        below_pr.insert("upper".to_string(), 123);
+        below_pr.insert("multi".to_string(), 200);
+        below_pr.insert("unapproved".to_string(), 99);
+
+        let mk = |dismiss, kind| StatusRender {
+            pr_map: &pr_map,
+            merged_map: &merged_map,
+            status_map: &status_map,
+            my_names: &my,
+            identity: None,
+            has_forge: true,
+            trunk_dismisses_stale: dismiss,
+            below_pr: below_pr.clone(),
+            forge_kind: kind,
+        };
+        let note = |r: StatusRender, name: &str, mine: bool| r.dismiss_stale_note(name, mine);
+
+        // Approved PR stacked atop #123 with a dismiss-stale trunk → warn.
+        assert_eq!(
+            note(mk(Some(true), Some(ForgeKind::GitHub)), "upper", true).as_deref(),
+            Some("    \u{26a0} a squash-landing of #123 would dismiss 1 approval"),
+        );
+        // GitLab renders the reference as !123, and plural approvals agree in number.
+        assert_eq!(
+            note(mk(Some(true), Some(ForgeKind::GitLab)), "multi", true).as_deref(),
+            Some("    \u{26a0} a squash-landing of !200 would dismiss 2 approvals"),
+        );
+        // Trunk does not dismiss (or is undetermined) → no note.
+        assert_eq!(note(mk(Some(false), Some(ForgeKind::GitHub)), "upper", true), None);
+        assert_eq!(note(mk(None, Some(ForgeKind::GitHub)), "upper", true), None);
+        // Not yours → silent (the note is about *your* approvals being dropped).
+        assert_eq!(note(mk(Some(true), Some(ForgeKind::GitHub)), "upper", false), None);
+        // Nothing stacked below → no landing would rebase it.
+        assert_eq!(note(mk(Some(true), Some(ForgeKind::GitHub)), "upper-no-below", true), None);
+        // Stacked, but this PR has no approvals to lose.
+        assert_eq!(note(mk(Some(true), Some(ForgeKind::GitHub)), "unapproved", true), None);
+    }
+
+    #[test]
+    fn render_segment_wires_in_dismiss_stale_note() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("upper".to_string(), pr_with("me", false, None));
+        let mut status_map = HashMap::new();
+        status_map.insert("upper".to_string(), status_all_pass());
+        let (merged_map, my): (HashMap<String, PullRequest>, HashSet<String>) =
+            (HashMap::new(), ["upper".to_string()].into_iter().collect());
+        let mut below_pr = HashMap::new();
+        below_pr.insert("upper".to_string(), 123);
+
+        let r = StatusRender {
+            pr_map: &pr_map,
+            merged_map: &merged_map,
+            status_map: &status_map,
+            my_names: &my,
+            identity: None,
+            has_forge: true,
+            trunk_dismisses_stale: Some(true),
+            below_pr,
+            forge_kind: Some(ForgeKind::GitHub),
+        };
+        let lines = r.render_segment(&seg(&["upper"]));
+        assert!(
+            lines.iter().any(|l| l.contains("squash-landing of #123 would dismiss 1 approval")),
+            "note missing: {lines:?}"
+        );
+        // The ordinary status line still renders alongside the note.
+        assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
+    }
+
+    #[test]
+    fn draft_pr_suppresses_dismiss_stale_note() {
+        // A draft hides its review detail, so it must hide the review-loss note
+        // too — even with an approval and a dismiss-stale trunk below it.
+        let mut pr_map = HashMap::new();
+        pr_map.insert("upper".to_string(), pr_with("me", true, None)); // draft
+        let mut status_map = HashMap::new();
+        status_map.insert("upper".to_string(), status_all_pass());
+        let (merged_map, my): (HashMap<String, PullRequest>, HashSet<String>) =
+            (HashMap::new(), ["upper".to_string()].into_iter().collect());
+        let mut below_pr = HashMap::new();
+        below_pr.insert("upper".to_string(), 123);
+
+        let r = StatusRender {
+            pr_map: &pr_map,
+            merged_map: &merged_map,
+            status_map: &status_map,
+            my_names: &my,
+            identity: None,
+            has_forge: true,
+            trunk_dismisses_stale: Some(true),
+            below_pr,
+            forge_kind: Some(ForgeKind::GitHub),
+        };
+        let lines = r.render_segment(&seg(&["upper"]));
+        assert!(
+            !lines.iter().any(|l| l.contains("dismiss")),
+            "draft must not show the dismiss note: {lines:?}"
+        );
     }
 
     #[test]
@@ -2097,6 +2304,9 @@ mod tests {
             my_names: &my,
             identity: Some(&identity),
             has_forge: true,
+            trunk_dismisses_stale: None,
+            below_pr: HashMap::new(),
+            forge_kind: None,
         };
         let seg = segment_of(vec![bm("feat", false)]);
         assert!(r.segment_is_yours(&seg), "your own PR (by login) must count as yours");

@@ -63,6 +63,35 @@ the next PR rather than merging it. Merging without a local rebase would
 mix in the previous PR's changes; merging against stale forge state can
 target the wrong base.
 
+### Preserving approvals
+
+A **merge-commit** or **rebase-merge** landing leaves the merged commit in
+trunk's history, so the remaining stack already sits on trunk. jjpr skips
+the rebase and force-push entirely and only retargets the next PR's base:
+
+```
+  Merging 'auth' (#42, merge)...
+  Fetching remotes...
+  Remaining stack already based on main; skipping rebase
+  Updating #43 base to 'main'...
+```
+
+This matters when the base branch resets approvals on push (GitHub's
+"dismiss stale reviews", GitLab's "reset approvals on push", Forgejo's
+"dismiss stale approvals"): the skipped force-push would otherwise drop a
+standing approval on the descendant PR for nothing. A **squash** landing
+orphans the descendant's parent, so the rebase and force-push are
+genuinely required — and jjpr reports how many approvals that push drops:
+
+```
+  Merging 'auth' (#42, squash)...
+  Fetching remotes...
+  Rebasing remaining stack onto main...
+  Pushing 'profile'...
+    ⚠ dismissed 2 approvals on #43 — base 'main' resets approvals on push
+  Updating #43 base to 'main'...
+```
+
 ### Local sync failed
 
 Failed fetch, failed rebase, conflicted push, or a divergent change ID.

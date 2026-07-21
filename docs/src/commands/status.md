@@ -74,6 +74,25 @@ Stack 2:
     ✗ CI pending  ✗ 0 approvals
 ```
 
+## Approvals at risk from a squash landing
+
+When the base branch resets approvals on push (GitHub's "dismiss stale
+reviews", GitLab's "reset approvals on push", Forgejo's "dismiss stale
+approvals") and one of your approved PRs is stacked on top of another
+open PR, a **squash** landing of the lower PR force-pushes a fresh commit
+onto yours and drops its approvals. `status` warns ahead of time:
+
+```
+  api (2 changes, PR open, push up to date)
+    https://github.com/o/r/pull/124
+    ✓ mergeable  ✓ CI passing  ✓ 2 approvals
+    ⚠ a squash-landing of #123 would dismiss 2 approvals
+```
+
+The note is conditional on how the lower PR lands: a **merge-commit**
+landing keeps your approval, because jjpr skips the needless rebase in
+that case (see [merge](merge.md)).
+
 ## Branches that aren't yours
 
 `status` shows the whole stack down to your default branch, including a
@@ -146,3 +165,4 @@ Nothing of yours to submit here.
 | `✓ CI passing` / `✗ CI pending` / `✗ CI failing` | Aggregate check status for the head commit |
 | `✓ N approvals` / `✗ 0 approvals` | Count of approving reviews (the required threshold comes from config) |
 | `⚠ changes requested` | At least one reviewer has requested changes |
+| `⚠ a squash-landing of #N would dismiss …` | A lower PR's squash landing would force-push this approved PR and drop its approvals |
