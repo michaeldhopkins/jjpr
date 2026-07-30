@@ -75,6 +75,7 @@ fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
             })
             .unwrap_or_default(),
         author: mr["author"]["username"].as_str().unwrap_or("").to_string(),
+        stack: None,
     })
 }
 

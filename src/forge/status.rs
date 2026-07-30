@@ -286,6 +286,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: "me".to_string(),
+            stack: None,
         }
     }
 

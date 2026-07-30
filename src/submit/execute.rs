@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use crate::forge::comment::{self, StackEntry};
 use crate::forge::types::PullRequest;
-use crate::forge::Forge;
+use crate::forge::{Forge, ForgeKind};
 use crate::jj::Jj;
 
 use super::plan::SubmissionPlan;
@@ -28,6 +28,14 @@ pub fn execute_submission_plan(
     let mut completed_actions: Vec<String> = Vec::new();
     // Per-base dismiss-stale lookups, deduped across the push loop.
     let mut dismiss_cache: HashMap<String, Option<bool>> = HashMap::new();
+
+    // Refuse before Phase 1, while nothing has been pushed. GitHub rejects a
+    // base retarget on a stacked PR, so continuing would push the rewritten
+    // commits and only then fail on the retarget, leaving the branches
+    // inconsistent with the order the native stack still declares.
+    if !plan.native_stack_base_conflicts.is_empty() {
+        anyhow::bail!("{}", native_stack_conflict_message(plan, fk));
+    }
 
     // Report merged bookmarks
     for item in &plan.bookmarks_already_merged {
@@ -333,6 +341,51 @@ fn print_body_conflict_warnings(
     }
 }
 
+/// Explain a refusal caused by native-stack membership.
+///
+/// Deliberately says what jjpr wanted to do, why it cannot, and what the user
+/// can do instead. The bare `422` ("Validation Failed") that GitHub would
+/// otherwise surface names none of those.
+fn native_stack_conflict_message(plan: &SubmissionPlan, fk: ForgeKind) -> String {
+    let abbr = fk.request_abbreviation();
+    let mut out = String::from(
+        "the stack's shape changed, but its PRs are in a GitHub native stack.\n\n",
+    );
+    for c in &plan.native_stack_base_conflicts {
+        out.push_str(&format!(
+            "  {} ('{}') needs its base moved from '{}' to '{}'\n",
+            fk.format_ref(c.pr_number), c.bookmark.name, c.current_base, c.expected_base,
+        ));
+    }
+    // One jjpr stack can span more than one native stack: a native stack may be
+    // rooted on any branch, so a user can register (a,b) as one and (c,d) as
+    // another within the same chain. Naming only the first would leave the user
+    // blocked again on the next run, so unstack every stack involved.
+    let mut stacks: Vec<u64> = plan
+        .native_stack_base_conflicts
+        .iter()
+        .map(|c| c.stack_number)
+        .collect();
+    stacks.sort_unstable();
+    stacks.dedup();
+    let unstack = stacks
+        .iter()
+        .map(|n| format!("gh stack unstack {n}"))
+        .collect::<Vec<_>>()
+        .join(" && ");
+
+    out.push_str(&format!(
+        "\nGitHub does not allow retargeting a {abbr} that belongs to a stack, so \
+         jjpr cannot\napply that. Nothing has been pushed.\n\n\
+         To continue, dissolve the native stack and let jjpr manage the bases:\n\
+         \x20 {unstack}\n\
+         \x20 jjpr submit\n\n\
+         Or keep the native stack and restructure it with gh instead:\n\
+         \x20 {unstack} && gh stack init <branches in the new order>",
+    ));
+    out
+}
+
 fn report_partial_failure(completed: &[String]) {
     if !completed.is_empty() {
         eprintln!("\nThe following actions completed before the error:");
@@ -619,6 +672,7 @@ mod tests {
                 merged_at: None,
                 requested_reviewers: vec![],
                 author: String::new(),
+                stack: None,
             })
         }
         fn update_pr_base(&self, _o: &str, _r: &str, n: u64, base: &str) -> Result<()> {
@@ -755,6 +809,7 @@ mod tests {
     fn make_plan() -> SubmissionPlan {
         SubmissionPlan {
             bookmarks_needing_push: vec![make_bookmark("auth")],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![super::super::plan::BookmarkNeedingPr {
                 bookmark: make_bookmark("auth"),
                 base_branch: "main".to_string(),
@@ -799,6 +854,118 @@ mod tests {
             github.calls().is_empty(),
             "dry run should not call GitHub API"
         );
+    }
+
+    // The whole reason this is checked at plan time rather than caught from
+    // GitHub's 422: submit pushes first and retargets in phase 3. Discovering
+    // it late would leave the rewritten commits pushed under a stack order that
+    // still contradicts them, with no way to fix the bases while stacked.
+    #[test]
+    fn a_native_stack_base_conflict_refuses_before_pushing_anything() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        let mut plan = make_plan();
+        plan.native_stack_base_conflicts = vec![super::super::plan::NativeStackBaseConflict {
+            bookmark: make_bookmark("profile"),
+            pr_number: 43,
+            current_base: "main".to_string(),
+            expected_base: "auth".to_string(),
+            stack_number: 240,
+        }];
+
+        let err = execute_submission_plan(&jj, &github, &plan)
+            .expect_err("must refuse rather than push into a conflict");
+
+        assert!(jj.pushes().is_empty(), "nothing may be pushed: {:?}", jj.pushes());
+        assert!(github.calls().is_empty(), "no forge mutation: {:?}", github.calls());
+
+        let msg = err.to_string();
+        assert!(msg.contains("#43"), "names the PR: {msg}");
+        assert!(msg.contains("'main'") && msg.contains("'auth'"), "names the move: {msg}");
+        assert!(msg.contains("gh stack unstack 240"), "gives the remedy: {msg}");
+        assert!(
+            msg.contains("Nothing has been pushed"),
+            "must say the working state is untouched: {msg}"
+        );
+    }
+
+    // Dry run refuses too, on purpose. The point of a dry run is to learn what
+    // would happen, and what would happen is a failure GitHub will not let jjpr
+    // avoid. Printing "Would update base" for an update that cannot succeed
+    // would be a lie.
+    #[test]
+    fn a_native_stack_base_conflict_is_reported_in_dry_run_too() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        let mut plan = make_plan();
+        plan.dry_run = true;
+        plan.native_stack_base_conflicts = vec![super::super::plan::NativeStackBaseConflict {
+            bookmark: make_bookmark("profile"),
+            pr_number: 43,
+            current_base: "main".to_string(),
+            expected_base: "auth".to_string(),
+            stack_number: 240,
+        }];
+
+        let err = execute_submission_plan(&jj, &github, &plan).expect_err("dry run should report it");
+        assert!(err.to_string().contains("gh stack unstack 240"));
+        assert!(jj.pushes().is_empty());
+    }
+
+    // One jjpr stack can span two native stacks, because a native stack may be
+    // rooted on any branch. Naming only the first would leave the user blocked
+    // again on their next run.
+    #[test]
+    fn a_conflict_spanning_two_native_stacks_names_both() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        let mut plan = make_plan();
+        plan.native_stack_base_conflicts = vec![
+            super::super::plan::NativeStackBaseConflict {
+                bookmark: make_bookmark("profile"),
+                pr_number: 43,
+                current_base: "main".to_string(),
+                expected_base: "auth".to_string(),
+                stack_number: 240,
+            },
+            super::super::plan::NativeStackBaseConflict {
+                bookmark: make_bookmark("settings"),
+                pr_number: 44,
+                current_base: "profile".to_string(),
+                expected_base: "auth".to_string(),
+                stack_number: 251,
+            },
+        ];
+
+        let msg = execute_submission_plan(&jj, &github, &plan)
+            .expect_err("must refuse")
+            .to_string();
+
+        assert!(msg.contains("gh stack unstack 240 && gh stack unstack 251"), "{msg}");
+        assert!(msg.contains("#43") && msg.contains("#44"), "both PRs listed: {msg}");
+    }
+
+    // Duplicate stack numbers (the usual case: several PRs in one stack) must
+    // not produce a repeated command.
+    #[test]
+    fn conflicts_in_one_stack_name_it_once() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        let mut plan = make_plan();
+        let mk = |pr: u64| super::super::plan::NativeStackBaseConflict {
+            bookmark: make_bookmark("profile"),
+            pr_number: pr,
+            current_base: "main".to_string(),
+            expected_base: "auth".to_string(),
+            stack_number: 240,
+        };
+        plan.native_stack_base_conflicts = vec![mk(43), mk(44)];
+
+        let msg = execute_submission_plan(&jj, &github, &plan)
+            .expect_err("must refuse")
+            .to_string();
+
+        assert!(!msg.contains("unstack 240 && gh stack unstack 240"), "deduped: {msg}");
     }
 
     #[test]
@@ -1011,10 +1178,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1062,10 +1231,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![super::super::plan::BookmarkNeedingBaseUpdate {
                 bookmark: make_bookmark("profile"),
@@ -1105,6 +1276,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
@@ -1132,6 +1304,7 @@ mod tests {
                     merged_at: None,
                     requested_reviewers: vec![],
                     author: String::new(),
+                    stack: None,
                 },
             )]),
             remote_name: "origin".to_string(),
@@ -1174,6 +1347,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let new_body =
@@ -1181,6 +1355,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
@@ -1234,6 +1409,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
@@ -1291,6 +1467,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1330,6 +1507,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1377,10 +1555,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec!["alice".to_string()],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1428,10 +1608,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec!["alice".to_string(), "bob".to_string()],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1479,10 +1661,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec!["Alice".to_string()],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1541,6 +1725,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![make_bookmark("auth"), make_bookmark("profile")],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1572,6 +1757,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1609,6 +1795,7 @@ mod tests {
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1639,6 +1826,7 @@ mod tests {
     fn test_has_actions_empty_plan() {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1661,10 +1849,38 @@ mod tests {
         assert!(!plan.has_actions());
     }
 
+    // A native-stack conflict is not an action: nothing would be modified. That
+    // is why any caller which early-returns on !has_actions() must check the
+    // conflicts separately, or the refusal is never reported. `watch`'s submit
+    // phase does exactly that; this pins the contract it relies on.
+    #[test]
+    fn a_native_stack_conflict_alone_is_not_an_action() {
+        let mut plan = make_plan();
+        plan.bookmarks_needing_push = vec![];
+        plan.bookmarks_needing_pr = vec![];
+        plan.native_stack_base_conflicts = vec![super::super::plan::NativeStackBaseConflict {
+            bookmark: make_bookmark("profile"),
+            pr_number: 43,
+            current_base: "main".to_string(),
+            expected_base: "auth".to_string(),
+            stack_number: 240,
+        }];
+
+        assert!(
+            !plan.has_actions(),
+            "if this becomes true, watch's extra conflict check can be simplified"
+        );
+        // ...and execute must still refuse, which is what makes that check work.
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        assert!(execute_submission_plan(&jj, &github, &plan).is_err());
+    }
+
     #[test]
     fn test_has_actions_with_push() {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![make_bookmark("auth")],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1741,6 +1957,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let profile_pr = PullRequest {
@@ -1755,10 +1972,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1850,10 +2069,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1986,10 +2207,12 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         };
 
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],

@@ -32,6 +32,17 @@ pull-requests permission read; organizations with SAML enforcement need
 the token authorized for the org. Neither is required, and nothing needs
 configuring either way.
 
+GitHub's own stacked pull requests are a separate feature from jjpr's stacks,
+and jjpr recognizes them rather than fighting them. A PR that belongs to a
+native stack cannot be merged through the API jjpr uses, and its base cannot be
+retargeted, so `status` flags it, `merge` and `watch` stop and name
+`gh stack merge`, and `submit` refuses a reshape it cannot apply. Pushing,
+creating PRs, and updating descriptions all work normally on a stacked PR. See
+[GitHub native stacks](commands/merge.md#github-native-stacks).
+
+This applies to GitHub only. GitLab and Forgejo have no equivalent feature, and
+nothing in jjpr changes for them.
+
 ## GitLab
 
 If you use `glab`, jjpr picks up your credentials. Otherwise, export

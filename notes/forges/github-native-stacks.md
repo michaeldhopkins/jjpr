@@ -921,8 +921,11 @@ can do.** Output for a stack whose three PRs are all members of stack #293:
 
 No mention of stack #293 anywhere, and `✓ mergeable` on PRs that `jjpr merge`
 will refuse outright. The two commands disagree about the same PRs. This is
-what wiring `Forge::native_stacks` into `status` is actually for — it is not
-tidying up dead code, it is closing a contradiction the user can hit today.
+what surfacing native-stack membership in `status` is actually for: not
+tidying up dead code, but closing a contradiction the user can hit today.
+(Fixed since. `status` reads the `stack` object embedded in the PR payload it
+already fetches, so it costs no request; `Forge::native_stacks` was a listing
+nobody needed and is now `get_stack`, for the merge pre-flight.)
 
 **`jjpr submit` works correctly and needs no change.** Amended the top commit
 and submitted: pushes succeeded, PRs updated, `Done.` Afterwards the stack was

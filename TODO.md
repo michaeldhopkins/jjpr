@@ -89,6 +89,32 @@ rooted ⇒ adopt, not rooted ⇒ rebase and repair). The worry that jjpr would
 blindly overwrite the server's rebase is already handled by code written for
 an unrelated reason.
 
+**Caveat found 2026-08-01, low priority: `is_rooted_in` cannot answer when the
+rebase root is divergent.** It builds `parents({root}) ~ ::{base}` with the root
+written as a bare change ID, and jj refuses to resolve a divergent symbol
+(`Error: Change ID <x> is divergent` — verified against a real divergent repo).
+The call site swallows that with `.unwrap_or(false)`, so an *unanswerable* query
+becomes a confident "not rooted" — the destructive direction, since that branch
+rebases and force-pushes.
+
+**Not reachable today**, and the first draft of this entry wrongly said it was.
+`reconcile_local_state` opens with a repo-wide `divergent()` gate that fails
+safe and returns before `is_rooted_in` is ever called
+(`preexisting_divergence_short_circuits_before_any_later_jj_call` proves it by
+panicking on every later jj call). So the headline result above stands as
+written; this is only a latent sharp edge.
+
+It matters for merge-async because the cascade design wants to call
+`is_rooted_in` in situations the current entry gate does not cover. Two things
+to decide then, both design calls rather than tidying:
+
+- Wrapping the root in `change_id()` (as `fix(merge)` now does for the conflict
+  screen) makes the query answerable, but with divergence it answers from
+  *both* copies — which may not be the semantics the cascade wants.
+- `.unwrap_or(false)` conflates "definitely not rooted" with "couldn't tell".
+  For the cascade these want different handling: the first is "rebase and
+  repair", the second is "stop and tell the user".
+
 What survives: the timing race (no settle signal, so the wait must be bounded
 and the declined-branch push must carry the `sha` guard), the stranded-WIP
 repair (a one-line `jj rebase` that nothing currently calls), and — now
@@ -124,13 +150,12 @@ Decisions taken:
   can *detect*. Surface them to the user. No automatic resolution until we know
   what the right one is.
 
-- **Wire up `Forge::native_stacks` (S).** Implemented and tested in
-  `src/forge/github.rs`, called from nowhere. Surface native stacks in
-  `status`. Not tidying: verified against a live stack that `status` shows no
-  hint of native-stack membership *and* prints `✓ mergeable` for PRs that
-  `jjpr merge` then refuses. The two commands contradict each other today.
-  Its doc comment also claims a 404 means "preview not enabled"; a 404 equally
-  means the token cannot see the repo.
+- ~~Wire up `Forge::native_stacks`~~ **DONE, differently.** `status` now flags
+  native-stack membership from the `stack` object embedded in each PR payload,
+  which is free, so it needed no extra call. `native_stacks` itself was
+  replaced by `get_stack(owner, repo, stack_number)`: the merge pre-flight
+  wants one stack, not a listing, and already knows which from
+  `PullRequest::stack`. The wrong 404 comment is corrected too.
 - **Pre-flight the whole merge range (S, folds into the merge work).** GitHub
   fails a stack merge containing a closed or draft member with
   "Pull request must be open and not in draft mode" and **does not say which

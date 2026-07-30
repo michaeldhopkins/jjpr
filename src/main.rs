@@ -889,6 +889,48 @@ impl StatusRender<'_> {
         ))
     }
 
+    /// Note that a PR belongs to a GitHub native stack, which jjpr cannot merge.
+    ///
+    /// Without this, `status` reports `✓ mergeable` for a PR that `jjpr merge`
+    /// refuses outright — two commands giving opposite answers about the same
+    /// PR. Read from the `stack` object GitHub embeds in the PR payload jjpr
+    /// already fetches, so it costs no extra request.
+    ///
+    /// Only for PRs jjpr would otherwise merge: a foreign segment already says
+    /// jjpr won't merge it, and repeating the reason there is noise.
+    /// Every field of `PrStackRef` is defaulted, so a payload that stopped
+    /// carrying one yields 0 rather than failing to parse. Say less in that
+    /// case instead of printing "#0" or "(0 of 0)": the membership itself is
+    /// the load-bearing fact, and it is still true.
+    fn native_stack_note(pr: &PullRequest, mine: bool) -> Option<String> {
+        if !mine {
+            return None;
+        }
+        let stack = pr.stack.as_ref()?;
+        let which = if stack.number > 0 {
+            format!("native stack #{}", stack.number)
+        } else {
+            "a native stack".to_string()
+        };
+        let position = if stack.position > 0 && stack.size > 0 {
+            format!(" ({} of {})", stack.position, stack.size)
+        } else {
+            String::new()
+        };
+        // Say what the command lands. Merging a stacked PR lands everything
+        // below it, which is the semantic most likely to surprise, and the merge
+        // block reason already spells it out — status should not be vaguer about
+        // the same command.
+        let lands = match stack.position {
+            0 => format!("use `gh stack merge {}`", pr.number),
+            1 => format!("`gh stack merge {}` lands it", pr.number),
+            n => format!("`gh stack merge {}` lands it and the {} below", pr.number, n - 1),
+        };
+        Some(format!(
+            "    \u{26a0} in {which}{position}, so jjpr cannot merge it; {lands}"
+        ))
+    }
+
     fn render_detail(&self, segment: &BookmarkSegment, pr: &SegmentPr, mine: bool) -> Vec<String> {
         let Some(bookmark) = segment.bookmarks.first() else {
             return vec![];
@@ -910,6 +952,11 @@ impl StatusRender<'_> {
                 }
                 // Drafts hide review detail, so they hide the review-loss note too.
                 if !p.draft && let Some(note) = self.dismiss_stale_note(&bookmark.name, mine) {
+                    lines.push(note);
+                }
+                // Shown for drafts too: it is not review detail, and a draft in a
+                // native stack is just as unmergeable by jjpr.
+                if let Some(note) = Self::native_stack_note(p, mine) {
                     lines.push(note);
                 }
                 lines
@@ -1244,14 +1291,7 @@ fn print_watch_summary(result: &jjpr::watch::WatchResult) {
     if mr.merged.is_empty() && mr.skipped_merged.is_empty() && mr.blocked_at.is_none() {
         println!("\nWatch ended without merging anything in this stack.");
     } else if let Some(ref blocked) = mr.blocked_at {
-        if blocked.reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
-            println!("\nRun `jjpr submit` to create PRs, then re-run `jjpr watch`.");
-        } else {
-            // LocalSyncFailed / ForgeReconcileFailed don't normally reach
-            // here because watch keeps iterating through them. Anything
-            // else here is fatal and rerunning watch is the right action.
-            println!("\nRun `jjpr watch` again once the issue is resolved.");
-        }
+        println!("{}", blocked_follow_up(&blocked.reasons, true));
     } else if mr.merged.is_empty() && !mr.skipped_merged.is_empty() {
         println!("\nAll PRs in this stack are already merged.");
     } else {
@@ -1275,17 +1315,58 @@ fn watch_poll_interval() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
+/// Follow-up advice for a stack jjpr cannot merge because it belongs to GitHub.
+/// `None` when native-stack membership is not why it stopped.
+///
+/// Shared by the `merge` and `watch` summaries. Both otherwise end on a "try
+/// again" line, and neither is true here: re-running resolves nothing, so the
+/// only useful thing to say is which command does.
+/// The follow-up line for a run that stopped at a blocked segment.
+///
+/// `merge` and `watch` each have their own end-of-run summary, and they used to
+/// choose this line independently. That is how `watch` shipped telling users to
+/// re-run `watch` for a native stack, which never clears it, while `merge` said
+/// the right thing. Deciding it in one place makes that divergence structurally
+/// impossible; the printers only print.
+///
+/// `from_watch` selects the two genuine differences: watch names itself in the
+/// fallback, and has no "run watch to wait" branch because it *is* the wait.
+fn blocked_follow_up(reasons: &[merge::plan::BlockReason], from_watch: bool) -> String {
+    if reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
+        return "\nRun `jjpr submit` to create PRs, then re-run `jjpr watch`.".to_string();
+    }
+    if let Some(advice) = native_stack_advice(reasons) {
+        return advice;
+    }
+    if !from_watch && reasons.iter().all(|r| r.is_transient()) {
+        return "\nRun `jjpr watch` to wait and auto-continue.".to_string();
+    }
+    if from_watch {
+        // LocalSyncFailed / ForgeReconcileFailed don't normally reach here
+        // because watch keeps iterating through them. Anything else here is
+        // fatal and rerunning watch is the right action.
+        "\nRun `jjpr watch` again once the issue is resolved.".to_string()
+    } else {
+        "\nRun `jjpr merge` again once the issue is resolved.".to_string()
+    }
+}
+
+fn native_stack_advice(reasons: &[merge::plan::BlockReason]) -> Option<String> {
+    reasons.iter().find_map(|r| match r {
+        merge::plan::BlockReason::NativeStack { stack_number, .. } => Some(format!(
+            "\nThis stack is registered as a GitHub native stack, which jjpr cannot merge.\n\
+             Merge it with `gh stack merge`, or dissolve the native stack with\n\
+             `gh stack unstack {stack_number}` to hand merging back to jjpr."
+        )),
+        _ => None,
+    })
+}
+
 fn print_merge_summary(result: &merge::execute::MergeResult) {
     if result.merged.is_empty() && result.skipped_merged.is_empty() && result.blocked_at.is_none() {
         println!("\nNo PRs to merge in this stack.");
     } else if let Some(ref blocked) = result.blocked_at {
-        if blocked.reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
-            println!("\nRun `jjpr submit` to create PRs, then re-run `jjpr watch`.");
-        } else if blocked.reasons.iter().all(|r| r.is_transient()) {
-            println!("\nRun `jjpr watch` to wait and auto-continue.");
-        } else {
-            println!("\nRun `jjpr merge` again once the issue is resolved.");
-        }
+        println!("{}", blocked_follow_up(&blocked.reasons, false));
     } else if result.merged.is_empty() && !result.skipped_merged.is_empty() {
         println!("\nAll PRs in this stack are already merged.");
     } else {
@@ -1363,6 +1444,7 @@ fn print_local_warnings(
         println!("Retry with `jjpr merge` (or wait for `jjpr watch` to retry).");
         println!("Persistent failures may indicate a network or forge-permission issue.");
     }
+
 
     Ok(())
 }
@@ -1588,6 +1670,139 @@ mod tests {
     use super::*;
     use jjpr::forge::types::{PrMergeability, ReviewSummary};
 
+    // status printed "✓ mergeable" for PRs that `jjpr merge` refuses outright,
+    // so the two commands disagreed about the same PR. Verified against a live
+    // stack before this note existed.
+    #[test]
+    fn status_flags_a_natively_stacked_pr_as_unmergeable_by_jjpr() {
+        let mut pr = pr_with("me", false, None);
+        pr.stack = Some(jjpr::forge::types::PrStackRef {
+            number: 223,
+            id: 1,
+            position: 2,
+            size: 3,
+            base: None,
+        });
+        let note = StatusRender::native_stack_note(&pr, true).expect("should flag it");
+        assert!(note.contains("#223"), "names the stack: {note}");
+        assert!(note.contains("2 of 3"), "says where in the stack: {note}");
+        assert!(note.contains("gh stack merge 15138"), "gives the way to land it: {note}");
+        // Merging a stacked PR lands everything below it. The merge block reason
+        // spells that out; status must not be vaguer about the same command.
+        assert!(note.contains("lands it and the 1 below"), "says what lands: {note}");
+    }
+
+    // At the bottom there is nothing below, so the note must not imply otherwise
+    // — the same overstatement already fixed in the merge block reason.
+    #[test]
+    fn status_note_does_not_overstate_at_the_bottom_of_a_stack() {
+        let mut pr = pr_with("me", false, None);
+        pr.stack = Some(jjpr::forge::types::PrStackRef {
+            number: 223, id: 1, position: 1, size: 2, base: None,
+        });
+        let note = StatusRender::native_stack_note(&pr, true).expect("should flag it");
+        assert!(note.contains("lands it"), "{note}");
+        assert!(!note.contains("below"), "nothing is below the bottom PR: {note}");
+    }
+
+    // PrStackRef defaults every field so a shrinking payload still parses. The
+    // note must degrade to something true rather than print "#0 (0 of 0)".
+    #[test]
+    fn status_note_degrades_when_the_stack_payload_is_partial() {
+        let mut pr = pr_with("me", false, None);
+        pr.stack = Some(jjpr::forge::types::PrStackRef {
+            number: 0, id: 0, position: 0, size: 0, base: None,
+        });
+        let note = StatusRender::native_stack_note(&pr, true).expect("membership still holds");
+        assert!(!note.contains("#0"), "must not invent a stack number: {note}");
+        assert!(!note.contains("0 of 0"), "must not print a bogus position: {note}");
+        assert!(note.contains("a native stack"), "still states the fact: {note}");
+        assert!(note.contains("gh stack merge"), "still gives the command: {note}");
+    }
+
+    // A foreign segment already says jjpr won't merge it; repeating why is noise.
+    #[test]
+    fn status_does_not_repeat_the_native_stack_note_for_foreign_prs() {
+        let mut pr = pr_with("someone-else", false, None);
+        pr.stack = Some(jjpr::forge::types::PrStackRef {
+            number: 223, id: 1, position: 1, size: 2, base: None,
+        });
+        assert!(StatusRender::native_stack_note(&pr, false).is_none());
+    }
+
+    // The common case must stay silent.
+    #[test]
+    fn status_says_nothing_about_stacks_for_an_ordinary_pr() {
+        let pr = pr_with("me", false, None);
+        assert!(StatusRender::native_stack_note(&pr, true).is_none());
+    }
+
+    // The regression that started this: watch shipped telling users to re-run
+    // watch for a native stack, which never clears it, while merge said the
+    // right thing. Both now decide via `blocked_follow_up`, so assert BOTH
+    // modes — testing only the helper let the wiring drift once already, and a
+    // mutation test confirmed removing watch's call site broke no test.
+    #[test]
+    fn both_summaries_give_native_stack_advice_not_a_retry() {
+        let reasons = vec![merge::plan::BlockReason::NativeStack {
+            pr_number: 298,
+            stack_number: 301,
+            position: 1,
+            size: 3,
+        }];
+        for from_watch in [false, true] {
+            let line = blocked_follow_up(&reasons, from_watch);
+            assert!(line.contains("gh stack unstack 301"), "from_watch={from_watch}: {line}");
+            assert!(
+                !line.contains("again once the issue is resolved"),
+                "from_watch={from_watch} must not suggest re-running: {line}"
+            );
+        }
+    }
+
+    // The branches that legitimately differ between the two commands.
+    #[test]
+    fn blocked_follow_up_differs_only_where_it_should() {
+        let transient = vec![merge::plan::BlockReason::ChecksPending];
+        assert!(blocked_follow_up(&transient, false).contains("watch` to wait"));
+        // watch IS the wait, so it has no such branch and falls through.
+        assert!(blocked_follow_up(&transient, true).contains("watch` again once"));
+
+        let hard = vec![merge::plan::BlockReason::ChangesRequested];
+        assert!(blocked_follow_up(&hard, false).contains("merge` again once"));
+        assert!(blocked_follow_up(&hard, true).contains("watch` again once"));
+
+        // NoPr points at submit from either command.
+        let nopr = vec![merge::plan::BlockReason::NoPr];
+        for w in [false, true] {
+            assert!(blocked_follow_up(&nopr, w).contains("jjpr submit"), "w={w}");
+        }
+    }
+
+    #[test]
+    fn native_stack_advice_replaces_the_useless_try_again_line() {
+        let reasons = vec![merge::plan::BlockReason::NativeStack {
+            pr_number: 298,
+            stack_number: 301,
+            position: 1,
+            size: 3,
+        }];
+        let advice = native_stack_advice(&reasons).expect("should recognise the block");
+        assert!(advice.contains("gh stack merge"), "{advice}");
+        assert!(advice.contains("gh stack unstack 301"), "{advice}");
+        assert!(
+            !advice.contains("again once the issue is resolved"),
+            "must not suggest re-running: {advice}"
+        );
+    }
+
+    // Every other block keeps its existing advice.
+    #[test]
+    fn native_stack_advice_is_none_for_other_blocks() {
+        assert!(native_stack_advice(&[merge::plan::BlockReason::ChecksPending]).is_none());
+        assert!(native_stack_advice(&[]).is_none());
+    }
+
     fn bookmark(has_remote: bool, is_synced: bool) -> Bookmark {
         Bookmark {
             name: "b".to_string(),
@@ -1683,6 +1898,7 @@ mod tests {
             merged_at: merged_at.map(str::to_string),
             requested_reviewers: vec![],
             author: author.to_string(),
+            stack: None,
         }
     }
 
@@ -2142,6 +2358,54 @@ mod tests {
         );
         // The ordinary status line still renders alongside the note.
         assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
+    }
+
+    // Mirrors the dismiss-stale wiring test above, and for the same reason:
+    // testing `native_stack_note` alone proves nothing about whether it reaches
+    // the output. Deleting the call site left every other test green.
+    #[test]
+    fn render_segment_wires_in_the_native_stack_note() {
+        let mut stacked = pr_with("me", false, None);
+        stacked.stack = Some(jjpr::forge::types::PrStackRef {
+            number: 348,
+            id: 1,
+            position: 2,
+            size: 3,
+            base: None,
+        });
+        let mut pr_map = HashMap::new();
+        pr_map.insert("mine".to_string(), stacked);
+        let mut status_map = HashMap::new();
+        status_map.insert("mine".to_string(), status_all_pass());
+        let (merged_map, my): (HashMap<String, PullRequest>, HashSet<String>) =
+            (HashMap::new(), ["mine".to_string()].into_iter().collect());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_segment(&seg(&["mine"]));
+        assert!(
+            lines.iter().any(|l| l.contains("in native stack #348 (2 of 3)")),
+            "note missing from rendered output: {lines:?}"
+        );
+        // And it does not displace the ordinary status line.
+        assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
+    }
+
+    // The common case must not gain a line.
+    #[test]
+    fn render_segment_stays_quiet_for_an_unstacked_pr() {
+        let mut pr_map = HashMap::new();
+        pr_map.insert("mine".to_string(), pr_with("me", false, None));
+        let mut status_map = HashMap::new();
+        status_map.insert("mine".to_string(), status_all_pass());
+        let (merged_map, my): (HashMap<String, PullRequest>, HashSet<String>) =
+            (HashMap::new(), ["mine".to_string()].into_iter().collect());
+        let r = render_with(&pr_map, &merged_map, &my, &status_map);
+
+        let lines = r.render_segment(&seg(&["mine"]));
+        assert!(
+            !lines.iter().any(|l| l.contains("native stack")),
+            "should say nothing about stacks: {lines:?}"
+        );
     }
 
     #[test]

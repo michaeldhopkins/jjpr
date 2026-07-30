@@ -277,19 +277,31 @@ pub trait Forge: Send + Sync {
         number: u64,
     ) -> Result<PrState>;
 
-    /// Read the repo's native pull-request stacks, if the forge exposes them.
+    /// Read one native pull-request stack by number, if the forge has them.
     ///
-    /// `Ok(None)` means "no native-stack surface here": GitLab/Forgejo have no
-    /// equivalent, and GitHub's endpoint 404s unless the preview is enabled for
-    /// the repo — so a `None` doubles as the capability probe. `Ok(Some(vec))`
-    /// (possibly empty) means the feature is live. Read-only: this never
-    /// creates or mutates a stack. Defaults to `None` so most backends and all
-    /// stubs need no override.
-    fn native_stacks(
+    /// Take the number from `PullRequest::stack`, which every PR payload
+    /// already carries, so this is a single targeted request rather than a
+    /// listing. Read-only: it never creates or mutates a stack. Defaults to
+    /// `None` so GitLab, Forgejo and all stubs need no override.
+    ///
+    /// This exists because per-PR data cannot answer "what would merging this
+    /// land". `PullRequest::stack` gives position and size but not the
+    /// members, and a native stack can contain PRs jjpr does not track, so the
+    /// authoritative member list has to come from the stack itself.
+    ///
+    /// `Ok(None)` means the stack is not visible. A `404` is **not** proof the
+    /// feature is disabled: it is equally what a token that cannot see the repo
+    /// gets, and the two are indistinguishable. That cost real time while
+    /// establishing PAT support, where a `404` from a repo the token simply
+    /// lacked access to read as "preview not enabled". Since public preview the
+    /// endpoint answers on every repository, so a `404` now points at access
+    /// far more often than at availability.
+    fn get_stack(
         &self,
         _owner: &str,
         _repo: &str,
-    ) -> Result<Option<Vec<Stack>>> {
+        _stack_number: u64,
+    ) -> Result<Option<Stack>> {
         Ok(None)
     }
 
@@ -370,6 +382,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         }
     }
 

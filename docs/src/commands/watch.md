@@ -119,6 +119,18 @@ bookmark was removed. Stopping.
 It will not silently switch to whatever stack you happen to be on. To
 watch a different stack, run `jjpr watch <bookmark>` again.
 
+## Blocks that watch will not wait out
+
+Watch polls through anything that can resolve on its own: pending CI, an
+unresolved mergeability check, a missing approval. It stops on anything that
+cannot.
+
+A PR belonging to a GitHub native stack is one of those. GitHub refuses API
+merges of stacked PRs, and that does not change by waiting, so watch reports
+it and exits instead of polling forever. See
+[GitHub native stacks](merge.md#github-native-stacks) in the merge docs for
+the ways out.
+
 ## One watcher per repo
 
 Run only one `jjpr watch` per repository. Two watchers poll the forge

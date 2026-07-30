@@ -3,7 +3,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (nav) {
         var footer = document.createElement('div');
         footer.className = 'version-footer';
-        footer.textContent = 'jjpr v0.35.0';
+        footer.textContent = 'jjpr v0.36.0';
         nav.parentNode.insertBefore(footer, nav.nextSibling);
     }
 });
