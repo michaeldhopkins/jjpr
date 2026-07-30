@@ -126,8 +126,21 @@ fn reconcile_local_state(
                     )));
                     break;
                 }
-                // jj creates the merge commit even with conflicts; check before pushing.
-                match jj.is_conflicted(&seg.bookmark.name) {
+                // jj creates the merge commit even with conflicts; check before
+                // pushing. Screen the segment's whole range for the same reason
+                // the Rebase arm does: a commit inside the segment can be
+                // conflicted while the tip is not, and jj refuses to push any
+                // conflicted commit, not just the one the bookmark names.
+                //
+                // Deliberately conservative: the range covers the segment rather
+                // than only the commits this push would actually send. A
+                // conflicted commit the remote already has would be refused here
+                // although jj would have let the push through — vanishingly rare
+                // (jj will not push a conflict in the first place, so it takes an
+                // out-of-band write to create one) and refusing is the safe way
+                // to be wrong.
+                let range = segment_range(seg);
+                match jj.is_conflicted(&range) {
                     Ok(true) => {
                         warnings.push(mk(format!(
                             "Merge of '{effective_base}' into '{}' has conflicts; skipping push",
@@ -151,25 +164,39 @@ fn reconcile_local_state(
         }
         crate::config::ReconcileStrategy::Rebase => {
             let next_segment = &segments[seg_idx + 1];
-            let next_change_id = &next_segment.bookmark.change_id;
 
-            match jj.resolve_change_id(next_change_id) {
-                Ok(ref commit_ids) if commit_ids.len() > 1 => {
-                    let short_id = &next_change_id[..next_change_id.len().min(12)];
-                    let count = commit_ids.len();
-                    warnings.push(mk(format!(
-                        "Change '{short_id}' is divergent ({count} commits share this change ID)"
-                    )));
-                    return warnings;
+            // Check the rebase root as well as the bookmark tip. `rebase_onto`
+            // below addresses the segment by its root, which for a multi-commit
+            // segment is a *different change* from the tip — so checking only
+            // the tip lets a divergent root through to `jj rebase -s`, which
+            // refuses an ambiguous change ID and surfaces as a bare "Failed to
+            // rebase remaining stack" instead of the message right here that
+            // exists to explain it.
+            let mut to_check = vec![next_segment.bookmark.change_id.as_str()];
+            let root_change_id = rebase_root(next_segment);
+            if root_change_id != next_segment.bookmark.change_id {
+                to_check.push(root_change_id);
+            }
+
+            for next_change_id in to_check {
+                match jj.resolve_change_id(next_change_id) {
+                    Ok(ref commit_ids) if commit_ids.len() > 1 => {
+                        let short_id = &next_change_id[..next_change_id.len().min(12)];
+                        let count = commit_ids.len();
+                        warnings.push(mk(format!(
+                            "Change '{short_id}' is divergent ({count} commits share this change ID)"
+                        )));
+                        return warnings;
+                    }
+                    Ok(commit_ids) if commit_ids.is_empty() => {
+                        warnings.push(mk(format!(
+                            "Change ID '{next_change_id}' not found locally"
+                        )));
+                        return warnings;
+                    }
+                    Err(_) => {}
+                    _ => {}
                 }
-                Ok(commit_ids) if commit_ids.is_empty() => {
-                    warnings.push(mk(format!(
-                        "Change ID '{next_change_id}' not found locally"
-                    )));
-                    return warnings;
-                }
-                Err(_) => {}
-                _ => {}
             }
 
             // Rebase from the oldest commit in the next segment, not the bookmark tip.
@@ -181,11 +208,47 @@ fn reconcile_local_state(
                 return warnings;
             }
 
-            // Rebase succeeded; push all remaining bookmarks.
-            segments[seg_idx + 1..]
-                .iter()
-                .map(|s| s.bookmark.name.as_str())
-                .collect()
+            // `jj rebase` reports success even when the rebase conflicts — jj
+            // records conflicts in the commits rather than failing — so the
+            // error check above is not enough. Screen every rebased bookmark
+            // the same way the Merge arm screens its merge commits, and push
+            // only the clean prefix. Without this the push is jjpr's first
+            // hint, and only jj's own refusal to push a conflicted commit
+            // stops one being published.
+            //
+            // Stop at the first conflict rather than skipping past it: these
+            // are a chain, so a later bookmark rebased over a conflicted
+            // ancestor is not independently trustworthy.
+            //
+            // Screen the segment's whole commit range, not just the bookmark.
+            // A conflict normally propagates to descendants, so the tip usually
+            // shows it — but a later commit in the same segment can *resolve* an
+            // ancestor's conflict, leaving the tip clean while the ancestor
+            // stays conflicted. jj still refuses to push that ancestor, so
+            // checking only the tip lets exactly the case this guard exists for
+            // slip through to a bare "Won't push commit <sha>".
+            let mut clean = Vec::new();
+            for seg in &segments[seg_idx + 1..] {
+                let range = segment_range(seg);
+                match jj.is_conflicted(&range) {
+                    Ok(false) => clean.push(seg.bookmark.name.as_str()),
+                    Ok(true) => {
+                        warnings.push(mk(format!(
+                            "Rebase of '{}' onto '{effective_base}' has conflicts; skipping push",
+                            seg.bookmark.name
+                        )));
+                        break;
+                    }
+                    Err(e) => {
+                        warnings.push(mk(format!(
+                            "Could not check conflict state of '{}': {e}",
+                            seg.bookmark.name
+                        )));
+                        break;
+                    }
+                }
+            }
+            clean
         }
     };
 
@@ -445,6 +508,34 @@ pub fn rebase_root(segment: &NarrowedSegment) -> &str {
         .last()
         .map(|c| c.change_id.as_str())
         .unwrap_or(&segment.bookmark.change_id)
+}
+
+/// The revset covering every commit in `segment`, for conflict screening.
+///
+/// The root is wrapped in `change_id()` rather than written bare. A bare change
+/// ID is a *symbol*, and jj refuses to resolve a symbol that is divergent —
+/// `Error: Change ID <x> is divergent` — so `<root>::<bookmark>` fails outright.
+/// `change_id(<root>)` is a function call rather than a symbol, so it resolves
+/// to both copies; intersecting with the bookmark's ancestry then picks out the
+/// one actually in this segment. Verified both ways against a real divergent
+/// repo, and in `tests/jj_integration.rs`.
+///
+/// Narrow but real window. Divergence that already exists is caught by the
+/// repo-wide gate at the top of `reconcile_local_state`, which returns long
+/// before this (`preexisting_divergence_short_circuits_before_any_later_jj_call`
+/// proves it). What reaches here is divergence the *rebase just created* by
+/// racing a concurrent jjpr — measured at 12/12 for restacks two seconds apart
+/// in `tests/recovery_scenarios.rs`. The post-rebase gate below then restores
+/// and reports, so the user-visible outcome was already correct either way;
+/// what this avoids is a spurious error that truncates the clean-prefix list.
+///
+/// `change_id()` requires jj 0.31; jjpr already requires 0.36.
+fn segment_range(segment: &NarrowedSegment) -> String {
+    format!(
+        "change_id({})::{}",
+        rebase_root(segment),
+        segment.bookmark.name
+    )
 }
 
 /// If reconcile produced any failures, construct a BlockedPr for the
@@ -1079,6 +1170,9 @@ mod tests {
     struct RecordingJj {
         calls: Mutex<Vec<String>>,
         is_rooted: bool,
+        /// Bookmarks `is_conflicted` reports true for, simulating a rebase or
+        /// merge that jj completed but left conflicted.
+        conflicted: Vec<String>,
     }
 
     impl RecordingJj {
@@ -1086,7 +1180,13 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 is_rooted: false,
+                conflicted: Vec::new(),
             }
+        }
+
+        fn with_conflicted(mut self, names: &[&str]) -> Self {
+            self.conflicted = names.iter().map(|s| (*s).to_string()).collect();
+            self
         }
 
         /// The remaining stack is already based on trunk (merge-commit landing);
@@ -1095,6 +1195,7 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 is_rooted: true,
+                conflicted: Vec::new(),
             }
         }
 
@@ -1132,7 +1233,16 @@ mod tests {
             self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
             Ok(())
         }
-        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+        fn is_conflicted(&self, revset: &str) -> Result<bool> {
+            self.calls.lock().expect("poisoned").push(format!("is_conflicted:{revset}"));
+            // Accepts a bare bookmark or the `<root>::<bookmark>` range the
+            // reconcile actually passes, so a test names a bookmark and stays
+            // readable either way.
+            Ok(self
+                .conflicted
+                .iter()
+                .any(|n| revset == n || revset.ends_with(&format!("::{n}"))))
+        }
     }
 
     /// Jj stub where push_bookmark always fails (simulates conflicted commits).
@@ -1168,6 +1278,31 @@ mod tests {
         }
         fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
         fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+    }
+
+    /// `auth` mergeable with `profile` blocked above it — the shape every
+    /// reconcile test needs: one merge happens, then a remaining stack to sync.
+    fn two_segment_plan() -> MergePlan {
+        MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        }
     }
 
     fn default_options() -> MergeOptions {
@@ -1277,6 +1412,98 @@ mod tests {
 
         // Happy path: no local warnings
         assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+    }
+
+    // `jj rebase` reports success even when it leaves conflicts, so the Err
+    // check alone lets a conflicted commit reach the push. Only jj's own
+    // refusal to push one stopped it being published, which is a backstop
+    // rather than a check — and it reported a raw push failure instead of the
+    // conflict. The Merge strategy has screened for this all along.
+    #[test]
+    fn a_conflicted_rebase_is_not_pushed() {
+        let jj = RecordingJj::new().with_conflicted(&["profile"]);
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        let plan = two_segment_plan();
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+
+        assert_eq!(result.merged.len(), 1, "the merge itself still happened");
+        assert!(
+            jj.calls().iter().any(|c| c.starts_with("rebase:")),
+            "the rebase is still attempted: {:?}",
+            jj.calls()
+        );
+        assert!(
+            !jj.calls().iter().any(|c| c == "push:profile:origin"),
+            "a conflicted bookmark must not be pushed: {:?}",
+            jj.calls()
+        );
+        assert!(
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("has conflicts") && w.message.contains("profile")),
+            "should name the conflict and the bookmark: {:?}",
+            result.local_warnings
+        );
+
+        // The screen must cover the segment's whole commit range, not just the
+        // bookmark: a later commit in a segment can resolve an ancestor's
+        // conflict, leaving the tip clean while jj still refuses to push the
+        // ancestor. Checking the tip alone would miss exactly that case.
+        //
+        // The root must be wrapped in `change_id()`: written bare it is a
+        // symbol, and jj refuses to resolve a divergent symbol, so the screen
+        // would error out on exactly the repos jjpr works hardest to survive.
+        assert!(
+            jj.calls().iter().any(|c| {
+                c.starts_with("is_conflicted:") && c.contains("::profile") && c.contains("change_id(")
+            }),
+            "should screen the segment range divergence-safely, not the bare bookmark: {:?}",
+            jj.calls()
+        );
+    }
+
+    // The clean prefix still ships: a conflict in a later segment must not
+    // suppress pushes for the earlier ones that rebased cleanly.
+    #[test]
+    fn a_conflict_stops_at_the_first_bad_bookmark() {
+        let jj = RecordingJj::new().with_conflicted(&["settings"]);
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2)
+            .with_evaluatable_pr("settings", 3);
+        let mut plan = two_segment_plan();
+        plan.actions.push(PrMergeStatus::Blocked {
+            bookmark_name: "settings".to_string(),
+            pr: Some(make_pr("settings", 3)),
+            reasons: vec![BlockReason::ChecksPending],
+        });
+        let segments = vec![
+            make_segment("auth"),
+            make_segment("profile"),
+            make_segment("settings"),
+        ];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+
+        let calls = jj.calls();
+        assert!(
+            calls.iter().any(|c| c == "push:profile:origin"),
+            "the clean bookmark should still be pushed: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c == "push:settings:origin"),
+            "the conflicted one must not be: {calls:?}"
+        );
+        assert!(
+            result.local_warnings.iter().any(|w| w.message.contains("settings")),
+            "{:?}",
+            result.local_warnings
+        );
     }
 
     #[test]
@@ -1791,8 +2018,10 @@ mod tests {
                 Ok(())
             }
             fn is_conflicted(&self, revset: &str) -> Result<bool> {
-                // First bookmark in remaining stack has conflicts
-                Ok(revset == "profile")
+                // First bookmark in the remaining stack has conflicts. The
+                // reconcile screens the segment's `<root>::<bookmark>` range
+                // rather than the bare bookmark, so match either form.
+                Ok(revset == "profile" || revset.ends_with("::profile"))
             }
             fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
             fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
@@ -2577,6 +2806,169 @@ mod tests {
         assert!(
             result.local_warnings.iter().any(|w| w.message.contains("divergent")),
             "divergence should still be reported: {:?}", result.local_warnings
+        );
+    }
+
+    /// The divergence gate has to check the change ID the *rebase* uses.
+    ///
+    /// `reconcile_local_state` addresses the next segment by `rebase_root()` —
+    /// its oldest commit — but the gate used to check only the bookmark tip.
+    /// For a multi-commit segment those are different changes, so a divergent
+    /// root sailed past the gate into `jj rebase -s <ambiguous>`, which jj
+    /// refuses.
+    ///
+    /// Defense in depth, not a user-facing bug: the repo-wide gate at the top of
+    /// `reconcile_local_state` already returns for any divergence present when
+    /// reconcile starts, so this one only ever sees divergence a racing process
+    /// created in the window since. The stub below reflects that limit — it
+    /// reports a divergent `resolve_change_id` while `divergent_change_ids`
+    /// defaults to clean, which real jj cannot do, since a change on two commits
+    /// is by definition in `divergent()`. What the test pins is the guard
+    /// itself, so the tip-only version cannot come back.
+    #[test]
+    fn a_divergent_rebase_root_gates_the_merge_even_when_the_tip_is_clean() {
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+
+        // Divergent at the segment's oldest commit only; the tip resolves fine.
+        struct DivergentRootJj;
+        impl Jj for DivergentRootJj {
+            fn git_fetch(&self) -> Result<()> { Ok(()) }
+            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
+                if change_id == "ch_root" {
+                    Ok(vec!["commit_a".to_string(), "commit_b".to_string()])
+                } else {
+                    Ok(vec!["commit_only".to_string()])
+                }
+            }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+        }
+
+        let mut profile = make_segment("profile");
+        // Two commits: bookmark on the tip, "ch_root" underneath it.
+        let mut root = profile.changes[0].clone();
+        root.commit_id = "c_root".to_string();
+        root.change_id = "ch_root".to_string();
+        root.local_bookmarks = vec![];
+        profile.changes.push(root);
+        assert_eq!(rebase_root(&profile), "ch_root", "precondition");
+        assert_ne!(rebase_root(&profile), profile.bookmark.change_id, "root != tip");
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        let segments = vec![make_segment("auth"), profile];
+
+        let result = execute_merge_plan(&DivergentRootJj, &gh, &plan, &segments, false).unwrap();
+
+        assert_eq!(result.merged.len(), 1, "only auth should merge: {:?}", result.merged);
+        assert!(
+            !gh.calls().iter().any(|c| c == "merge_pr:#2:squash"),
+            "profile must NOT merge while its rebase root is divergent"
+        );
+        assert!(
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("divergent") && w.message.contains("ch_root")),
+            "the warning must name the divergent root, not the clean tip: {:?}",
+            result.local_warnings
+        );
+    }
+
+    /// Pins the ordering the two tests above depend on for their meaning.
+    ///
+    /// `reconcile_local_state` opens with a repo-wide `divergent()` gate that
+    /// fails SAFE. So divergence that is already present when reconcile starts
+    /// never reaches the per-segment gate, `jj rebase -s`, or the conflict
+    /// screen — those see divergence only if a racing process creates it
+    /// mid-reconcile. Proven here by making every later jj call panic.
+    #[test]
+    fn preexisting_divergence_short_circuits_before_any_later_jj_call() {
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+
+        struct AlreadyDivergentJj;
+        impl Jj for AlreadyDivergentJj {
+            fn divergent_change_ids(&self) -> Result<Vec<String>> {
+                Ok(vec!["ch_root".to_string()])
+            }
+            fn git_fetch(&self) -> Result<()> { panic!("gated before fetch") }
+            fn rebase_onto(&self, _s: &str, _d: &str) -> Result<()> { panic!("gated before rebase") }
+            fn resolve_change_id(&self, _c: &str) -> Result<Vec<String>> {
+                panic!("gated before the per-segment divergence check")
+            }
+            fn is_conflicted(&self, _r: &str) -> Result<bool> {
+                panic!("gated before the conflict screen")
+            }
+            fn is_rooted_in(&self, _r: &str, _b: &str) -> Result<bool> {
+                panic!("gated before the is_rooted_in skip")
+            }
+            fn push_bookmark(&self, _n: &str, _r: &str) -> Result<()> { panic!("gated before push") }
+            fn merge_into(&self, _b: &str, _d: &str) -> Result<()> { panic!("gated before merge_into") }
+            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> { Ok(vec![]) }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> { Ok(vec![]) }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
+            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
+            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+        }
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "profile".to_string(),
+                    pr: make_pr("profile", 2),
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        // No panic ⇒ nothing past the entry gate ran.
+        let result = execute_merge_plan(&AlreadyDivergentJj, &gh, &plan, &segments, false).unwrap();
+        assert!(
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("divergent")),
+            "the entry gate must be what reports it: {:?}",
+            result.local_warnings
         );
     }
 

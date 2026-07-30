@@ -128,3 +128,115 @@ fn test_push_after_squash() {
     // Second push should succeed (jj force-pushes diverged bookmarks by design)
     jj.push_bookmark("feature", "origin").unwrap();
 }
+
+/// `is_conflicted` must answer "does ANY commit in this revset conflict",
+/// including for a multi-commit revset.
+///
+/// The previous implementation templated `if(conflict, ...)` per commit and
+/// compared the whole output to `"true"`. For two commits that yields
+/// `"falsetrue"`, which compares unequal — so a range containing a conflict
+/// reported *clean*. The merge reconcile screens a segment's whole commit range
+/// before pushing, so that silent false-negative would have let jjpr try to push
+/// a conflicted ancestor and fall back to jj's bare "Won't push commit <sha>".
+#[test]
+fn is_conflicted_detects_a_conflict_anywhere_in_a_range() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = common::JjTestRepo::new();
+    let short = |r: &str| {
+        repo.run_jj(&["--ignore-working-copy", "log", "-r", r, "--no-graph", "-T", "change_id.short(8)"])
+            .trim()
+            .to_string()
+    };
+
+    repo.write_file("f.txt", "l1\nl2\n");
+    repo.run_jj(&["describe", "-m", "BASE"]);
+    repo.run_jj(&["bookmark", "create", "master", "-r", "@"]);
+
+    // A conflicts once restacked; B, the bookmark tip, resolves it — so the tip
+    // reads clean while its ancestor stays conflicted.
+    repo.run_jj(&["new", "-m", "A"]);
+    repo.write_file("f.txt", "OURS\nl2\n");
+    repo.run_jj(&["status"]);
+    let a = short("@");
+    repo.run_jj(&["new", "-m", "B"]);
+    repo.write_file("g.txt", "g\n");
+    repo.run_jj(&["status"]);
+    repo.run_jj(&["bookmark", "create", "feat", "-r", "@"]);
+
+    repo.run_jj(&["new", "master", "-m", "M"]);
+    repo.write_file("f.txt", "THEIRS\nl2\n");
+    repo.run_jj(&["status"]);
+    repo.run_jj(&["bookmark", "set", "master", "-r", "@"]);
+    repo.run_jj(&["rebase", "-s", &a, "-d", "master"]);
+    repo.run_jj(&["edit", "feat"]);
+    repo.write_file("f.txt", "RESOLVED\nl2\n");
+    repo.run_jj(&["status"]);
+
+    let jj = repo.runner();
+    assert!(
+        !jj.is_conflicted("feat").unwrap(),
+        "the tip resolves the conflict, so the tip alone looks clean"
+    );
+    assert!(
+        jj.is_conflicted(&format!("{a}::feat")).unwrap(),
+        "but the range still contains a conflicted ancestor"
+    );
+}
+
+/// The conflict screen addresses a segment by its rebase *root*, a change ID.
+/// When that change is divergent, jj refuses to resolve it as a bare symbol
+/// ("Error: Change ID <x> is divergent"), so `<root>::<bookmark>` fails
+/// outright. Wrapping the root in `change_id()` makes it a function call rather
+/// than a symbol, which resolves to both copies; intersecting with the
+/// bookmark's ancestry then selects the copy actually in the segment.
+///
+/// Reached only when a racing process diverges the stack *during* reconcile —
+/// divergence already present is caught by the repo-wide gate that runs first.
+///
+/// This pins jj's behaviour, which is the whole reason for the wrapper.
+#[test]
+fn a_divergent_rebase_root_is_only_screenable_via_change_id() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = common::JjTestRepo::new();
+    let short = |r: &str| {
+        repo.run_jj(&["--ignore-working-copy", "log", "-r", r, "--no-graph", "-T", "change_id.short(8)"])
+            .trim()
+            .to_string()
+    };
+
+    repo.write_file("f.txt", "l1\n");
+    repo.run_jj(&["describe", "-m", "A"]);
+    let a = short("@");
+    let good_op = repo
+        .run_jj(&["op", "log", "--no-graph", "-T", "id.short() ++ \"\\n\""])
+        .lines()
+        .next()
+        .expect("an operation")
+        .trim()
+        .to_string();
+
+    // Two concurrent rewrites of A reconcile to a divergent change: both kept.
+    repo.write_file("f.txt", "OURS\n");
+    repo.run_jj(&["status"]);
+    repo.run_jj(&["--at-operation", &good_op, "describe", "-m", "A (theirs)"]);
+    repo.run_jj(&["status"]);
+
+    // Build a segment on one copy, so the divergent change is its rebase root.
+    repo.run_jj(&["new", &format!("{a}/0"), "-m", "B"]);
+    repo.run_jj(&["bookmark", "create", "feat", "-r", "@"]);
+
+    let jj = repo.runner();
+    assert!(
+        jj.is_conflicted(&format!("{a}::feat")).is_err(),
+        "a bare divergent change ID must not resolve — if this ever starts \
+         succeeding, jj changed and the change_id() wrapper can be revisited"
+    );
+    assert!(
+        jj.is_conflicted(&format!("change_id({a})::feat")).is_ok(),
+        "the change_id() form must resolve despite the divergence"
+    );
+}
