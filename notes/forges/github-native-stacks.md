@@ -8,66 +8,96 @@ delta between visits.
 This file lives in the [jjpr](https://github.com/michaeldhopkins/jjpr) repo
 but the content is tool-agnostic.
 
-## Status — verified 2026-07-22
+## Status — verified 2026-07-30
 
-GitHub's native PR-stack feature is still in **private preview**,
-waitlist-gated (`gh.io/stacksbeta`), restricted to GitHub Team and
-Enterprise plans. The Q2 2026 broader-rollout target has slipped: it is now
-Q3 and the roadmap issue is still in the "Preview" phase with no committed
-GA date. The CLI ships as a separately-installed `gh` extension
-(`github/gh-stack`), not a built-in `gh pr` subcommand.
+**Three of the four blockers from the previous visit are gone.** GitHub
+[announced public preview on 2026-07-30](https://github.blog/changelog/2026-07-30-stacked-pull-requests-are-now-in-public-preview/).
+The waitlist, the plan gating, and — decisively — the merge block have all
+been lifted, and the REST schema has been published to the canonical
+`docs.github.com` reference. The CLI still ships as a separately-installed
+`gh` extension (`github/gh-stack`, now v0.1.0), not a built-in `gh pr`
+subcommand.
 
-As of `gh-stack` v0.0.8 (2026-07-15) there is a **documented REST API**: five
-endpoints under `/repos/{owner}/{repo}/stacks`
-(list/get/create/add/unstack), plus a `stack` object embedded in
-pull-request payloads. This is the first time a third-party tool could
-integrate against a described schema rather than reverse-engineering. The
-write side has now been exercised end-to-end against a live preview-enabled
-repo (the sections below record what the Pages docs don't state).
+What changed since 2026-07-22, each verified live (see
+[Live verification 2026-07-30](#live-verification--public-preview-2026-07-30)):
 
-Verified live that the docs omit: a `repo`-scoped token works (no
-stack-specific scope), a fine-grained PAT is accepted, the API version is the
-standard `2022-11-28`, and rate limits are the ordinary `core` bucket.
-GraphQL exposes read-only stack *types* (`PullRequestStack`,
-`PullRequestStackEntry`) but no stack mutation.
+1. **Merging via public API now works.** `gh-stack` v0.1.0 (2026-07-29) added
+   `gh stack merge`, backed by a new public **asynchronous merge API**:
+   `PUT /repos/{o}/{r}/pulls/{n}/merge-async` + `GET .../merge-async/{uuid}`.
+   Verified end-to-end with an ordinary `repo`-scoped OAuth token. This
+   retires the "merge is browser-only" finding entirely.
+2. **Gating is gone.** `/stacks` returns `200` on a **personal Free-plan
+   private repo** — no waitlist, no Team/Enterprise requirement. A stack was
+   created and merged there. (The roadmap issue still says "Preview" and
+   still lists only Team/Enterprise; it is stale — trust the live API.)
+3. **Canonical publication happened.** `docs.github.com/en/rest/pulls/stacks`
+   is live (was a 404), the async merge endpoints are in
+   `docs.github.com/en/rest/pulls/pulls`, and the stacks endpoints appear on
+   the GitHub App permissions reference under the ordinary **Pull requests**
+   permission — no dedicated scope. This was the stability signal the
+   previous entry was waiting for.
 
-The findings that bound a jjpr integration:
+What did **not** change — and these are now the whole story for jjpr:
 
-1. **No public API can merge a stacked PR** — not the PR merge endpoint
-   (403), not the merge queue, no stack-merge endpoint or mutation. Merging
-   is web-UI-only in the preview (an internal API behind the merge button).
-2. **Merging cascade-rebases the whole stack server-side**, rewriting the
-   remote branches to SHAs jj never pushed — a reconcile burden for a jj tool.
-3. **Linear-only** — diamonds/siblings are rejected (`422`).
-4. **Preview-grade and gated** — schema on a Pages site, not the canonical
-   docs; endpoints `404` unless GitHub enabled the repo; Team/Enterprise only.
+4. **Linear-only.** Diamonds/siblings still rejected (`422`). jjpr's diamond
+   support remains a genuine differentiator with no native representation.
+5. **The server-side cascade rebase still diverges remote branches from what
+   jj pushed.** Re-verified: after a partial merge, the surviving PR's branch
+   was force-moved to a GitHub-created commit. This is unchanged, and with
+   merge no longer the blocker, **it is now the sharpest remaining problem**
+   for a jj tool.
 
-Net: worth prototyping the read/capability path against; not shippable while
-merge is browser-only, the schema is preview-grade, and access is gated.
+The single most actionable consequence, independent of whether jjpr ever
+*creates* native stacks: because every repo now has the feature, a user can
+stack jjpr's PRs with `gh-stack` at any time, and jjpr's own
+`PUT /pulls/{n}/merge` will `403` on them. jjpr should detect stack
+membership (`stack != null` on the PR payload) and route to `merge-async`.
+That is a small, well-specified change and it is no longer blocked on
+anything. See [Potential route for jjpr](#potential-route-for-jjpr).
 
 ## Roadmap and rollout
 
 | Field | Value | Source |
 |---|---|---|
+| Announcement | [Public preview, 2026-07-30](https://github.blog/changelog/2026-07-30-stacked-pull-requests-are-now-in-public-preview/) | GitHub Changelog |
 | Roadmap issue | [github/roadmap#1218](https://github.com/github/roadmap/issues/1218) | GitHub Roadmap |
-| Title | "Pull request stacks [Preview]" | Roadmap |
-| Status | Private preview (open, not GA) | Roadmap |
-| Plans listed | GitHub Team, GitHub Enterprise | Roadmap |
-| Broader rollout target | Q2 2026 target has slipped; no new date | Roadmap |
-| Waitlist | `gh.io/stacksbeta` | Roadmap |
-| Repo enablement | Per-repo, by GitHub | gh-stack README |
+| Status | **Public preview** (not GA) | Changelog |
+| Rollout | "rolling out to all repositories over the coming days" | Changelog |
+| Merge queue | Rolling out "progressively over the coming weeks" — **not yet everywhere** | Changelog |
+| Waitlist | **Gone** — no signup required | Verified live |
+| Plans | Works on **personal Free** repos (verified live) | Live probe |
+| Docs | `gh.io/stacks`; feedback at `gh.io/stacks-feedback` | Changelog |
+| Stack size limit | **100 PRs** per stack | gh-stack FAQ |
 
-GitHub Free is not listed on the roadmap entry. Plan availability after
-GA is not committed. No GA announcement has appeared on the
-[GitHub Changelog](https://github.blog/changelog/) as of the verification
-date.
+**The roadmap entry is stale.** As of 2026-07-30 it still reads "Feature
+phase: Preview" with only GitHub Team and GitHub Enterprise plan labels, and
+is listed "Up Next". The live API contradicts it: a personal **Free**-plan
+private repo returns `200` from `/stacks` and merged a stack successfully.
+The canonical docs page is published under `free-pro-team@latest` (plus
+Enterprise Cloud and Enterprise Server 3.17–3.21), which corroborates Free/Pro
+availability. Trust the API and the docs versioning over the roadmap labels.
+
+The [community feedback discussion](https://github.com/orgs/community/discussions/201439)
+is the liveliest source of real-world breakage. Recurring reports as of this
+visit: merge-queue repos still getting `404`s (consistent with the staged
+rollout), conflicts not surfacing in the UI until after a rebase, and merge
+buttons staying green when a rebase is actually required. GitHub staff
+engagement in the thread is minimal. Open user requests with no official
+answer include CLI merge visibility of approvals, forced sequential merging,
+cross-repository (fork) stacks, and PAT compatibility.
 
 ## CLI: `github/gh-stack` extension
 
 Distributed as a `gh` extension, not bundled into `gh`. The
 [cli/cli](https://github.com/cli/cli/releases) core (latest v2.96.0,
-2026-07-02) has **not** absorbed a built-in `gh pr stack` / `gh stack`
-subcommand; the extension is still the only surface.
+2026-07-02 — unchanged since the last visit) has **not** absorbed a built-in
+`gh pr stack` / `gh stack` subcommand; `pkg/cmd/pr/` contains no `stack`
+directory. The extension is still the only CLI surface.
+
+`gh extension search stack` also surfaces unrelated third-party extensions
+(`boneskull/gh-stack`, `VladimirAnaniev/gh-stack`, `ThePlenkov/gh-stackx`,
+`134130/gh-domino`, `harsh183/gh-chain`) that predate the native feature and
+implement their own stacking. Only `github/gh-stack` drives the native API.
 
 ```
 gh extension install github/gh-stack
@@ -87,6 +117,7 @@ gh extension install github/gh-stack
 | v0.0.6 | 2026-06-15 | Rebase without trunk flag; PR-URL args; **PAT-auth warning** |
 | v0.0.7 | 2026-06-30 | Interactive submit TUI; light/dark theming; adopt existing remote stacks |
 | v0.0.8 | 2026-07-15 | **Migrated to the public Stacks REST API**; stack numbers are primary IDs; `link` appends to a stack by number; append-only updates |
+| v0.1.0 | 2026-07-29 | **`gh stack merge` — the merge block is lifted.** Atomic partial-stack merge via the new async merge API; interactive wizard + `--yes`/`--merge`/`--squash`/`--rebase` for headless use; auto-routes to direct merge or merge queue. Also fixes: `link` ignored the repo default branch; `rebase`/`sync` could report success on a stale trunk; amended parent commits replayed into child branches |
 
 ### Subcommands
 
@@ -102,19 +133,30 @@ and navigation verbs alongside the originals.
 | `gh stack link` | Append existing PRs into a stack (by stack number) | Implemented |
 | `gh stack rebase` / `sync` | Rebase/sync the stack against trunk | Implemented |
 | `gh stack unstack` | Remove unmerged PRs from a stack | Implemented |
-| `gh stack merge` | Merge a stack | **Not implemented** (no CLI command, no REST endpoint) |
+| `gh stack merge` | Merge a stack, or part of one | **Implemented (v0.1.0)** — see [Async merge API](#async-merge-api--the-merge-block-is-lifted) |
 
 ## API
 
-There is now a **documented REST API**, but only on the
+The REST API is now published in the **canonical**
+[docs.github.com/en/rest/pulls/stacks](https://docs.github.com/en/rest/pulls/stacks)
+reference (it 404'd at the last visit), alongside the
 `github.github.com/gh-stack` Pages site
-([reference/rest-api](https://github.github.com/gh-stack/reference/rest-api/)).
-It is **absent** from the canonical
-[docs.github.com/en/rest/pulls](https://docs.github.com/en/rest/pulls)
-reference (`/en/rest/pulls/stacks` 404s), and there are **no** stack
-additions in the
-[GraphQL changelog](https://docs.github.com/en/graphql/overview/changelog)
-(no `pullRequestStack`, `linkedPullRequest`, or `stack` schema entries).
+([reference/rest-api](https://github.github.com/gh-stack/reference/rest-api/),
+[reference/merge-api](https://github.github.com/gh-stack/reference/merge-api/)).
+The async merge endpoints are documented under
+[rest/pulls/pulls](https://docs.github.com/en/rest/pulls/pulls) ("Merge a pull
+request asynchronously", "Get the result of an asynchronous merge").
+
+GraphQL still exposes read-only stack *types* only — `PullRequestStack`,
+`PullRequestStackEntry`, `PullRequestStackEntryConnection`,
+`PullRequestStackEntryEdge` — and **no** stack or async-merge mutation
+(schema introspection of `Mutation` for `/[Ss]tack|MergeAsync/` returns
+nothing). REST is the only write surface.
+
+**GitHub App permission**: resolved. The stacks endpoints are listed on the
+[App permissions reference](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
+under the ordinary repository **"Pull requests"** permission. There is no
+dedicated stacks scope.
 
 ### Endpoints
 
@@ -128,7 +170,65 @@ additions in the
 | GET | `/repos/{owner}/{repo}/pulls[/{n}]` | Existing PR endpoints, now embedding a `stack` object | 200 |
 
 `404 Not Found` is returned when the feature is disabled for the repo — this
-doubles as the capability check.
+doubles as the capability check. Since public preview this should be rare;
+every repo probed on 2026-07-30 returned `200`.
+
+`POST /stacks` is **strictly typed**: `{"pull_requests": ["220"]}` (strings)
+is rejected `422` with `` `"220"` is not of type `integer` ``. Send real JSON
+integers.
+
+### Async merge API — the merge block is lifted
+
+The headline change of 2026-07-30. Merging a stacked PR is now possible
+through a **public, canonically-documented REST API**. Because a stack merge
+can span several PRs and take minutes, it runs in the background: you submit,
+then poll.
+
+| Method | Path | Purpose |
+|---|---|---|
+| PUT | `/repos/{o}/{r}/pulls/{n}/merge-async` | Submit a merge of PR `n` **and everything below it in the stack** |
+| GET | `/repos/{o}/{r}/pulls/{n}/merge-async/{uuid}` | Poll the result |
+
+This is the **required** path for stacked PRs — the legacy synchronous
+`PUT /pulls/{n}/merge` and the `mergePullRequest` GraphQL mutation still
+refuse them (re-verified: `403`, message unchanged and now stale, still
+saying "Use the web interface instead").
+
+Submit body — all fields optional:
+
+| Field | Values | Notes |
+|---|---|---|
+| `merge_method` | `merge` \| `squash` \| `rebase` | Defaults to a merge commit. Not supported with `merge_queue` |
+| `merge_action` | `default` \| `direct_merge` \| `merge_queue` | `default` (= omitted) auto-routes: direct merge, or the base branch's queue if it requires one |
+| `commit_title`, `commit_message` | string | Not supported with `merge_queue` |
+| `sha` | string | **Optimistic-concurrency guard** — the merge is rejected unless the PR head still matches |
+
+Submit responses: `202` pending (carries the `uuid` to poll), `200` already
+merged, `409` a request already exists (**the body carries the existing
+`uuid`**), `400` not mergeable (closed/draft), `404` unavailable, `422` body
+validation failure.
+
+Poll responses are always `200` for a valid uuid, carrying
+`status` ∈ `pending` | `merged` | `enqueued` | `failed` and a polymorphic
+`details` object (`uuid`/`merge_method`/`merge_action`/`expected_head_sha`
+while pending; `sha` when merged; `message` always). Results are retained
+**24 hours**, then the uuid `404`s. GitHub's docs suggest polling once a
+second.
+
+Semantics that matter:
+
+- **Atomic — on a direct merge.** Either every PR up to and including the
+  target lands, or none does. **Not so under a merge queue**: the CLI
+  reference says queued members "may land in separate groups rather than all
+  at once", and an explicit merge method is ignored (the queue picks).
+- **Partial merges are first-class.** Targeting the middle PR of a 3-stack
+  merges the bottom two and leaves the top — verified.
+- **Only basic PR state is checked at submit** (open, not draft). Branch
+  protection and rulesets are evaluated when the merge *runs*, so a rule
+  failure arrives as a `failed` **poll result**, not a submit error.
+- **Bypassing merge requirements is not supported** — admin override cannot
+  force a stack through its rules.
+- **Auto-merge is not supported** on a stacked PR.
 
 ### Schema
 
@@ -172,8 +272,9 @@ read-only GETs, no writes). Findings that the Pages docs don't state:
 - **404 body cites a canonical docs path**: a disabled repo returns
   `{"message":"Not Found", "documentation_url":
   "https://docs.github.com/rest/pulls/stacks#list-pull-request-stacks", ...}`.
-  That `docs.github.com/rest/pulls/stacks` page still 404s today, but the API
-  already links it — official REST-reference publication looks imminent.
+  That `docs.github.com/rest/pulls/stacks` page 404'd at the time — the
+  prediction that publication was imminent proved correct; it went live by
+  2026-07-30.
 - **Single-stack GET is much richer than the list.** `GET /stacks/{n}`
   embeds near-full PR objects per entry: `url, id, number, node_id, title,
   state, draft, merged_at, html_url, user{login,...}`, and crucially
@@ -203,15 +304,26 @@ behaviors, all confirmed against live responses:
   issue/PR sequence — e.g. PRs 1–3 yielded stack 4).
 - **`POST /stacks/{n}/add`** — same body `{"pull_requests": [...]}`. Returns
   `200`, appends to the top.
-- **`POST /stacks/{n}/unstack`** — body `{"pull_requests": [...]}`, but the
-  operation **dissolves the whole stack**: naming only the top PR of a 3-PR
-  stack returned `204` and removed all three (`GET /stacks` → `[]`, every
-  PR's `stack` field `null`). It does **not** retarget PR bases — each PR
-  keeps the chained base it had (PR2 stayed `base: change-1`, etc.). Treat
-  unstack as all-or-nothing in the preview; "remove one PR" is not available.
-  (The docs' "200 if the stack survives" was never observed.)
+- **`POST /stacks/{n}/unstack`** — the `pull_requests` body is **ignored**;
+  the operation always tries to remove every member. Naming only the top PR
+  of a 3-PR stack returned `204` and removed all three. It does **not**
+  retarget PR bases. "Remove one PR" is not available.
+  (Re-verified and refined 2026-07-30 — see
+  [Unstack semantics](#unstack-semantics--re-verified-2026-07-30) for the
+  `200` vs `204` distinction and the merged-PR case, which is what the docs'
+  "200 if the stack survives" line refers to.)
 
-**The critical finding — merging a stacked PR via the API is blocked.**
+> **SUPERSEDED 2026-07-30.** The merge block described in the rest of this
+> section was lifted at public preview. `PUT /pulls/{n}/merge-async` now
+> merges stacked PRs through the public API — see
+> [Async merge API](#async-merge-api--the-merge-block-is-lifted). What is
+> still accurate here: the *legacy* `PUT /pulls/{n}/merge` continues to `403`
+> on a stacked PR, and the cascade-rebase description below still holds
+> (it now also follows an API merge, not only a web/queue one). Retained as a
+> dated record.
+
+**The critical finding (as of 2026-07-21) — merging a stacked PR via the API
+is blocked.**
 `PUT /repos/{o}/{r}/pulls/{n}/merge` on a PR that belongs to a native stack
 returns `403`:
 
@@ -334,22 +446,224 @@ rebase (depends on merge method under dismiss-stale — see Lessons) and per-PR
 review gating (confirmed, below). Still open: CODEOWNERS interaction, and
 whether the web/queue merge refuses to start until the whole stack is green.
 
+### Live verification — public preview (2026-07-30)
+
+Built and merged a real 3-PR linear stack in `michaeldhopkins/forge-e2e-sandbox`
+(a **personal, Free-plan, private** repo — itself the proof that gating is
+gone) using an ordinary `gho_` OAuth token with the `repo` scope. Branches
+`ns0730-a/b/c`, PRs 220/221/222, stack **223**. Everything below is a live
+observation, and the sandbox was cleaned up afterwards.
+
+**Setup.** `POST /stacks {"pull_requests":[220,221,222]}` → `201`, stack
+number 223 drawn from the repo's issue/PR sequence, `node_id` prefix `PRS_`,
+`open: true`, per-PR bases chained `main` ← `ns0730-a` ← `ns0730-b`. Matches
+the previously-recorded shape exactly.
+
+**Legacy merge paths still refuse stacked PRs.**
+`PUT /pulls/220/merge` → `403 "Merging stacked PRs via this API is not
+supported. Use the web interface instead."` The message is now misleading —
+the web interface is no longer the only option — but the block itself is
+intact and is what jjpr will hit today.
+
+**Partial stack merge, end to end.** `PUT /pulls/221/merge-async` (the
+**middle** PR) with `{"merge_method":"merge","merge_action":"default"}` →
+`202 pending`. Polling returned `merged` on the second poll, roughly four
+seconds later. Result:
+
+- PRs **220 and 221 both merged**, `merged_at` one second apart — an atomic
+  two-PR landing from a single request.
+- Trunk received **one merge commit**, not one per PR: `main` went
+  `c1438a3b` → `c42b50a9`, whose parents are the old trunk and `ns0730-b`'s
+  tip. Because `ns0730-b` already contained `ns0730-a`'s commit, a single
+  merge commit credits both PRs.
+- PR **222 was retargeted straight to `main`**, skipping the intermediate
+  merged branch entirely (`base: ns0730-b` → `base: main`) — the retarget
+  jumps levels rather than walking down one.
+- PR 222 was **rebased server-side**: head `19f7eb4c` → `fa1081de`, a commit
+  GitHub authored (same author and author-date, new committer date),
+  reparented onto the new trunk tip.
+- The stack kept `size` 3 and every `position`; merged members stay in it.
+
+**The divergence is re-confirmed, and it is the live problem for jjpr.** The
+original pushed commit `19f7eb4c` still exists as a git object but is no
+longer what `refs/heads/ns0730-c` points at — GitHub force-moved the branch to
+its own rebased commit. This is exactly the reconcile burden flagged
+previously, and it fires on the *merge-commit* path where the descendant did
+not strictly need rebasing (its parent `0d136902` is an ancestor of the new
+trunk). GitHub rebases regardless of merge method.
+
+**`merge-async` also works on non-stacked PRs.** PR 224 (`stack: null`,
+plain PR targeting `main`) submitted fine and merged with `merge_method:
+squash`. The endpoint is a general asynchronous merge, not a stack-only one —
+which means jjpr *could* use a single merge path for both cases, though it
+does not have to.
+
+**Validation and failure behavior** (probed against PR 222):
+
+| Probe | Result |
+|---|---|
+| `merge_method: "fast-forward"` | `422` — "Must be one of: merge, squash, rebase" |
+| `merge_action: "teleport"` | `422` — "Must be one of: default, direct_merge, merge_queue" |
+| `sha` set to a stale head | `400`, body `{"status":"failed","details":{"message":"Pull request head branch was modified."}}` |
+| `merge_action: "merge_queue"` on a repo with no queue | **`202` accepted**, then `failed` at poll: "Cannot perform a merge queue merge for a branch with no merge queue" |
+| Second submit while one is pending | `409`, body carries the **existing** request's `uuid`, `merge_method` and `expected_head_sha` |
+| Poll a terminal uuid again | Same terminal result — idempotent |
+| Poll a bogus uuid | `404` |
+
+Two corrections to `gh-stack`'s own source comments, both of which a jjpr
+implementation should not inherit:
+
+1. `merge_async.go` claims "the server rejects `merge_queue` on a branch with
+   no queue rather than silently merging directly." It does reject, but
+   **asynchronously** — submit returns `202`, and the rejection only appears
+   at poll time. A caller cannot learn the outcome from the submit status
+   code; it must poll. (Nothing was merged, so atomicity held.)
+2. `classifyAsyncMergeError` notes the `409`'s existing uuid "isn't recovered
+   here" because go-gh discards non-2xx bodies. That is a limitation of
+   `gh-stack`'s HTTP client, not the API — **the `409` body does contain the
+   uuid**. jjpr reads bodies with `ureq` and can recover and resume the
+   in-flight merge instead of erroring.
+
+**Lifecycle close.** Merging the last PR (222, `squash`) flipped stack 223 to
+`open: false`. It remains listed by `GET /stacks` as a closed stack.
+
+**Merge queue** could not be exercised — the sandbox has no queue configured
+(`enqueuePullRequest` → "Merge queues are not enabled"), and per the changelog
+queue support is still rolling out. Community reports of `404`s on
+queue-enabled repos suggest it is genuinely not everywhere yet.
+
+### Unstack semantics — re-verified (2026-07-30)
+
+The `gh stack unstack` CLI docs describe *partial* removal ("when some pull
+requests remain stacked, the stack is kept"), which appeared to contradict the
+2026-07-21 API finding that unstack dissolves everything. Both are correct;
+they describe different mechanisms. Verified with two fresh stacks.
+
+**The `pull_requests` request body is ignored.** On a 4-PR stack (225–228),
+`POST /stacks/{n}/unstack` with `{"pull_requests":[228]}` — naming only the
+top PR — returned `204` and removed **all four**; `GET /stacks/{n}` then
+`404`s and every PR's `stack` is `null`. The original "all-or-nothing" note
+was right. The canonical reference now documents the body as *None*, matching
+this; an earlier revision of the Pages docs showed a `pull_requests` body.
+
+**Merged PRs are pinned and cannot be removed** — this is the partial case.
+On a 3-PR stack (230–232) with the bottom PR merged first, unstack returned
+**`200`** (not `204`), and:
+
+- the merged PR **stayed** in the stack (`#230`, now reported `position 1/1`),
+- the stack **survived** with `open: false`,
+- both open PRs (`#231`, `#232`) became `stack: null` — freed.
+
+So the status code is meaningful and worth branching on:
+
+| Code | Meaning |
+|---|---|
+| `204` | Every member removed; stack dissolved and now `404`s |
+| `200` | Stack survives — it still holds PRs that cannot be removed (merged/merging/queued); the body is the surviving stack |
+
+**Bases are still not retargeted by unstack.** After the run, `#232` kept
+`base: um0730-f`. (`#231` showed `base: main`, but that was GitHub's cascade
+retarget when `#230` merged, not an unstack effect.)
+
+**Consequence for the Tier-1 remedy**: unstacking works even mid-merge. If
+jjpr has already landed part of a stack and then the user unstacks, the
+remaining open PRs are freed and jjpr's ordinary `PUT /pulls/{n}/merge`
+works on them. The merged PRs staying pinned is cosmetic.
+
+### No web URL for a stack
+
+The stack resource carries only an **API** `url`
+(`api.github.com/repos/{o}/{r}/stacks/{n}`) — there is **no `html_url`**. The
+`stack` object embedded on a pull request is leaner still: exactly
+`base{ref,sha}`, `id`, `number`, `position`, `size` — no URL of any kind.
+
+`gh-stack` never constructs a stack web URL either: `/stacks/` appears in its
+Go sources only in API paths and tests. So there is no documented
+`github.com/{owner}/{repo}/stacks/{n}` page to link to, and inventing one
+would be a guess that may 404.
+
+For jjpr this means: **name the stack by number, and link the PR** (which
+does have `html_url`). Do not synthesize a stack URL.
+
+### PAT verification — RESOLVED (2026-07-30)
+
+The question open since 2026-07-21 — *does a personal access token get a `200`
+from `/stacks` on an enabled repo?* — is **answered: yes.**
+
+A fine-grained PAT (`github_pat_…`) against `michaeldhopkins/jjpr`:
+
+```
+GET /repos/michaeldhopkins/jjpr/stacks   ->  HTTP 200   []
+x-accepted-github-permissions: pull_requests=read
+x-github-api-version-selected: 2022-11-28
+x-ratelimit-limit: 5000   x-ratelimit-resource: core
+```
+
+Same status, same API version, same `core` rate-limit bucket as the OAuth
+token. The CLI's anti-PAT warning is a `gh-stack` flow choice, not an API
+restriction. **jjpr's PAT-authenticating users are fine for the read path.**
+
+A false lead worth recording so it isn't re-chased: the first probe used
+`forge-e2e-sandbox` and returned `404` — but that PAT's repo selection does
+not include the sandbox, and `GET /repos/{owner}/{repo}` on it *also* `404`s.
+A `404` from `/stacks` means "no access to this repo **or** feature not
+enabled"; the two are indistinguishable. Always confirm the token can see the
+repo itself before reading anything into a `/stacks` 404.
+
+**The `x-accepted-github-permissions` response header is the authoritative
+permission source** — better than the docs page, and it comes back even on
+error responses:
+
+| Call | Required permission | Observed |
+|---|---|---|
+| `GET /stacks` | `pull_requests=read` | `200` with a read PAT |
+| `POST /stacks` (create) | `pull_requests=write` | `403` — this PAT lacks it |
+| `PUT /pulls/{n}/merge-async` | **`contents=write`** | `404` (nonexistent PR; no side effect) |
+
+Two things to carry into an implementation:
+
+- **`merge-async` requires `contents=write`, not a pull-request permission.**
+  Non-obvious, and it differs from every other stacks endpoint. It is the same
+  shape as the ordinary merge endpoint (merging writes to a branch), and any
+  jjpr user who can push already has it — but a token minted for read-only PR
+  work will fail, and the failure mode is a bare `404`, not a clear `403`.
+- The `403` on `POST /stacks` is **this PAT's missing scope, not a categorical
+  PAT block** — the message is GitHub's standard "Resource not accessible by
+  personal access token" for a fine-grained token lacking a declared
+  permission. Not proven to the same standard as the read path: it would take
+  a PAT holding `pull_requests: write` on a throwaway repo to close properly.
+
 ### Still undocumented / unverified
 
-Live probing (above) answered most of the original blockers — a `repo`-scoped
-token works, the API version is standard `2022-11-28`, and rate limits are the
-ordinary `core` bucket. What remains:
+Most of the original list is now resolved: a `repo`-scoped OAuth token works
+for both read and merge, the API version is standard `2022-11-28`, rate limits
+are the ordinary `core` bucket, the GitHub App permission is plain "Pull
+requests", and the schema is canonically published. What remains:
 
-- **PAT 200 on an enabled repo**: PAT auth is accepted by the endpoint (shown
-  by an identical not-enabled 404, not a 401/403 — see Live verification), but
-  a literal 200 from `/stacks` with a PAT still needs a PAT that can reach a
-  preview-enabled repo. Confirm before shipping, e.g. once the org approves a
-  fine-grained PAT (Pull requests: read) for the enabled repo.
-- **GitHub App permission**: no dedicated scope documented; presumably rides
-  on pull-request read permission, untested.
-- **Canonical publication**: the schema still lives only on the Pages site
-  (the `docs.github.com/rest/pulls/stacks` URL the API cites 404s). Until it
-  lands there, the shape is preview-grade — tolerate unknown/extra fields.
+- **PAT `200` on an enabled repo**: still not literally observed. All live
+  work has used a `gho_` OAuth token; no PAT was available in this session.
+  The evidence remains indirect (a PAT authenticates and gets the same
+  not-enabled `404` as OAuth rather than a `401`/`403`). Users in the
+  [community discussion](https://github.com/orgs/community/discussions/201439)
+  are asking about PAT support for agent/automation use with no official
+  answer, so treat it as genuinely open. This matters for jjpr: many users
+  authenticate with a PAT via `GITHUB_TOKEN`. **Verify before shipping any
+  native-stack code path.**
+- **Merge queue interaction**: unexercised (no queue on the sandbox; feature
+  still rolling out). The routing contract is documented but unverified, and
+  the `enqueued` terminal status means the caller must track the queue
+  separately for the final outcome.
+- **Approval survival under the async merge.** The 2026-07-22 finding — that a
+  merge-commit landing preserves an upstream approval while a squash landing
+  dismisses it under `dismiss_stale_reviews_on_push` — was verified against a
+  **web-UI** merge with a second reviewer. Whether the async merge API behaves
+  identically is untested (no second reviewer available this session). It
+  probably does, since it is the same server-side machinery, but the whole
+  "jjpr gap" argument rests on it.
+- **CODEOWNERS interaction** and whether a stack merge refuses to start until
+  every member is green — still unverified.
+- **Schema stability**: canonical publication is a real signal, but the
+  feature is still labelled preview. Keep tolerating unknown/extra fields.
 
 ## Operations supported by the native feature
 
@@ -359,22 +673,35 @@ ordinary `core` bucket. What remains:
 | List / visualize stack | Yes (`gh stack view`, web UI map) | Yes (`GET /stacks`) | UI remains the primary consumption surface |
 | Append PR to existing stack | Yes (`gh stack link`) | Yes (`POST /stacks/{n}/add`) | Append-only; adds to the top |
 | Remove PR from stack | Yes (`gh stack unstack`) | Yes (`POST /stacks/{n}/unstack`) | Only unmerged PRs |
-| Cascading rebase of the stack on merge | Yes — verified | Follows a web/queue merge only | Merging the bottom PR retargets the next PR's base to trunk AND rebases every remaining branch to fresh SHAs (all descendants, not one level); review decisions survive. NOT triggered by an API merge (blocked). Rebased SHAs diverge from what jj pushed |
-| Merge a PR that's in a stack | Web UI / merge queue only | **Blocked** | `PUT /pulls/{n}/merge` returns `403` for a stacked PR (verified live); unstack first and it merges. No REST merge path for stacked PRs |
+| Cascading rebase of the stack on merge | Yes — verified | Follows any merge, incl. the async API | Retargets the surviving PR's base straight to trunk (skipping levels) AND rebases remaining branches to fresh SHAs, regardless of merge method. Rebased SHAs diverge from what jj pushed |
+| Merge a PR that's in a stack | Yes | **Yes — `merge-async`** | `PUT /pulls/{n}/merge-async` + poll (verified live). The legacy `PUT /pulls/{n}/merge` still `403`s on a stacked PR |
+| Atomic partial-stack merge | Yes (`gh stack merge <pr>`) | Yes | Merges everything up to and including the target PR; all-or-nothing **on a direct merge** (verified live). Under a merge queue members may land in separate groups |
+| Merge a *non*-stacked PR asynchronously | — | Yes | `merge-async` is a general endpoint, not stack-only (verified on a `stack: null` PR) |
 | Stack-aware CI semantics | Yes (CI against final target) | — | Per the stacked-PRs guide |
+| Auto-merge on a stacked PR | **No** | No | Explicitly unsupported |
+| Bypass merge requirements as admin | **No** | No | Explicitly unsupported for stacks |
 | Diamond / non-linear stack support | **No** | No | FAQ: "There must be a fully linear history between each of the branches in the stack" |
+| Stack size | up to **100 PRs** | — | FAQ; split into multiple stacks beyond that |
 
 ## Merge queue and auto-merge interaction
 
-Merge queue (GA) is documented as compatible with native stacks per the
-[gh-stack FAQ](https://github.github.com/gh-stack/faq/): a stack can be
-merged via merge queue, all PRs are queued in order, and ejection cascades
-upward. **But a tool cannot drive this via the public API.** Verified live:
-with a merge queue configured, `enqueuePullRequest` on a stacked PR is
-rejected ("must be merged sequentially using the stack merge API"). Whatever
-queue integration exists is orchestrated by GitHub's internal stack merge API
-behind the web UI, not by public `enqueuePullRequest`. See "No public API can
-merge a stacked PR" above.
+Merge queue is documented as compatible with native stacks per the
+[gh-stack FAQ](https://github.github.com/gh-stack/faq/): all PRs in the stack
+enter the queue together in the correct order and are evaluated individually
+from the bottom up. A tool **can** now drive this — not via
+`enqueuePullRequest` (still rejected for stacked PRs) but through
+`merge-async` with `merge_action: "merge_queue"`, or `"default"`, which routes
+to the queue automatically when the base branch requires one. A queued stack
+returns the terminal status `enqueued`; the caller must then track the merge
+queue itself for the final outcome.
+
+Caveats, both unresolved as of 2026-07-30: queue support is explicitly still
+"rolling out progressively over the coming weeks", and users on queue-enabled
+repos are reporting `404`s in the
+[community discussion](https://github.com/orgs/community/discussions/201439).
+This path is also **unverified locally** — the sandbox has no queue. Forcing
+`merge_action: "merge_queue"` on a branch without a queue is accepted at
+submit and fails only at poll time (verified).
 
 PR auto-merge (GA, GraphQL `enablePullRequestAutoMerge`) is not
 stack-aware. Enabling it on individual PRs in a stack delegates the merge
@@ -403,12 +730,20 @@ internal optimization.
 
 ## Plan and access gating
 
-- **Plans on the roadmap**: Team, Enterprise. Free users will not get the
-  preview. GA plan availability is not committed.
-- **Per-repo enablement**: Stacks are toggled on per repository by GitHub
-  during preview. Tools cannot assume a repo supports stacks; the `404`
-  from the stacks endpoints is the capability check.
-- **Waitlist**: Access requires individual sign-up at `gh.io/stacksbeta`.
+Rewritten 2026-07-30 — the previous content (Team/Enterprise only, per-repo
+enablement, `gh.io/stacksbeta` waitlist) is obsolete.
+
+- **Plans**: works on **personal Free-plan** repos — verified live by creating
+  and merging a stack in a private Free-plan repo. The canonical docs page is
+  published under `free-pro-team@latest`, Enterprise Cloud, and Enterprise
+  Server 3.17–3.21. The roadmap issue's Team/Enterprise labels are stale.
+- **Waitlist**: none. Removed at public preview.
+- **Enablement**: rolling out to all repositories. The `404` from the stacks
+  endpoints remains the correct capability check — cheap, safe on any repo,
+  and still meaningful for GitHub Enterprise Server and during the tail of the
+  rollout. Keep it; just expect `200` far more often than not.
+- **Merge queue**: the one genuinely staged piece, "rolling out progressively
+  over the coming weeks". Do not assume queue routing works yet.
 
 ## Implications for third-party stacking tools
 
@@ -417,15 +752,17 @@ stable API:
 
 - **Custom stack-comment generation**. The native UI renders a stack map.
   PR-body navigation comments become redundant.
-- **Cascading rebase of the stack after a merge** — *verified*, with two
-  catches. On a web-UI/merge-queue merge, GitHub retargets the next PR's base
-  to trunk and rebases every remaining branch onto the new trunk tip, keeping
-  the stack clean, and preserves review decisions across the rebase. Catch
-  one: it only follows a web/queue merge, not an API merge (blocked for stacked
-  PRs). Catch two, and it is the sharp one for jjpr: the rebase rewrites the
-  remote branches to SHAs jj did not push, so jj sees divergence on the next
-  fetch and jjpr must reconcile. For a jj tool this "GitHub rebases for you" is
-  as much a problem as a convenience.
+- **Cascading rebase of the stack after a merge** — *verified*. GitHub
+  retargets the surviving PR's base straight to trunk and rebases every
+  remaining branch onto the new trunk tip, keeping the stack clean. The
+  earlier catch that this only followed a web/queue merge is **obsolete**: the
+  async merge API triggers the same cascade. The remaining catch is the sharp
+  one for jjpr: the rebase rewrites remote branches to SHAs jj did not push,
+  so jj sees divergence on the next fetch and jjpr must reconcile. For a jj
+  tool this "GitHub rebases for you" is as much a problem as a convenience.
+- **Stack-wide merge sequencing.** `merge-async` lands a whole stack, or any
+  bottom-up prefix of it, atomically in one call. jjpr's own sequential
+  merge loop is more code for a weaker guarantee on repos that have this.
 
 What tools keep owning even after GA:
 
@@ -440,14 +777,33 @@ What tools keep owning even after GA:
   from this.
 - **Diamond / non-linear stacks**. GitHub requires fully linear history;
   jjpr's supported diamond shapes have no native representation.
-- **Stack-wide merge sequencing** until a `gh stack merge` / merge endpoint
-  exists.
+- **Reconciling jj's local commits with GitHub's server-side rebase.** Nothing
+  in the native feature helps here; it is the source of the problem.
+- **Merge on repos without native stacks, and on every other forge.** GitLab,
+  Forgejo and Bitbucket get nothing from any of this.
+
+(Removed from this list on 2026-07-30: "stack-wide merge sequencing until a
+`gh stack merge` / merge endpoint exists" — both now exist.)
 
 ## Potential route for jjpr
 
-A phased path, cheapest-and-safest first. Nothing here is buildable to
-production today (preview-gated, undocumented auth), but this is the shape
-to prototype toward.
+A phased path, cheapest-and-safest first. **This is now buildable** — the
+gating, auth and merge blockers are gone and the schema is canonically
+published. Step 0 is the one that should happen regardless of whether jjpr
+ever supports native stacks at all.
+
+0. **Stop `jjpr merge` breaking on someone else's stack. (Do this first.)**
+   Every repo now has native stacks, so any user can run `gh stack submit` on
+   jjpr's PRs — or click the UI — and jjpr's `PUT /pulls/{n}/merge` will
+   `403` with a message telling them to use the web interface. That is a
+   live, user-visible break that costs jjpr nothing to have caused. The PR
+   payload already carries `stack` (null when unstacked), so detection is
+   free on data jjpr may already fetch. Then either (a) route to
+   `merge-async` and poll — the honest fix, and jjpr's `watch` already owns a
+   poll loop to model it on — or (b) at minimum, explain precisely what
+   happened instead of surfacing a raw 403. Note this changes merge
+   semantics: merging a stacked PR lands **every PR below it too**, so jjpr
+   must say so before doing it, per our defensive-design stance.
 
 1. **Capability probe (no commitment).** Add a `Forge` method that does a
    `GET /repos/{owner}/{repo}/stacks` and treats `404` as "native stacks
@@ -461,49 +817,66 @@ to prototype toward.
    ordering, and surface the native stack in `status` output. Read-only:
    no mutation, no PR-state change, degrades cleanly when absent.
 
-3. **Opt-in native linking — with a hard tradeoff.** Behind a config flag
-   (default off), after jjpr pushes and opens its PRs, call `POST /stacks`
-   (body `{"pull_requests": [bottom→top]}`) or `POST /stacks/{n}/add` to
-   register them as a native stack. This replaces our PR-body navigation
-   comments with GitHub's native map. But registering a native stack
-   **disables API merge for those PRs** (see below): jjpr's own `merge`/
-   `watch` would 403 on them until the stack is dissolved. So native linking
-   and jjpr-driven merge are mutually exclusive per-PR. Opt-in and off by
-   default, and clearly surfaced, per our defensive-design stance.
+3. **Opt-in native linking — the tradeoff is now much smaller.** Behind a
+   config flag (default off), after jjpr pushes and opens its PRs, call
+   `POST /stacks` (body `{"pull_requests": [bottom→top]}`) or
+   `POST /stacks/{n}/add` to register them as a native stack, replacing
+   jjpr's PR-body navigation comments with GitHub's native map. Previously
+   this was near-disqualifying because it disabled API merge; with
+   `merge-async` available that objection is gone. What remains is the
+   reconciliation cost in step 4 and the linear-only restriction.
 
-4. **Merge stays entirely jjpr's — and native stacks actively break it.**
-   Verified live: `PUT /pulls/{n}/merge` returns `403` for any PR in a native
-   stack ("Merging stacked PRs via this API is not supported"); there is no
-   REST stack-merge endpoint. Two consequences: (a) jjpr cannot delegate
-   merge to the native feature, and (b) jjpr's *existing* merge breaks on a
-   PR someone stacked via `gh-stack` even if jjpr never opts in. `jjpr merge`
-   should therefore detect stack membership (the PR's `stack` field is
-   non-null) and, rather than emitting a raw 403, either explain it or offer
-   to `unstack` first (unstack, then `PUT /merge` succeeds — proven).
+4. **The unsolved problem is reconciliation, not merge.** GitHub's cascade
+   rebase force-moves remote branches to commits **jj never created**
+   (re-verified 2026-07-30). After a native stack merge, `jj git fetch` sees
+   bookmarks pointing at unknown commits and jjpr must decide: adopt
+   GitHub's rebased commits (abandoning the local ones, and with them jj's
+   change identity), or re-push its own and undo GitHub's rebase. Neither is
+   free, and jjpr's existing post-merge reconcile (`jj rebase -s <root> -d
+   <trunk>` in `src/merge/execute.rs`) assumes jjpr owns the rewrite. **This
+   now deserves the design attention that merge used to absorb.** Note the
+   already-implemented `is_rooted_in` skip (v0.35.0) is the right instinct
+   but solves a different case — there jjpr chooses not to rewrite; here
+   GitHub rewrites without asking.
 
 Hard constraints to respect throughout:
 
-- **Native stacks break API merge — the top integration risk.** Detect stack
-  membership before any merge and handle it deliberately. This is true
-  regardless of whether jjpr ever creates stacks, because users can create
-  them independently with `gh-stack`.
-- **`unstack` is all-or-nothing.** It dissolves the whole stack (verified),
-  not a single PR, and does not retarget bases. If jjpr unstacks to merge, it
-  tears down the entire native grouping.
+- **Merging a stacked PR merges everything below it.** This is the semantic
+  jjpr must surface loudly. `merge-async` on the middle of a stack lands the
+  bottom two PRs atomically. A user asking jjpr to merge one PR must not
+  silently land three.
+- **Poll, don't trust the submit.** Rule failures, conflicts, and bad
+  `merge_action` routing all return `202` at submit and only surface as
+  `failed` at poll. Any jjpr implementation must treat the submit as
+  provisional and drive the poll to a terminal state.
+- **Use the `sha` guard.** jjpr force-pushes constantly, so a merge submitted
+  against a head that has since moved is a real race. Passing `sha` turns
+  that into a clean `400` instead of merging something unintended — this is
+  exactly the defensive posture jjpr already takes elsewhere.
+- **Recover the `409` uuid.** A duplicate submit returns the in-flight
+  request's uuid in the body; resume polling it rather than erroring out.
+  (`gh-stack` throws this away; jjpr's `ureq` client need not.)
+- **`unstack` ignores its body and frees every removable PR.** It cannot
+  remove a single PR, and does not retarget bases. Merged PRs stay pinned
+  (`200`, stack survives); with none pinned the stack dissolves (`204`).
+  Usable as an escape hatch even mid-merge, but it destroys the user's whole
+  native grouping — never do it on jjpr's own initiative.
 - **Linear-only.** The native API cannot represent jjpr's diamond stacks.
   The native path must be gated to linear segments and never be the only
   way to submit — our multi-shape support is a differentiator, not a
   fallback.
-- **Auth — mostly solved.** A `repo`-scoped token needs no special scope, and
-  a fine-grained PAT is accepted by the endpoint (both verified). jjpr's
-  `ureq` + `Bearer` path is exactly what was tested. Remaining: a PAT 200 on
-  an enabled repo (needs a PAT scoped to one) and GitHub App permissions.
+- **Auth — settled.** A `repo`-scoped OAuth token is proven for read *and*
+  merge; a fine-grained **PAT gets `200`** on the read path; the GitHub App
+  permission is plain "Pull requests". The one trap: `merge-async` requires
+  **`contents=write`**, unlike every other stacks endpoint, and a token
+  missing it fails with an opaque `404`. If jjpr ever calls `merge-async`, a
+  `404` should be reported as "the endpoint is unavailable **or** your token
+  lacks `contents: write`", never as a bare not-found.
 - **Forge-abstraction fit.** Any native-stack calls live behind the
   `Forge` trait as GitHub-only methods with no-op defaults, so GitLab and
   Forgejo backends are unaffected.
-- **Preview instability.** The schema lives on a Pages site, not the
-  canonical REST reference, and is append-only/preview. Don't serialize
-  against it rigidly; tolerate unknown fields.
+- **Still preview.** Canonically documented now, but not GA. Tolerate
+  unknown fields; don't serialize rigidly.
 
 ## Lessons for jjpr's own design
 
@@ -592,25 +965,34 @@ built theirs surfaces things jjpr can apply to its own implementation.
 
 Items that need verification on re-research, with the source to check:
 
-- **Auth — mostly answered** (see Live verification): a `repo`-scoped OAuth
-  token works with no special scope, and a **fine-grained PAT is accepted by
-  the endpoint** (not rejected like the CLI warns). Still open: a literal 200
-  from `/stacks` with a PAT on an enabled repo (needs a PAT with access to
-  one), and whether a **GitHub App** permission works.
-- **API publication to docs.github.com**. When does the schema move from the
-  Pages site into the canonical REST reference (a stability signal)? Watch
-  [docs.github.com/en/rest/pulls](https://docs.github.com/en/rest/pulls).
-- **Plan gating at GA**. Does Free get access? Check the roadmap entry
-  and the GA announcement.
-- **`gh stack merge` / merge endpoint**. Does one ever ship, and with what
-  semantics (squash vs merge vs rebase, partial-stack, queue interaction)?
-  Check [gh-stack releases](https://github.com/github/gh-stack/releases) and
-  the REST reference.
-- **`X-GitHub-Api-Version`** value and rate limits for the stacks endpoints.
-- **`gh stack` becoming a built-in subcommand**. The
-  [cli/cli](https://github.com/cli/cli) repo would be the source.
-- **Behavior when a PR in a stack is closed manually**. What happens to the
-  rest? Likely in the stacked-PRs guide once expanded.
+Answered on 2026-07-30 and struck from this list: API publication to
+docs.github.com (done), plan gating (Free works), `gh stack merge` / a merge
+endpoint (both shipped), GitHub App permission (plain "Pull requests"),
+`X-GitHub-Api-Version` and rate limits (standard `2022-11-28`, `core` bucket).
+
+Still open:
+
+- **PAT merge-async write path.** Read is now proven (see
+  [PAT verification](#pat-verification--resolved-2026-07-30)); a PAT actually
+  *driving* a merge is not, because no available PAT had both
+  `pull_requests: write` and access to a sandbox repo. The required permission
+  is known (`contents=write`), so this is a scoping exercise rather than an
+  unknown.
+- **Approval survival under the async merge API.** The merge-commit-preserves
+  / squash-dismisses finding was established against a **web-UI** merge. Re-run
+  it through `merge-async` with a second reviewer and
+  `dismiss_stale_reviews_on_push` on. The jjpr "gap" argument depends on it.
+- **Merge queue routing.** Exercise `merge_action: "merge_queue"` and
+  `"default"` on a queue-enabled repo once the rollout reaches one. Confirm
+  the `enqueued` terminal status and how to track the eventual outcome.
+- **CODEOWNERS interaction**, and whether a stack merge refuses to start until
+  every member PR is green.
+- **Behavior when a PR in a stack is closed (not merged) manually.** What
+  happens to the members above it?
+- **GA date and whether anything changes at GA.** Still labelled preview.
+- **`gh stack` becoming a built-in subcommand.** The
+  [cli/cli](https://github.com/cli/cli) repo would be the source; no movement
+  as of v2.96.0.
 
 ## Re-research checklist
 
@@ -629,20 +1011,35 @@ URLs to re-fetch and what to scan for:
    pages, FAQ entries, and especially the
    [REST reference](https://github.github.com/gh-stack/reference/rest-api/)
    for schema changes and any newly-documented auth.
-5. [docs.github.com/en/rest/pulls](https://docs.github.com/en/rest/pulls)
-   and the [GraphQL changelog](https://docs.github.com/en/graphql/overview/changelog)
-   — search for `stack`, `Stack`, `pullRequestStack`, `linkedPullRequest`.
-   Publication here is the key stability signal.
+5. [docs.github.com/en/rest/pulls/stacks](https://docs.github.com/en/rest/pulls/stacks)
+   and [rest/pulls/pulls](https://docs.github.com/en/rest/pulls/pulls) (async
+   merge), plus the
+   [GraphQL changelog](https://docs.github.com/en/graphql/overview/changelog)
+   — search for `stack`, `Stack`, `pullRequestStack`, `mergeAsync`. Watch for
+   a GraphQL merge mutation appearing (none as of 2026-07-30).
+   Also check which doc versions the stacks page is published under — that
+   list is a reliable plan-availability signal.
 6. [GitHub Changelog](https://github.blog/changelog/) — filter on "stack"
-   or "stacked"; look for a GA or public-preview announcement.
+   or "stacked"; look for a GA announcement.
 7. [cli/cli releases](https://github.com/cli/cli/releases) — check for
    built-in `pr stack` subcommand absorption.
 8. [Webhook events](https://docs.github.com/en/webhooks/webhook-events-and-payloads)
    — changes to the `stacked` action or the embedded `stack` payload.
 9. [GitHub App permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps)
-   — any new "stacks" scope.
+   — the stacks endpoints now sit under "Pull requests"; watch for a split-out
+   scope.
 10. `gh extension search stack` — surface competing or successor
     extensions.
+11. [community discussion 201439](https://github.com/orgs/community/discussions/201439)
+    (`gh.io/stacks-feedback`) — the best source of real-world breakage and the
+    only place GitHub staff respond. Scan for merge-queue rollout status, PAT
+    support, and fork/cross-repo stacks.
+
+Live checks worth repeating (all cheap, and the previous run's script shape is
+in the 2026-07-30 entry): probe `/stacks` on a repo to confirm the capability
+`200`; build a 3-PR linear stack in `michaeldhopkins/forge-e2e-sandbox` and
+run a partial `merge-async` to re-confirm the cascade rebase and divergence.
+Clean up branches and files afterwards — the sandbox is shared.
 
 When you re-research, verify each existing claim in this file against
 its cited source and add a Changelog entry below.
@@ -669,6 +1066,72 @@ should be marked unverified or removed.
 Newest entries on top. Each entry: date, short theme, concrete bullets
 naming what changed since the prior entry. Cite a primary source for
 every claim.
+
+### 2026-07-30 — Public preview: merge unblocked, gating gone, docs canonical
+
+GitHub [announced public preview](https://github.blog/changelog/2026-07-30-stacked-pull-requests-are-now-in-public-preview/).
+Three of the four standing blockers fell in one day. Full re-research against
+every checklist source, plus a live build-and-merge of stack 223 (PRs 220–222)
+in `michaeldhopkins/forge-e2e-sandbox`.
+
+- **Merge via public API works.** `gh-stack` v0.1.0 (2026-07-29) shipped
+  `gh stack merge`, backed by `PUT /repos/{o}/{r}/pulls/{n}/merge-async` and
+  `GET .../merge-async/{uuid}`. Submit-then-poll, atomic, supports partial
+  merges (everything up to and including the target PR). Verified end to end
+  with an ordinary `repo`-scoped OAuth token: a merge targeting the **middle**
+  PR of a 3-stack landed the bottom two atomically in ~4 seconds. This retires
+  the 2026-07-21 finding "No public API can merge a stacked PR".
+- **The legacy sync merge still `403`s** on a stacked PR, with the now-stale
+  message "Use the web interface instead". This is what jjpr hits today.
+- **Gating is gone.** `/stacks` returns `200` on a personal **Free**-plan
+  private repo; a stack was created and merged there. No waitlist. The
+  roadmap issue is stale (still "Preview", still Team/Enterprise-only labels);
+  the docs are published under `free-pro-team@latest`.
+- **Canonical publication happened** — `docs.github.com/en/rest/pulls/stacks`
+  is live, async merge is in `rest/pulls/pulls`, and the App-permissions
+  reference lists the stacks endpoints under the ordinary **"Pull requests"**
+  permission (no dedicated scope). Resolves two long-standing open questions.
+- **`merge-async` is not stack-only** — it merged a plain `stack: null` PR.
+- **The cascade rebase is unchanged and now the sharpest issue.** After the
+  partial merge, the surviving PR was retargeted straight to `main` (skipping
+  the intermediate merged branch) and its branch force-moved from the pushed
+  `19f7eb4c` to GitHub's own `fa1081de`. It rebases even on a merge-commit
+  landing where the descendant did not need it. With merge no longer blocking,
+  reconciling this against jj's local commits is the remaining design problem.
+- **Trunk got one merge commit for the two-PR landing**, not one per PR.
+- **Two corrections to `gh-stack`'s own source comments**: forcing
+  `merge_action: "merge_queue"` on a queueless branch is accepted (`202`) and
+  fails only at **poll** time, not at submit; and the `409` duplicate-submit
+  response **does** carry the existing uuid — go-gh discards it, but `ureq`
+  need not, so jjpr can resume an in-flight merge.
+- **`sha` guard confirmed** as optimistic concurrency: a stale head yields
+  `400 "Pull request head branch was modified."` — directly useful given how
+  often jjpr force-pushes.
+- Stack size limit is **100 PRs**. Auto-merge and admin bypass are explicitly
+  unsupported for stacked PRs. Merge queue support is still rolling out and
+  users report `404`s. GraphQL still has read-only types and no merge mutation.
+  `cli/cli` still has not absorbed a built-in `stack` subcommand.
+- **PAT question closed.** A fine-grained PAT returns `200` from `/stacks` on
+  an enabled repo (`michaeldhopkins/jjpr`) — same API version and `core` rate
+  bucket as OAuth. Open since 2026-07-21. Also captured the authoritative
+  `x-accepted-github-permissions` header per endpoint: `GET /stacks` needs
+  `pull_requests=read`, `POST /stacks` needs `pull_requests=write`, and
+  **`merge-async` needs `contents=write`** — the odd one out, and it fails
+  with an opaque `404` when missing.
+- **Unstack semantics re-verified** (stacks 229 and 233): the `pull_requests`
+  body is ignored and unstack always removes every removable member, but
+  **merged PRs are pinned** and stay — which is when it returns `200` (stack
+  survives) instead of `204` (dissolved). Reconciles the apparent conflict
+  between our 2026-07-21 "all-or-nothing" finding and the CLI docs' partial
+  removal; both were right about different mechanisms.
+- **No web URL for a stack.** Only an API `url` on the resource; the embedded
+  `stack` on a PR has no URL at all, and `gh-stack` never builds one. Name the
+  stack by number and link the PR instead of synthesizing a stack URL.
+- **Merge queue weakens atomicity.** Per the CLI reference, queued stack
+  members "may land in separate groups rather than all at once", and an
+  explicit merge method is ignored with a warning. The all-or-nothing
+  guarantee holds for direct merges only.
+- Sandbox cleaned up (branches, files, and probe PRs closed) after the run.
 
 ### 2026-07-22 — Merge-commit landing preserves the approval (real jjpr gap)
 
