@@ -585,6 +585,168 @@ would be a guess that may 404.
 For jjpr this means: **name the stack by number, and link the PR** (which
 does have `html_url`). Do not synthesize a stack URL.
 
+### Which write operations a native stack blocks (2026-07-30)
+
+Probed every mutation jjpr performs, against a live 3-PR stack (240). Only one
+is refused, which is a much narrower blast radius than expected:
+
+| Operation | Stacked PR | Result |
+|---|---|---|
+| Force-push the branch | ✅ | `200`; the stack follows the new head |
+| Create a PR based on a stacked branch | ✅ | `201`; the new PR lands *outside* the stack |
+| `PATCH` body | ✅ | `200` |
+| `PATCH` title | ✅ | `200` |
+| Post an issue comment (stack nav) | ✅ | `201` |
+| `PATCH` **base** (retarget) | ❌ | **`422`** |
+| `PUT .../merge` | ❌ | `403` (see above) |
+
+The retarget refusal:
+
+> `422` — "Cannot change the base branch because the pull request is part of a
+> stack."
+
+Two details that matter for a tool:
+
+- **It fires even for a no-op.** Setting the base to the value it already has
+  is rejected the same way, so the block is on the field, not on the change.
+  A tool cannot sidestep it by diffing first.
+- **It is why `gh stack unstack` + `gh stack init` is the documented way to
+  restructure.** While the PRs are stacked, the chain is immutable.
+- **But GitHub itself can still retarget — the 422 binds API callers, not the
+  server.** Two ways of removing the branch a stack is rooted on give opposite
+  results, and the difference matters:
+  - **A raw `DELETE /git/refs/heads/{branch}`** closes the stacked PR above it
+    (`state: closed`, `dirty`). Nothing retargets it.
+  - **GitHub's own `delete_branch_on_merge` cleanup**, run as part of merging
+    the PR below the stack, **auto-retargets the stacked PR to trunk and leaves
+    it open** (verified: base `dbm0730-x` → `main`, PR open, still stack member
+    `1/2`, stack still open). The merge flow knows to move dependent PRs; a
+    bare ref deletion does not.
+
+  So a tool merging the PR beneath a native stack does **not** destroy it, even
+  on a `delete_branch_on_merge` repo. (One cosmetic artifact: the stack
+  resource's own `base.ref` still names the deleted branch afterwards.)
+
+A native stack can be **rooted on a branch that is not itself in the stack**
+(a legal non-default base). So one chain of PRs can be part unstacked, part
+stacked, and a single chain can even span two separate native stacks. Any tool
+reasoning about "is this stack native?" must handle per-PR membership rather
+than assuming the whole chain matches.
+
+For jjpr this is the whole submit story. Pushing rewritten commits to a
+stacked PR is *allowed* and tracked, so ordinary submits (amend, re-push) work
+untouched. Only a **shape change** — reorder, insert, or drop a bookmark —
+makes jjpr want to retarget, and that is exactly when GitHub refuses. jjpr
+detects it at plan time and refuses before pushing, because submit pushes in
+phase 1 and retargets in phase 3: discovering it late would leave rewritten
+commits pushed under a stack order that contradicts them.
+
+### The cascade rebase, from jj's side — RESOLVED (2026-07-30)
+
+The open design question was how jjpr should reconcile GitHub's server-side
+cascade rebase, and what provenance it would have to track to know whether it
+should be updating the server or the server updating it. Tested both directions
+against a live stack. **jj already answers it; jjpr needs no provenance store.**
+
+**Case 1 — no local changes (the normal partial merge).** Local bookmarks sat
+exactly where they were last pushed. Merged a 3-PR stack up to the middle PR,
+then `jj git fetch`:
+
+```
+bookmark: csc0730-c@origin [updated] tracked
+Abandoned 1 commits that are no longer reachable:
+  trwomyrs f8035b52 csc0730-c@git | feat: csc0730 c
+
+csc0730-c: mrswzqso f31ba55f     (local, @git and @origin all agree)
+```
+
+jj **adopted the server's rebased commit and abandoned the local original, with
+no conflict**. The change ID changed (`trwomyrs` → `mrswzqso`), because GitHub's
+commit is new to jj, but nothing needed resolving. This is exactly "let the
+cascade come to us", and it is the default behavior of a plain fetch.
+
+**Case 2 — local unpushed changes (the collision).** Amended the top commit
+locally without pushing, then triggered the same cascade and fetched:
+
+```
+col0730-c (conflicted):
+  - ypottmow/2 831bef20 (hidden)                     base: what we last pushed
+  + ypottmow  389c38ed  ...(locally amended)         ours
+  + mspxrllt  d2832013                               theirs (server rebase)
+  @origin: mspxrllt d2832013
+```
+
+jj raises a **conflicted bookmark** carrying all three sides. That is precisely
+the three-way information needed to choose a direction, and jj computes it.
+
+**Case 3 — unpushed descendant work (the common real case). This one loses
+work, silently.** Same 3-PR stack, but with an ordinary unpushed WIP commit on
+top of `c` (`jj new c`, edit a file), then the same partial merge and fetch:
+
+```
+Abandoned 1 commits that are no longer reachable:
+  sxsqpklx be77a4bc wip0731-c@git | feat: wip0731 c
+Rebased 1 descendant commits
+Working copy (@) now at: mtwmmmzr 4d067879 wip: local work not yet pushed
+Parent commit (@-): yqvszouw 72a3666b wip0731-b | feat: wip0731 b
+Added 0 files, modified 0 files, removed 1 files
+```
+
+jj abandoned the superseded `c` and reparented the WIP onto **`b`**, the
+abandoned commit's *parent* — not onto GitHub's replacement `c`. Verified
+after the fetch:
+
+- `@`'s parent is `72a3666b (wip0731-b)`, the now-merged b.
+- The bookmark `wip0731-c` points at GitHub's new `ebe120c5`.
+- The new `c` is **not** an ancestor of `@`.
+- `wip0731-c.txt` is **gone from the working copy**.
+
+So the user's in-progress work is silently detached from the stack and loses
+the content of the commit it was built on. jj's behavior is mechanically
+correct (reparent a descendant onto the abandoned commit's parent) but
+semantically wrong here, because a replacement commit *does* exist and jj has
+no way to know that GitHub's new `c` is the same logical change as the old one.
+
+**This invalidates any "adoption is free" reading of Cases 1 and 2.** It is
+free only when nothing local descends from the rewritten commit. jjpr has to
+detect descendant work before or after the fetch and re-parent it onto the
+adopted commit itself.
+
+**Also: the cascade is asynchronous and lags the merge.** Immediately after
+`merge-async` reported `merged`, `GET /pulls/{c}` still showed the *old* head;
+the rebase appeared several seconds later. jjpr's post-merge reconcile fetches
+right after merging, so it can easily fetch before the cascade lands, see
+nothing changed, and then push its own rebase — racing GitHub. Any
+implementation must wait for or re-check the cascade rather than assume the
+merge result implies settled refs.
+
+**What this means for jjpr:**
+
+| jj state after fetch | Who changed it | jjpr's job |
+|---|---|---|
+| local == `@origin` | nobody | nothing |
+| local ahead, fast-forward | us | push (today's behavior) |
+| bookmark moved, old commit abandoned, **nothing descends from it** | the server | nothing — fetch adopted it correctly |
+| bookmark moved, **local work descended from the old commit** | the server | **re-parent the stranded work onto the adopted commit** (Case 3) |
+| bookmark **conflicted** | both | surface the three sides; do not guess |
+
+Two jobs, then, not one:
+
+1. **Stop jjpr overwriting the adoption.** The post-merge reconcile runs
+   `jj rebase -s <root> -d <trunk>` and force-pushes unconditionally, which
+   would rewrite the server's commit back to jj's own, undo the cascade, and
+   dismiss any approval it preserved.
+2. **Repair what the adoption strands.** Case 3 is the common shape (you keep
+   working while the stack lands) and jj's default handling silently detaches
+   and de-contents it. jjpr must notice descendants of the rewritten commit and
+   rebase them onto the adopted one.
+
+Job 2 is the part with no free lunch, and it is why "just let the cascade come
+to us" is not a one-line change.
+
+jjpr already parses conflicted bookmarks (`jj/templates.rs` has
+`test_parse_bookmark_conflicted_skipped`), so the detection primitive exists.
+
 ### PAT verification — RESOLVED (2026-07-30)
 
 The question open since 2026-07-21 — *does a personal access token get a `200`
@@ -841,6 +1003,10 @@ ever supports native stacks at all.
 
 Hard constraints to respect throughout:
 
+- **A stacked PR's base is immutable.** `PATCH /pulls/{n}` with a `base` is
+  `422` for any stack member, even a no-op. Any jjpr flow that retargets
+  (submit's phase 3, merge's post-merge reconcile) must check first rather than
+  discover it from the error, because both do it *after* pushing.
 - **Merging a stacked PR merges everything below it.** This is the semantic
   jjpr must surface loudly. `merge-async` on the middle of a stack lands the
   bottom two PRs atomically. A user asking jjpr to merge one PR must not
@@ -1127,6 +1293,14 @@ in `michaeldhopkins/forge-e2e-sandbox`.
 - **No web URL for a stack.** Only an API `url` on the resource; the embedded
   `stack` on a PR has no URL at all, and `gh-stack` never builds one. Name the
   stack by number and link the PR instead of synthesizing a stack URL.
+- **Correction (same day): merging beneath a native stack is safe.** An
+  earlier probe deleted a stack's root branch with `DELETE /git/refs` and saw
+  the stacked PR close, which was written up as "a `delete_branch_on_merge`
+  repo will silently close a stacked PR after a tool merges below it." That
+  inference was wrong. Re-tested through the actual path — merge the PR below
+  the stack on a repo with `delete_branch_on_merge: true` — GitHub's merge
+  cleanup **auto-retargets** the stacked PR to trunk and leaves it open. Only a
+  bare ref deletion closes it. No tool-caused data loss here.
 - **Merge queue weakens atomicity.** Per the CLI reference, queued stack
   members "may land in separate groups rather than all at once", and an
   explicit merge method is ignored with a warning. The all-or-nothing

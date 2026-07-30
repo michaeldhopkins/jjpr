@@ -1,5 +1,98 @@
 # jjpr TODO
 
+## GitHub native stacks — detection shipped (0.36.0), rest remaining
+
+Research: `notes/forges/github-native-stacks.md`. GitHub's stacked PRs went to
+public preview 2026-07-30 and are now enabled on every repo, so users can stack
+jjpr's PRs at any time with `gh-stack` or the web UI.
+
+Shipped: pre-merge detection. `PullRequest.stack` (`PrStackRef`) is parsed off
+the payload jjpr already fetches, and `evaluate_segment` returns
+`BlockReason::NativeStack` before spending any per-PR request or mutating
+anything. `merge` and `watch` both stop and name `gh stack merge` /
+`gh stack unstack`. Verified end to end against a real stack, including the A/B
+that unstacking lets jjpr proceed.
+
+Also shipped: submit's base-retarget guard. Probing established that a native
+stack blocks exactly one thing jjpr does, the base retarget (`422`, even for a
+no-op); force-push, PR creation, body/title edits and comments all succeed. So
+ordinary submits are untouched and only a stack *reshape* conflicts.
+`create_submission_plan` diverts such a retarget into
+`native_stack_base_conflicts` and execute refuses before phase 1, since submit
+pushes first and retargets in phase 3.
+
+Also shipped: merge's post-merge reconcile. `reconcile_forge_state` skips the
+retarget when the *next* PR is stacked (reachable even though merge refuses
+stacked PRs, because a native stack can be rooted on any branch, so the PR that
+merges may be unstacked while the one above it is not). It reports the same
+`BlockReason::NativeStack` the pre-merge check emits rather than a bespoke
+warning, via `ReconcileState::native_stack_block` — deliberately not a
+`*_failed` flag, so it never renders as a retryable "forge reconcile failed".
+
+Remaining, roughly in order:
+
+Direction set 2026-07-30: jjpr should support native stacks on the forge's own
+terms. Read them, merge them through the async merge API, and on a partial
+merge **let the server's cascade rebase flow down to us** rather than
+re-asserting jj's commits.
+
+**Nothing here gets implemented before the whole system is mapped and its
+correctness argued.** The investigation has already reversed its own
+conclusions twice (the `delete_branch_on_merge` scare, and "adoption is free"),
+which is the evidence for that rule rather than an argument against it. Design
+doc first: `docs-dev/native-stacks-design.md`.
+
+Decisions taken:
+
+- **Merge gating stays jjpr's.** Before triggering an all-at-once native merge,
+  inspect every PR the merge would land and apply jjpr's own standards
+  (`required_approvals`, `require_ci_pass`, changes-requested). If any fails,
+  don't merge, and explain it in **the same language jjpr already uses for its
+  own stacks** — reuse `BlockReason` and `format_block_reason` rather than
+  inventing a second vocabulary for "GitHub would have allowed this but we
+  don't".
+- **Merge queues are out of scope here** and tracked separately in
+  `docs-dev/merge-queue-support.md`. Until that is designed, a merge that would
+  route to a queue should be refused with an explanation, not half-modelled.
+- **Where jjpr's model and GitHub's disagree, present rather than resolve.**
+  Which stack `status` shows, whether the nav comment coexists with GitHub's
+  map, partially-stacked chains, one jjpr stack spanning two native stacks, and
+  diamonds that native stacks cannot represent: these are all differences jjpr
+  can *detect*. Surface them to the user. No automatic resolution until we know
+  what the right one is.
+
+- **Wire up `Forge::native_stacks` (S).** Implemented and tested in
+  `src/forge/github.rs`, called from nowhere. Surface native stacks in
+  `status`. Its doc comment also claims a 404 means "preview not enabled"; a
+  404 equally means the token cannot see the repo.
+- **Merge stacked PRs via `PUT /pulls/{n}/merge-async` (M).** Replaces today's
+  refusal. Needs: poll to a terminal state (submit returns 202 even for
+  failures), the `sha` guard, `409` uuid recovery, and a `404` message that
+  mentions `contents: write`. Merging PR N lands everything below it, so the
+  user must be told what will land before it does. Under a merge queue the
+  result is `enqueued` and atomicity is weaker; treat that as terminal and
+  hand off.
+- **Adopt the cascade rather than fight it (L — restored; it is not M).**
+  Empirically mapped in three shapes; see "The cascade rebase, from jj's side"
+  in the notes. jj supplies the provenance (no state store needed on jjpr's
+  side), but adoption is **not** free:
+  - *No local descendants*: `jj git fetch` adopts correctly on its own.
+  - *Local edits to the same bookmark*: jj raises a **conflicted bookmark**
+    carrying base/ours/theirs. Surface it; don't guess.
+  - *Unpushed work descending from the rewritten commit* — the common shape —
+    **jj silently strands it**. It reparents the WIP onto the abandoned
+    commit's *parent*, not onto GitHub's replacement, and the working copy
+    loses the merged-below content. jjpr must detect descendants and rebase
+    them onto the adopted commit itself. This is the real work.
+  - **The cascade is asynchronous.** Right after `merge-async` says `merged`,
+    the refs still show the pre-cascade heads; the rebase lands seconds later.
+    jjpr's reconcile fetches immediately after merging, so it can race the
+    cascade, see nothing changed, and push its own rebase over it.
+  - Also: `reconcile_local_state` / `reconcile_forge_state` must stop
+    force-pushing over an adopted commit, and the change ID *does* change on
+    adoption, so anything keyed on it across a merge boundary must tolerate
+    that.
+
 ## Multi-identity ownership — Tier 1 shipped (0.33.0), Tier 2 remaining
 
 Full spec: `docs-dev/identity-ownership.md`. Shipped: `owned()` email-union
