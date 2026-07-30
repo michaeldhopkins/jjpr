@@ -281,10 +281,21 @@ impl Jj for JjRunner {
     }
 
     fn is_conflicted(&self, revset: &str) -> Result<bool> {
+        // "Does ANY commit in `revset` have a conflict", correct for a revset of
+        // any size. Templating `if(conflict, ...)` per commit and comparing the
+        // whole output to "true" is only right for a single commit: two commits
+        // yield "falsetrue", which compares unequal and silently reports clean.
+        // Intersecting with `conflicts()` and testing for emptiness sidesteps
+        // the concatenation entirely.
         let output = self.run_jj(&[
-            "log", "-r", revset, "--no-graph", "-T", r#"if(conflict, "true", "false")"#,
+            "log",
+            "-r",
+            &format!("conflicts() & ({revset})"),
+            "--no-graph",
+            "-T",
+            r#""x""#,
         ])?;
-        Ok(output.trim() == "true")
+        Ok(!output.trim().is_empty())
     }
 
     // Operation-log primitives for concurrent-modification recovery. `op restore`

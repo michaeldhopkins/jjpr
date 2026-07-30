@@ -54,6 +54,43 @@ Merge API calls retry automatically on transient HTTP errors (502,
 polls the PR state for up to 30 seconds to confirm completion. No
 user action needed; this is transparent in normal operation.
 
+## GitHub native stacks
+
+GitHub's own stacked pull requests are a separate feature from jjpr's stacks.
+If a PR has been registered as a member of a GitHub native stack, with
+`gh stack submit` or from the web UI, GitHub refuses to merge it through the
+API endpoint jjpr uses and returns a 403.
+
+jjpr checks for this before merging anything, so a stack it cannot finish is
+reported up front rather than partway up:
+
+```
+  Blocked at 'profile' (#221):
+    - In native stack #223 (2 of 4); GitHub refuses API merges of stacked PRs. Run `gh stack merge 221`, which lands #221 and everything below it
+
+This stack is registered as a GitHub native stack, which jjpr cannot merge.
+Merge it with `gh stack merge`, or dissolve the native stack with
+`gh stack unstack 223` to hand merging back to jjpr.
+```
+
+Two things to know about the remedies:
+
+- `gh stack merge <pr>` merges that PR **and every PR below it** in one
+  atomic operation. It needs the extension: `gh extension install github/gh-stack`.
+- `gh stack unstack <stack>` removes every PR it can from the stack, not only
+  the one you name. PRs that have already merged stay in it. Once the open PRs
+  are unstacked, `jjpr merge` works on them normally.
+
+`jjpr watch` stops on this rather than polling. Stack membership does not
+clear on its own, so waiting would never resolve it.
+
+`jjpr submit` is mostly unaffected: pushing to a stacked PR, creating PRs,
+and updating descriptions and comments all work. The one exception is
+retargeting a PR's base, which GitHub rejects for any stacked PR. See
+[Reshaping a native stack](submit.md#reshaping-a-native-stack).
+
+This applies to GitHub only. GitLab and Forgejo have no equivalent feature.
+
 ## Reconcile failures
 
 After each merge, jjpr reconciles two things: local state (fetch, rebase,
@@ -91,6 +128,26 @@ genuinely required — and jjpr reports how many approvals that push drops:
     ⚠ dismissed 2 approvals on #43 — base 'main' resets approvals on push
   Updating #43 base to 'main'...
 ```
+
+### Conflicted rebase or merge
+
+A rebase or merge that jj completes can still leave conflicts: jj records them
+in the commit rather than failing. jjpr checks every bookmark after syncing and
+pushes only the ones that came out clean, stopping at the first conflicted one.
+
+```
+  Merging 'auth' (#42, squash)...
+  Rebasing remaining stack onto main...
+  Pushing 'profile'...
+  Blocked at 'settings' (#44):
+    - Local sync failed
+
+Note: local state is out of sync with the forge:
+  Rebase of 'settings' onto 'main' has conflicts; skipping push
+```
+
+Bookmarks below the conflict are pushed normally. Resolve with `jj resolve`,
+then re-run `jjpr merge`.
 
 ### Local sync failed
 
