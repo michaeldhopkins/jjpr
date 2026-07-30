@@ -10,8 +10,9 @@ a note against its sources before relying on it; forge APIs move.
 ## Contents
 
 - [github-native-stacks.md](github-native-stacks.md) — GitHub's native
-  stacked-PR feature (preview): API surface, verified behaviors, and the route
-  for a jjpr integration.
+  stacked-PR feature (public preview since 2026-07-30): API surface including
+  the new async merge endpoints, verified behaviors, and the route for a jjpr
+  integration.
 - [buzz.md](buzz.md) — evaluation of Buzz (Block's Nostr/NIP-34 workspace) as a
   candidate forge. Verdict: not a near-term target.
 
