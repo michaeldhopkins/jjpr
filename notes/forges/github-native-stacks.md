@@ -720,6 +720,89 @@ nothing changed, and then push its own rebase — racing GitHub. Any
 implementation must wait for or re-check the cascade rather than assume the
 merge result implies settled refs.
 
+### The cascade is best-effort, not a guarantee (2026-07-31)
+
+Three more shapes, all through `merge-async`. Together they say the cascade
+cannot be reasoned about as "the server rebases the survivors".
+
+**Merging the TOP PR (the whole stack) produces no cascade at all — this is the
+clean case.** All three PRs merged from one call, and every surviving branch
+head was **unchanged** (`c2e8dd54`, `6b402014`, `a3c7ad64`, all originals). The
+stack closed. On the jj side, `jj git fetch` updated only `main@origin`: all
+three bookmarks untouched, unpushed WIP still attached to the top bookmark, no
+file lost. It degrades to the ordinary squash-merge situation jjpr already
+handles. **This validates scoping a first implementation to whole-stack merges**
+— there are no survivors, so none of the cascade hazards below apply.
+
+**A merge-commit landing still rebases the survivor, even when it need not.**
+Partial merge with `merge_method: "merge"`: the survivor moved
+`85165f3a` → `13bb0c9e` although the merged commit remained an ancestor of
+trunk (`compare` → `behind 1`), so no rebase was required for correctness.
+This matters because jjpr's `is_rooted_in` skip (v0.35.0) exists precisely to
+*avoid* rebasing in that case, to preserve approvals. GitHub rebases anyway, so
+on a native stack that optimization no longer prevents a rewrite — it only
+prevents jjpr from adding a second one.
+
+**When the rebase would conflict, GitHub silently declines it — and leaves the
+PR bloated.** Built a stack whose survivor edits a file that trunk also changed
+incompatibly, then merged the PR below it. The merge **succeeded**, but:
+
+- the survivor's head was **unchanged** (`b88c235a`, pre-merge value),
+- its base **was** retargeted to `main`,
+- its diff now lists **three** files (`a.txt`, `b.txt`, `shared.txt`) instead of
+  its own one, because its commits still sit on the pre-merge base,
+- `compare main...head` → `diverged, ahead 3, behind 3`.
+
+That is exactly the already-merged-changes bloat jjpr's own reconcile exists to
+prevent (see `BlockReason::LocalSyncFailed`'s doc comment). So the cascade is
+**best-effort**: it rebases when it can and abandons the attempt when it cannot,
+with no error surfaced on the merge that triggered it.
+
+**The merge method does not change *whether* the cascade runs.** All three
+rebase the survivor:
+
+| Method | Survivor rebased | Merged commits stay ancestors of trunk |
+|---|---|---|
+| `squash` | yes | no (one new commit) |
+| `merge` | yes, **even though unnecessary** | yes |
+| `rebase` | yes | no (each commit replayed as a new SHA) |
+
+Under `rebase`, trunk gains one new linear commit per merged PR and the merged
+PRs' own heads still point at the pre-replay commits, so nothing local matches
+trunk afterwards. Only the `merge` method leaves the landed commits reachable,
+which is what jjpr's `is_rooted_in` check keys on — and it is precisely the case
+where GitHub rebases anyway.
+
+**A closed (not merged) member poisons the whole stack.** Closing the middle PR
+of a 3-stack:
+
+- the closed PR **stays in the stack** at its position, `size` unchanged, and
+  the stack stays `open`;
+- nothing is retargeted, so the PR above it still bases on the closed PR's
+  branch — the chain now has a hole;
+- and the stack becomes **unmergeable**. `merge-async` on the top PR returns
+  `202`, then fails at poll with
+  `"Pull request must be open and not in draft mode in order to be merged."`
+
+Two things to take from that failure. It **does not name which PR** is the
+problem — a user with a ten-PR stack gets no pointer. And atomicity held: the
+still-open bottom PR was not merged either. This is a strong argument for
+jjpr pre-flighting the whole range and naming the offender itself, the same
+pre-flight that has to enforce jjpr's approval and CI gates.
+
+**The two outcomes need opposite responses from jjpr, and are distinguishable.**
+After a partial merge, compare the survivor's head with what it was before:
+
+| Survivor head | What happened | jjpr must |
+|---|---|---|
+| changed | cascade succeeded | **adopt** — do not rebase or force-push, or the server's work is undone |
+| unchanged, but base moved | cascade declined (conflict) | **rebase locally and force-push** — the PR is bloated until someone does |
+
+Force-pushing to a stacked PR is allowed (only the *base* is frozen), so the
+recovery path exists. But it means jjpr cannot pick a single policy: it has to
+read the outcome and branch. Combined with the cascade being asynchronous, jjpr
+must also wait for the outcome to settle before reading it.
+
 **What this means for jjpr:**
 
 | jj state after fetch | Who changed it | jjpr's job |
@@ -746,6 +829,54 @@ to us" is not a one-line change.
 
 jjpr already parses conflicted bookmarks (`jj/templates.rs` has
 `test_parse_bookmark_conflicted_skipped`), so the detection primitive exists.
+
+### jjpr's own behavior against a live native stack (2026-07-31)
+
+Half of "we don't understand this yet" was jjpr, not GitHub. Run against a
+real 3-PR native stack with the shipped 0.36.0 binary.
+
+**`jjpr status` says nothing about the native stack, and overstates what jjpr
+can do.** Output for a stack whose three PRs are all members of stack #293:
+
+```
+  jjp0731-a (1 change, PR open, push up to date)
+    ✓ mergeable  ✗ 0 approvals
+  jjp0731-b (1 change, PR open, push up to date)
+    ✓ mergeable  ✗ 0 approvals
+  jjp0731-c (1 change, PR open, push up to date)
+    ? mergeability computing  ✗ 0 approvals
+```
+
+No mention of stack #293 anywhere, and `✓ mergeable` on PRs that `jjpr merge`
+will refuse outright. The two commands disagree about the same PRs. This is
+what wiring `Forge::native_stacks` into `status` is actually for — it is not
+tidying up dead code, it is closing a contradiction the user can hit today.
+
+**`jjpr submit` works correctly and needs no change.** Amended the top commit
+and submitted: pushes succeeded, PRs updated, `Done.` Afterwards the stack was
+intact (`open`, all three members, new head SHAs) and the top PR still reported
+`stack=293 pos 3/3`. This confirms at the jjpr level what the endpoint probing
+predicted: a force-push is fine, only a *reshape* conflicts, and the 0.36.0
+guard correctly does not fire here.
+
+**`jjpr merge` refuses** — verified separately when the guard was built.
+
+**`jjpr watch` hard-stops in ~3 seconds rather than polling.** The 0.36.0 guard
+works end to end against a live stack: watch reported the block and exited well
+inside one 30-second poll interval. It also confirms the check's placement —
+the PRs had 0 of 1 required approvals, yet the reported reason is the native
+stack, because `evaluate_segment` returns before the approvals check.
+
+It also exposed a defect in 0.36.0, since fixed: watch's summary ended with
+`Run 'jjpr watch' again once the issue is resolved.`, which never resolves this.
+`merge` printed the right follow-up and `watch` did not, because each command
+has its own summary function and only one had been taught the case. Both now
+route through a shared `native_stack_advice` helper. Worth remembering as a
+pattern: jjpr has **two** end-of-run summaries, and a block reason added to one
+is silently missing from the other.
+
+Aside: `jjpr watch --required-approvals 0` is refused by design (it would
+auto-merge without review), so reproducing anything in watch needs `1`.
 
 ### PAT verification — RESOLVED (2026-07-30)
 

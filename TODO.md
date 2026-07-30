@@ -1,5 +1,15 @@
 # jjpr TODO
 
+## Known flake: `tests/recovery_scenarios.rs`
+
+Observed once on 2026-07-31: one of the six failed during a full `cargo test`,
+then passed on every subsequent run (3 isolated, 2 full-suite). Unrelated to
+the change in flight at the time, which touched only `main.rs` summaries. These
+are jj-integration tests that create real repos, so a timing or parallelism
+race is the obvious suspect — cf. the E2E suites, which are already documented
+as needing `--test-threads=1`. Not chased further because it did not reproduce;
+noted so the next sighting is a second data point rather than a first.
+
 ## GitHub native stacks — detection shipped (0.36.0), rest remaining
 
 Research: `notes/forges/github-native-stacks.md`. GitHub's stacked PRs went to
@@ -63,15 +73,27 @@ Decisions taken:
 
 - **Wire up `Forge::native_stacks` (S).** Implemented and tested in
   `src/forge/github.rs`, called from nowhere. Surface native stacks in
-  `status`. Its doc comment also claims a 404 means "preview not enabled"; a
-  404 equally means the token cannot see the repo.
+  `status`. Not tidying: verified against a live stack that `status` shows no
+  hint of native-stack membership *and* prints `✓ mergeable` for PRs that
+  `jjpr merge` then refuses. The two commands contradict each other today.
+  Its doc comment also claims a 404 means "preview not enabled"; a 404 equally
+  means the token cannot see the repo.
+- **Pre-flight the whole merge range (S, folds into the merge work).** GitHub
+  fails a stack merge containing a closed or draft member with
+  "Pull request must be open and not in draft mode" and **does not say which
+  one**. jjpr should check open/draft state across the range and name the
+  offender, alongside the approval/CI gating already decided.
 - **Merge stacked PRs via `PUT /pulls/{n}/merge-async` (M).** Replaces today's
   refusal. Needs: poll to a terminal state (submit returns 202 even for
   failures), the `sha` guard, `409` uuid recovery, and a `404` message that
   mentions `contents: write`. Merging PR N lands everything below it, so the
   user must be told what will land before it does. Under a merge queue the
-  result is `enqueued` and atomicity is weaker; treat that as terminal and
-  hand off.
+  result is `enqueued` and atomicity is weaker; refuse for now
+  (`docs-dev/merge-queue-support.md`).
+  **Scope the first cut to whole-stack merges — now verified, not assumed.**
+  Merging the top PR produces no cascade whatsoever: survivor heads unchanged,
+  bookmarks untouched, unpushed WIP intact, and jj sees an ordinary
+  squash-merge. Every cascade hazard below is specific to *partial* merges.
 - **Adopt the cascade rather than fight it (L — restored; it is not M).**
   Empirically mapped in three shapes; see "The cascade rebase, from jj's side"
   in the notes. jj supplies the provenance (no state store needed on jjpr's
@@ -88,6 +110,19 @@ Decisions taken:
     the refs still show the pre-cascade heads; the rebase lands seconds later.
     jjpr's reconcile fetches immediately after merging, so it can race the
     cascade, see nothing changed, and push its own rebase over it.
+  - **The cascade is best-effort, and its two outcomes need opposite
+    responses.** If the rebase would conflict, GitHub completes the merge,
+    retargets the survivor's base, and silently *skips* the rebase — leaving a
+    PR whose diff includes the already-merged changes (verified: 3 files where
+    1 was expected, `diverged ahead 3 behind 3`). So jjpr must read the outcome
+    and branch: head changed → adopt and do not push; head unchanged but base
+    moved → rebase locally and force-push to clear the bloat. Force-pushing a
+    stacked PR is permitted, so the recovery exists — but "always adopt" and
+    "always rebase" are both wrong.
+  - **A merge-commit landing rebases the survivor anyway**, even though the
+    merged commit stays an ancestor of trunk. jjpr's `is_rooted_in` skip
+    (added to preserve approvals) therefore no longer prevents a rewrite on a
+    native stack; it only prevents jjpr adding a second one.
   - Also: `reconcile_local_state` / `reconcile_forge_state` must stop
     force-pushing over an adopted commit, and the change ID *does* change on
     adoption, so anything keyed on it across a merge boundary must tolerate
