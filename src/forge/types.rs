@@ -29,6 +29,45 @@ pub struct PullRequest {
     /// Empty when the forge omits it (e.g. a deleted account).
     #[serde(default, rename = "user", deserialize_with = "deserialize_user_login")]
     pub author: String,
+    /// Membership in a GitHub native pull-request stack, `None` when the PR is
+    /// unstacked or the forge has no such concept. GitHub embeds this in every
+    /// PR payload, so reading it costs nothing beyond the request jjpr already
+    /// makes — which is the point: merge must know before it tries.
+    #[serde(default)]
+    pub stack: Option<PrStackRef>,
+}
+
+/// A pull request's view of the native stack it belongs to.
+///
+/// This is the object GitHub embeds on a *pull request*, which is leaner than
+/// the [`Stack`] resource returned by `/stacks`: it carries no `node_id`,
+/// `created_at`, `url`, or member list, and — unlike `Stack` — it does carry
+/// `position` and `size`. There is no web URL for a stack on either shape (see
+/// `notes/forges/github-native-stacks.md`), so callers name it by number.
+/// Every field is defaulted or optional on purpose. This is a preview-grade
+/// schema, and it is embedded in the payload that carries *every* pull request
+/// jjpr reads: a field that GitHub stops sending would otherwise fail the whole
+/// `PullRequest` parse and take `list_open_prs` down with it, breaking jjpr on
+/// the repo entirely. Degrading to a vague message is survivable; failing to
+/// list PRs is not. Erring toward "still parses" also keeps the merge block
+/// firing, which is the safe direction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrStackRef {
+    #[serde(default)]
+    pub number: u64,
+    #[serde(default)]
+    pub id: u64,
+    /// 1-based position from the bottom of the stack; 1 is the PR closest to
+    /// trunk. Merging a stacked PR also merges everything below it, so this
+    /// doubles as "how many PRs a merge here would land".
+    #[serde(default)]
+    pub position: u32,
+    #[serde(default)]
+    pub size: u32,
+    /// The stack's ultimate target branch. Unused today; kept because it is the
+    /// one field here that a native-merge path would need.
+    #[serde(default, deserialize_with = "lenient_ref")]
+    pub base: Option<PullRequestRef>,
 }
 
 /// Extract a single author login from a nested user object. GitHub/Forgejo
@@ -109,6 +148,31 @@ pub struct PullRequestRef {
     pub sha: String,
 }
 
+/// Deserialize an optional nested ref, degrading a malformed one to `None`
+/// rather than failing the whole payload.
+///
+/// `#[serde(default)]` on a field only defends the level it is written at. Every
+/// field on the preview-grade types is defaulted, but `PullRequestRef::ref_name`
+/// is required, so a `"base": {}` — an object that is present but has lost its
+/// `ref` — made serde abandon the ENTIRE stack payload with
+/// `missing field \`ref\``. Found by the `forge_payload` fuzz target on its first
+/// run; the three hand-written partial-payload tests had all dropped whole keys
+/// and so never produced a present-but-empty one.
+///
+/// Used only on the preview-grade types, where the schema can move under us
+/// without a version bump. `PullRequest::base`/`head` stay strict on purpose: a
+/// pull request with no base is a broken response from a stable API, and failing
+/// loudly is the right answer there.
+fn lenient_ref<'de, D>(deserializer: D) -> std::result::Result<Option<PullRequestRef>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<Option<PullRequestRef>>(value)
+        .ok()
+        .flatten())
+}
+
 /// A native pull-request stack (GitHub preview feature).
 ///
 /// Populated from `GET /repos/{owner}/{repo}/stacks`. Read-only for now; jjpr
@@ -116,18 +180,31 @@ pub struct PullRequestRef {
 /// issue/PR numbering space (a stack consumes a number), and `pull_requests`
 /// is ordered bottom-to-top (index 0 targets `base`, each later PR targets the
 /// previous one's head — GitHub requires a fully linear chain).
+/// Like [`PrStackRef`], every field is defaulted: this is a preview-grade
+/// schema, and a field GitHub stops sending must not turn into a hard parse
+/// error in the middle of a merge.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Stack {
+    #[serde(default)]
     pub number: u64,
     #[serde(default)]
     pub node_id: String,
-    /// The stack's ultimate target. Only `ref` is set at the list level; the
-    /// copy embedded on a PR also carries `sha`.
-    pub base: PullRequestRef,
+    /// The stack's ultimate target branch.
+    #[serde(default, deserialize_with = "lenient_ref")]
+    pub base: Option<PullRequestRef>,
     #[serde(default)]
     pub open: bool,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// Members ordered bottom to top: index 0 targets `base`, each later PR
+    /// targets the previous one's head.
+    ///
+    /// **Merged members stay in the list.** After a partial merge the landed
+    /// PRs remain here with `state: "closed"` and `merged_at` set, and the
+    /// stack keeps its original size. Anything reasoning about "what would this
+    /// merge land" must treat closed-with-`merged_at` as already done, and
+    /// closed-*without* it as a closed-unmerged PR that makes the whole stack
+    /// unmergeable.
     #[serde(default)]
     pub pull_requests: Vec<StackPr>,
 }
@@ -136,14 +213,74 @@ pub struct Stack {
 /// `PullRequest`: the list endpoint returns only these fields.
 #[derive(Debug, Clone, Deserialize)]
 pub struct StackPr {
+    #[serde(default)]
     pub number: u64,
+    /// `"open"` or `"closed"`. Pair with `merged_at` to tell a landed PR from a
+    /// closed-unmerged one; the second poisons a stack merge.
     #[serde(default)]
     pub state: String,
     #[serde(default)]
     pub draft: bool,
     #[serde(default)]
     pub merged_at: Option<String>,
-    pub head: PullRequestRef,
+    #[serde(default, deserialize_with = "lenient_ref")]
+    pub head: Option<PullRequestRef>,
+    /// Present on `GET /stacks/{n}`, absent from the list endpoint.
+    #[serde(default, deserialize_with = "lenient_ref")]
+    pub base: Option<PullRequestRef>,
+}
+
+impl StackPr {
+    /// Already landed, so a stack merge will skip it rather than fail on it.
+    pub fn is_merged(&self) -> bool {
+        self.merged_at.is_some()
+    }
+
+    /// Closed without merging. GitHub refuses to merge a stack containing one
+    /// of these, failing at poll time with "Pull request must be open and not
+    /// in draft mode" and without naming which PR — so a caller wanting a
+    /// useful message has to find it itself.
+    pub fn is_closed_unmerged(&self) -> bool {
+        self.state == "closed" && self.merged_at.is_none()
+    }
+
+    /// Would block a merge **that includes this PR**: closed-unmerged, or still
+    /// a draft.
+    ///
+    /// Only meaningful for members a merge would actually land. GitHub's check
+    /// is position-scoped, so a draft or closed PR *above* the target is
+    /// irrelevant — prefer [`Stack::blocker_for`], which applies the scoping for
+    /// you.
+    pub fn would_block_merge(&self) -> bool {
+        self.is_closed_unmerged() || self.draft
+    }
+}
+
+impl Stack {
+    /// The members a merge of `target` would land: everything from the bottom up
+    /// to and including it. `None` when `target` is not a member.
+    ///
+    /// Merging a stacked PR lands every member below it, so this is the range
+    /// any gate has to apply to, not just the target.
+    pub fn members_landed_by(&self, target: u64) -> Option<&[StackPr]> {
+        let idx = self.pull_requests.iter().position(|p| p.number == target)?;
+        Some(&self.pull_requests[..=idx])
+    }
+
+    /// The first member that would stop a merge of `target`, if any.
+    ///
+    /// Verified against the live API: the scoping is real. With a draft at
+    /// position 2 of 3, merging position 3 fails ("Pull request must be open and
+    /// not in draft mode") while merging position 1 succeeds. So checking every
+    /// member would report blockers that do not block.
+    ///
+    /// GitHub's own failure never names the offending PR, which is the whole
+    /// reason to compute this locally.
+    pub fn blocker_for(&self, target: u64) -> Option<&StackPr> {
+        self.members_landed_by(target)?
+            .iter()
+            .find(|p| p.would_block_merge())
+    }
 }
 
 /// A comment on an issue or pull request.

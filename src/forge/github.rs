@@ -488,16 +488,18 @@ impl Forge for GitHubForge {
         Ok(crate::forge::parse_verified_emails(&self.client.get("user/emails")?))
     }
 
-    fn native_stacks(&self, owner: &str, repo: &str) -> Result<Option<Vec<Stack>>> {
-        let path = format!("repos/{owner}/{repo}/stacks");
+    fn get_stack(&self, owner: &str, repo: &str, stack_number: u64) -> Result<Option<Stack>> {
+        let path = format!("repos/{owner}/{repo}/stacks/{stack_number}");
         match self.client.get(&path) {
             Ok(value) => {
-                let stacks = serde_json::from_value(value)
-                    .context("failed to parse native stacks response")?;
-                Ok(Some(stacks))
+                let stack = serde_json::from_value(value)
+                    .context("failed to parse native stack response")?;
+                Ok(Some(stack))
             }
-            // A 404 is the documented "preview not enabled for this repo"
-            // signal, which we treat as "no native stacks" rather than an error.
+            // Treated as "not visible" rather than an error. Note this covers
+            // two indistinguishable cases: the feature being unavailable, and
+            // the token not being able to see the repo. Callers must not report
+            // it as the former.
             Err(e) => match e.downcast_ref::<HttpError>() {
                 Some(http) if http.status == 404 => Ok(None),
                 _ => Err(e),
@@ -725,39 +727,221 @@ impl Forge for GitHubForge {
 mod tests {
     use super::*;
 
-    /// A real `GET /repos/{owner}/{repo}/stacks` list payload (captured live,
-    /// SHAs truncated): one open 3-PR stack and one merged 2-PR stack.
-    const STACKS_LIST_JSON: &str = r#"[
-      {"id":12634,"number":16306,"node_id":"PRS_kwDOABcQ480xWg","url":"https://api.github.com/repos/o/r/stacks/16306","base":{"ref":"master"},"open":true,"created_at":"2026-07-21T17:07:25Z","pull_requests":[
-        {"number":16298,"state":"open","draft":false,"merged_at":null,"head":{"ref":"feat/llm-confidence-scoring-module","sha":"c00dded0"}},
-        {"number":16300,"state":"open","draft":false,"merged_at":null,"head":{"ref":"feat/work-type-classifier-confidence-rubric","sha":"afc6a11b"}},
-        {"number":16301,"state":"open","draft":false,"merged_at":null,"head":{"ref":"feat/rap-exclusions-confidence-rubric","sha":"68dc10e1"}}
-      ]},
-      {"id":12612,"number":16305,"node_id":"PRS_kwDOABcQ480xRA","url":"https://api.github.com/repos/o/r/stacks/16305","base":{"ref":"master"},"open":false,"created_at":"2026-07-21T17:03:49Z","pull_requests":[
-        {"number":16303,"state":"closed","draft":false,"merged_at":"2026-07-21T18:23:59Z","head":{"ref":"rap-exclusion-rule-objects","sha":"230f7568"}},
-        {"number":16304,"state":"closed","draft":false,"merged_at":"2026-07-21T18:52:01Z","head":{"ref":"rap-work-location-proximity","sha":"ab6ca106"}}
-      ]}
-    ]"#;
+    /// A real `GET /repos/{owner}/{repo}/stacks/{n}` payload (captured live,
+    /// SHAs truncated) for a **partially merged** stack: PR 353 has landed and
+    /// 354 is still open. That shape is the point. A merged member stays in the
+    /// stack, so anything asking "what would merging land" has to tell a landed
+    /// PR from a closed-unmerged one rather than treating "closed" as fatal.
+    const STACK_JSON: &str = r#"{"id":94565,"number":355,"node_id":"PRS_kwDORPJ1DM4AAXFl","url":"https://api.github.com/repos/michaeldhopkins/forge-e2e-sandbox/stacks/355","base":{"ref":"main"},"open":true,"created_at":"2026-08-01T04:04:03Z","pull_requests":[{"number":353,"state":"closed","draft":false,"merged_at":"2026-08-01T04:06:41Z","title":"fix0731 a","html_url":"https://github.com/michaeldhopkins/forge-e2e-sandbox/pull/353","head":{"ref":"fix0731-a","sha":"f24f394275ab"},"base":{"ref":"main","sha":"6a412bc6bfea"},"user":{"login":"michaeldhopkins"}},{"number":354,"state":"open","draft":false,"merged_at":null,"title":"fix0731 b","html_url":"https://github.com/michaeldhopkins/forge-e2e-sandbox/pull/354","head":{"ref":"fix0731-b","sha":"8bf5f5f34cfe"},"base":{"ref":"main","sha":"8795b3b8df6d"},"user":{"login":"michaeldhopkins"}}]}"#;
 
     #[test]
-    fn native_stacks_payload_deserializes_to_ordered_stacks() {
-        let stacks: Vec<Stack> = serde_json::from_str(STACKS_LIST_JSON).unwrap();
-        assert_eq!(stacks.len(), 2);
+    fn stack_payload_deserializes_with_members_bottom_to_top() {
+        let stack: Stack = serde_json::from_str(STACK_JSON).unwrap();
+        assert_eq!(stack.number, 355);
+        assert!(stack.open, "still open while any member is unmerged");
+        assert_eq!(stack.base.expect("base present").ref_name, "main");
 
-        let open = &stacks[0];
-        assert_eq!(open.number, 16306);
-        assert!(open.open);
-        assert_eq!(open.base.ref_name, "master");
-        assert!(open.node_id.starts_with("PRS_"));
-        // pull_requests are bottom-to-top; every PR here is still open/unmerged.
-        let numbers: Vec<u64> = open.pull_requests.iter().map(|p| p.number).collect();
-        assert_eq!(numbers, vec![16298, 16300, 16301]);
-        assert!(open.pull_requests.iter().all(|p| p.merged_at.is_none()));
-        assert_eq!(open.pull_requests[0].head.ref_name, "feat/llm-confidence-scoring-module");
+        let numbers: Vec<u64> = stack.pull_requests.iter().map(|p| p.number).collect();
+        assert_eq!(numbers, vec![353, 354], "bottom to top");
 
-        let merged = &stacks[1];
-        assert!(!merged.open);
-        assert!(merged.pull_requests.iter().all(|p| p.state == "closed" && p.merged_at.is_some()));
+        // The distinction a merge pre-flight turns on.
+        let landed = &stack.pull_requests[0];
+        assert!(landed.is_merged());
+        assert!(!landed.is_closed_unmerged(), "closed BUT merged is not a blocker");
+        assert!(!landed.would_block_merge());
+
+        let open = &stack.pull_requests[1];
+        assert!(!open.is_merged());
+        assert!(!open.would_block_merge());
+        // The single-stack GET carries per-member base; the list endpoint does not.
+        assert_eq!(open.base.as_ref().expect("base present").ref_name, "main");
+    }
+
+    // A member closed without merging poisons the whole stack: GitHub fails the
+    // merge at poll time without naming it, so jjpr has to find it.
+    #[test]
+    fn a_closed_unmerged_member_is_recognised_as_a_blocker() {
+        let json = r#"{"number":9,"pull_requests":[
+            {"number":1,"state":"closed","merged_at":"2026-08-01T00:00:00Z"},
+            {"number":2,"state":"closed","merged_at":null},
+            {"number":3,"state":"open","draft":true}
+        ]}"#;
+        let stack: Stack = serde_json::from_str(json).unwrap();
+        // Scoped to what each merge would actually land. Verified live: with a
+        // draft above the target, the merge succeeds — so checking every member
+        // would report blockers that do not block.
+        assert!(stack.blocker_for(1).is_none(), "nothing below #1 blocks it");
+        assert_eq!(
+            stack.blocker_for(2).map(|p| p.number),
+            Some(2),
+            "#2 is closed-unmerged, so it blocks its own merge"
+        );
+        assert_eq!(
+            stack.blocker_for(3).map(|p| p.number),
+            Some(2),
+            "merging #3 lands #2 as well, so #2 blocks it and is named"
+        );
+        assert!(stack.blocker_for(999).is_none(), "not a member");
+
+        // The merged member is never a blocker.
+        assert!(!stack.pull_requests[0].would_block_merge());
+    }
+
+    // The range a merge lands, which is what any gate has to apply to.
+    #[test]
+    fn members_landed_by_is_bottom_up_and_inclusive() {
+        let json = r#"{"number":9,"pull_requests":[
+            {"number":1,"state":"open"},{"number":2,"state":"open"},{"number":3,"state":"open"}
+        ]}"#;
+        let stack: Stack = serde_json::from_str(json).unwrap();
+        let nums = |t| stack.members_landed_by(t).map(|m| m.iter().map(|p| p.number).collect::<Vec<_>>());
+        assert_eq!(nums(1), Some(vec![1]));
+        assert_eq!(nums(2), Some(vec![1, 2]));
+        assert_eq!(nums(3), Some(vec![1, 2, 3]));
+        assert_eq!(nums(4), None, "not a member");
+    }
+
+    // Preview-grade schema: a shrinking payload must not fail the parse.
+    #[test]
+    fn a_partial_stack_payload_still_parses() {
+        let stack: Stack = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(stack.number, 0);
+        assert!(stack.base.is_none());
+        assert!(stack.pull_requests.is_empty());
+    }
+
+    // A ref object that is PRESENT but has lost its `ref` key. `#[serde(default)]`
+    // does not cover this: the field is there, so serde descends into it and hits a
+    // required `ref_name`, which used to abandon the whole payload with
+    // `missing field \`ref\``. The tests above all drop keys ENTIRELY, so none of
+    // them produced this shape — the `forge_payload` fuzz target did, on its first
+    // run, by pruning nested keys as well as top-level ones.
+    #[test]
+    fn a_ref_object_missing_its_ref_key_degrades_to_none() {
+        let stack: Stack = serde_json::from_str(
+            r#"{"number":7,"base":{},"pull_requests":[{"number":8,"base":{},"head":{"sha":"abc"}}]}"#,
+        )
+        .expect("a malformed nested ref must not fail the whole stack payload");
+
+        assert_eq!(stack.number, 7, "the rest of the payload still parses");
+        assert!(stack.base.is_none(), "the malformed base degrades to None");
+
+        let member = &stack.pull_requests[0];
+        assert_eq!(member.number, 8);
+        assert!(member.base.is_none());
+        assert!(member.head.is_none(), "present but missing `ref` is still None");
+    }
+
+    // The strictness that stays. A pull request is served by a STABLE API, so a
+    // payload with no usable base is a broken response, not a preview-grade one —
+    // failing loudly beats silently retargeting a PR at "".
+    #[test]
+    fn a_pull_request_with_a_malformed_base_still_fails_loudly() {
+        let result = serde_json::from_str::<PullRequest>(
+            r#"{"number":1,"html_url":"u","title":"t","base":{},"head":{"ref":"h"}}"#,
+        );
+        assert!(
+            result.is_err(),
+            "PullRequest::base must stay strict; only the preview-grade types are lenient"
+        );
+    }
+
+    /// The `stack` object GitHub embeds on a pull request payload (captured
+    /// live from `GET /pulls/227` on stack 229). Deliberately the *lean* shape:
+    /// it carries `position`/`size` that the `/stacks` resource does not, and
+    /// carries no URL of any kind.
+    const PR_WITH_STACK_JSON: &str = r#"{
+        "number": 227,
+        "html_url": "https://github.com/o/r/pull/227",
+        "title": "us layer c",
+        "body": null,
+        "base": { "ref": "us0730-b" },
+        "head": { "ref": "us0730-c" },
+        "stack": {
+            "base": { "ref": "main", "sha": "7a0f7401c5746b0a737b6eaedd9489e99b20a0aa" },
+            "id": 67362,
+            "number": 229,
+            "position": 3,
+            "size": 4
+        }
+    }"#;
+
+    #[test]
+    fn embedded_stack_object_deserializes_from_a_real_pr_payload() {
+        let pr: PullRequest = serde_json::from_str(PR_WITH_STACK_JSON).unwrap();
+        let stack = pr.stack.expect("stack should be present");
+        assert_eq!(stack.number, 229);
+        assert_eq!((stack.position, stack.size), (3, 4));
+        // The stack's ultimate target, not this PR's immediate base.
+        assert_eq!(stack.base.expect("base present in the real payload").ref_name, "main");
+        assert_eq!(pr.base.ref_name, "us0730-b");
+    }
+
+    // Every other forge, and every unstacked GitHub PR, simply omits the field.
+    #[test]
+    fn a_pr_without_a_stack_field_parses_as_unstacked() {
+        let json = r#"{
+            "number": 1, "html_url": "u", "title": "t", "body": null,
+            "base": { "ref": "main" }, "head": { "ref": "feat" }
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert!(pr.stack.is_none());
+    }
+
+    // The schema is preview-grade and rides on the payload for every PR jjpr
+    // reads. A field GitHub stops sending must degrade the message, not fail the
+    // parse — a failed parse takes list_open_prs down and breaks the whole repo.
+    // Critically, the stack must still be detected, so the merge block still fires.
+    #[test]
+    fn a_stack_object_missing_fields_still_parses_and_still_signals_a_stack() {
+        let json = r#"{
+            "number": 1, "html_url": "u", "title": "t", "body": null,
+            "base": { "ref": "main" }, "head": { "ref": "feat" },
+            "stack": { "number": 223 }
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        let stack = pr.stack.expect("a partial stack object must still be detected");
+        assert_eq!(stack.number, 223);
+        assert!(stack.base.is_none());
+        assert_eq!((stack.position, stack.size), (0, 0));
+    }
+
+    // The degenerate case: even an empty object means "this PR is stacked".
+    #[test]
+    fn an_empty_stack_object_still_signals_a_stack() {
+        let json = r#"{
+            "number": 1, "html_url": "u", "title": "t", "body": null,
+            "base": { "ref": "main" }, "head": { "ref": "feat" }, "stack": {}
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert!(
+            pr.stack.is_some(),
+            "an unparseable-but-present stack must not read as unstacked; \
+             that would let jjpr attempt a merge GitHub will reject"
+        );
+    }
+
+    // Unknown/extra fields are expected on a preview schema and must be ignored.
+    #[test]
+    fn unknown_fields_on_the_stack_object_are_tolerated() {
+        let json = r#"{
+            "number": 1, "html_url": "u", "title": "t", "body": null,
+            "base": { "ref": "main" }, "head": { "ref": "feat" },
+            "stack": { "number": 223, "position": 1, "size": 2, "future_field": {"a": 1} }
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.stack.expect("present").number, 223);
+    }
+
+    // GitHub sends an explicit null for an unstacked PR, which must not error.
+    #[test]
+    fn an_explicit_null_stack_parses_as_unstacked() {
+        let json = r#"{
+            "number": 1, "html_url": "u", "title": "t", "body": null,
+            "base": { "ref": "main" }, "head": { "ref": "feat" }, "stack": null
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert!(pr.stack.is_none());
     }
 
     #[test]

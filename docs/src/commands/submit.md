@@ -146,6 +146,39 @@ Error: cannot push — some commits have unresolved conflicts:
 To resolve: jj edit pnnmmvmu, fix the conflicts, then re-run jjpr submit.
 ```
 
+## Reshaping a native stack
+
+If your PRs are registered as a GitHub native stack (with `gh stack submit` or
+from the web UI), most of submit works normally. Pushing rewritten commits is
+fine: the stack follows each branch's new head. Creating PRs, updating
+descriptions, and stack comments all work.
+
+The exception is retargeting. GitHub rejects a base change on any PR that
+belongs to a stack, even a change to the base it already has. jjpr only needs
+to retarget when the stack's shape changes, so amending commits and re-pushing
+is unaffected. Reordering, inserting, or dropping a bookmark is not.
+
+jjpr checks this before pushing anything and stops:
+
+```
+Error: the stack's shape changed, but its PRs are in a GitHub native stack.
+
+  #239 ('sub0730-c') needs its base moved from 'sub0730-b' to 'sub0730-a'
+
+GitHub does not allow retargeting a PR that belongs to a stack, so jjpr cannot
+apply that. Nothing has been pushed.
+
+To continue, dissolve the native stack and let jjpr manage the bases:
+  gh stack unstack 240
+  jjpr submit
+
+Or keep the native stack and restructure it with gh instead:
+  gh stack unstack 240 && gh stack init <branches in the new order>
+```
+
+The check runs in `--dry-run` too. A dry run reports the refusal rather than
+printing a base update that could not succeed.
+
 ## Stack-awareness comment
 
 Multi-PR stacks get a comment on every PR linking the others:

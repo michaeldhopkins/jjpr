@@ -93,6 +93,31 @@ The note is conditional on how the lower PR lands: a **merge-commit**
 landing keeps your approval, because jjpr skips the needless rebase in
 that case (see [merge](merge.md)).
 
+## PRs in a GitHub native stack
+
+A PR registered as a member of a GitHub native stack cannot be merged by jjpr,
+because GitHub refuses the merge endpoint for stacked PRs. Status flags those,
+so the mergeability line above it is not read as an invitation to run
+`jjpr merge`:
+
+```
+  auth (1 change, PR open, push up to date)
+    https://github.com/owner/repo/pull/345
+    ✓ mergeable  ✗ 0 approvals
+    ⚠ in native stack #348 (1 of 3), so jjpr cannot merge it; `gh stack merge 345` lands it
+```
+
+The position is 1-based from the bottom of the stack, and the note says what
+the command would land, because merging a stacked PR lands every PR below it
+too. At position 1 that is one PR; at position 3 the note reads
+`lands it and the 2 below`.
+
+This reads the stack membership GitHub embeds in the PR data jjpr already
+fetches, so it costs no extra request. See
+[GitHub native stacks](merge.md#github-native-stacks) for the ways to land such
+a stack, and [Reshaping a native stack](submit.md#reshaping-a-native-stack) for
+what submit can and cannot do with one.
+
 ## Branches that aren't yours
 
 `status` shows the whole stack down to your default branch, including a
@@ -166,3 +191,4 @@ Nothing of yours to submit here.
 | `✓ N approvals` / `✗ 0 approvals` | Count of approving reviews (the required threshold comes from config) |
 | `⚠ changes requested` | At least one reviewer has requested changes |
 | `⚠ a squash-landing of #N would dismiss …` | A lower PR's squash landing would force-push this approved PR and drop its approvals |
+| `⚠ in native stack #N …` | This PR belongs to a GitHub native stack, which jjpr cannot merge; the note names the command that can and what it would land |

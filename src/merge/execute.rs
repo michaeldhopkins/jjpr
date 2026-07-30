@@ -336,6 +336,17 @@ fn concurrent_gate_warning(restored: bool, divergent_ids: &[String]) -> LocalDiv
 /// Independent of local state — runs even when local reconciliation failed.
 /// Returns `(Option<fresh_map>, Vec<warnings>)` — never errors, since the
 /// forge merge already happened and reconciliation is best-effort.
+/// What the forge-side reconcile found.
+///
+/// `native_stack_block` is kept apart from `warnings` because it is not a
+/// failure: nothing went wrong and nothing is retryable. It travels as the same
+/// `BlockReason` the pre-merge check emits so both routes render identically.
+struct ForgeReconcileOutcome {
+    fresh_map: Option<HashMap<String, PullRequest>>,
+    warnings: Vec<LocalDivergenceWarning>,
+    native_stack_block: Option<BlockReason>,
+}
+
 fn reconcile_forge_state(
     forge: &dyn Forge,
     nav: &dyn comment::StackNav,
@@ -345,8 +356,9 @@ fn reconcile_forge_state(
     repo: &str,
     effective_base: &str,
     fk: ForgeKind,
-) -> (Option<HashMap<String, PullRequest>>, Vec<LocalDivergenceWarning>) {
+) -> ForgeReconcileOutcome {
     let mut warnings = Vec::new();
+    let mut native_stack_block = None;
     let mk = |message: String| LocalDivergenceWarning {
         kind: DivergenceKind::Forge,
         message,
@@ -356,7 +368,7 @@ fn reconcile_forge_state(
         Ok(prs) => prs,
         Err(e) => {
             warnings.push(mk(format!("Failed to refresh PR list: {e}")));
-            return (None, warnings);
+            return ForgeReconcileOutcome { fresh_map: None, warnings, native_stack_block };
         }
     };
     let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
@@ -365,15 +377,35 @@ fn reconcile_forge_state(
     if let Some(next_pr) = fresh_map.get(next_name)
         && next_pr.base.ref_name != effective_base
     {
-        println!(
-            "  Updating {} base to '{effective_base}'...",
-            fk.format_ref(next_pr.number)
-        );
-        if let Err(e) = forge.update_pr_base(owner, repo, next_pr.number, effective_base) {
-            warnings.push(mk(format!(
-                "Failed to retarget {} base to '{effective_base}': {e}",
+        // GitHub rejects a base change on any PR in a native stack, so making
+        // the call would turn a knowable situation into an opaque 422. This is
+        // reachable even though merge refuses to merge a *stacked* PR: a native
+        // stack can be rooted on any branch, so the PR that just merged may be
+        // unstacked while the one above it is not.
+        //
+        // The merge that just landed is not undone. jjpr simply stops here,
+        // which the forge_failed flag already arranges.
+        if let Some(stack) = &next_pr.stack {
+            // Report it as the same block the pre-merge check produces, rather
+            // than a bespoke warning: the situation and the user's options are
+            // identical, and a second phrasing for it would only diverge.
+            native_stack_block = Some(BlockReason::NativeStack {
+                pr_number: next_pr.number,
+                stack_number: stack.number,
+                position: stack.position,
+                size: stack.size,
+            });
+        } else {
+            println!(
+                "  Updating {} base to '{effective_base}'...",
                 fk.format_ref(next_pr.number)
-            )));
+            );
+            if let Err(e) = forge.update_pr_base(owner, repo, next_pr.number, effective_base) {
+                warnings.push(mk(format!(
+                    "Failed to retarget {} base to '{effective_base}': {e}",
+                    fk.format_ref(next_pr.number)
+                )));
+            }
         }
     }
 
@@ -402,7 +434,7 @@ fn reconcile_forge_state(
         }
     }
 
-    (Some(fresh_map), warnings)
+    ForgeReconcileOutcome { fresh_map: Some(fresh_map), warnings, native_stack_block }
 }
 
 /// Split a stack-info comment's previous payload into `(live, fossils)`
@@ -488,13 +520,18 @@ pub(crate) fn reconcile_after_merge(
     state.warnings.extend(warnings);
 
     let nav = comment::create_stack_nav(plan.stack_nav);
-    let (fresh_map, forge_warnings) =
+    let outcome =
         reconcile_forge_state(forge, nav.as_ref(), segments, seg_idx, owner, repo, effective_base, fk);
-    if !forge_warnings.is_empty() {
+    if !outcome.warnings.is_empty() {
         state.forge_failed = true;
-        state.warnings.extend(forge_warnings);
+        state.warnings.extend(outcome.warnings);
     }
-    fresh_map
+    // Not a failure, so it does not set forge_failed — but it still has to stop
+    // the run, which `degraded()` arranges via this field.
+    if outcome.native_stack_block.is_some() {
+        state.native_stack_block = outcome.native_stack_block;
+    }
+    outcome.fresh_map
 }
 
 /// The change ID to hand to `jj rebase -s ...` to rebase the entire
@@ -624,11 +661,18 @@ pub struct ReconcileState {
     pub local_failed: bool,
     pub forge_failed: bool,
     pub warnings: Vec<LocalDivergenceWarning>,
+    /// The next PR is in a GitHub native stack, so its base cannot be retargeted
+    /// and jjpr cannot advance. Deliberately not a `*_failed` flag: nothing
+    /// failed, and re-running changes nothing. It still stops the run.
+    pub native_stack_block: Option<BlockReason>,
 }
 
 impl ReconcileState {
     pub fn degraded(&self) -> bool {
-        self.local_failed || self.forge_failed || self.has_concurrent()
+        self.local_failed
+            || self.forge_failed
+            || self.has_concurrent()
+            || self.native_stack_block.is_some()
     }
 
     /// Whether this pass hit a concurrent op-log reconcile (and paused/rolled
@@ -650,6 +694,9 @@ impl ReconcileState {
         }
         if self.forge_failed {
             reasons.push(BlockReason::ForgeReconcileFailed);
+        }
+        if let Some(reason) = &self.native_stack_block {
+            reasons.push(reason.clone());
         }
         reasons
     }
@@ -961,6 +1008,25 @@ pub(crate) fn format_block_reason(reason: &BlockReason, fk: ForgeKind) -> String
         BlockReason::ConcurrentModification => {
             "Concurrent modification (another jj process)".to_string()
         }
+        BlockReason::NativeStack {
+            pr_number,
+            stack_number,
+            position,
+            size,
+        } => {
+            // At the bottom of the stack there is nothing below, so promising to
+            // land "everything below it" would overstate what the command does.
+            let lands = if *position <= 1 {
+                format!("which lands #{pr_number}")
+            } else {
+                format!("which lands #{pr_number} and the {} below it", position - 1)
+            };
+            format!(
+                "In native stack #{stack_number} ({position} of {size}); \
+                 GitHub refuses API merges of stacked {abbr}s. \
+                 Run `gh stack merge {pr_number}`, {lands}"
+            )
+        }
     }
 }
 
@@ -1027,6 +1093,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         }
     }
 
@@ -1412,6 +1479,130 @@ mod tests {
 
         // Happy path: no local warnings
         assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+    }
+
+    // The partially-stacked shape, verified reachable on a live repo: a native
+    // stack may be rooted on any branch, so the PR that merges can be unstacked
+    // while the one above it is a stack member. Merge's own NativeStack block
+    // never fires (the merged PR is not stacked), and reconcile then tries the
+    // one retarget GitHub forbids. Skip the call rather than earn a 422.
+    #[test]
+    fn reconcile_does_not_retarget_a_next_pr_that_is_natively_stacked() {
+        let jj = RecordingJj::new();
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        {
+            let mut prs = gh.open_prs.lock().expect("poisoned");
+            prs[1].base.ref_name = "auth".to_string();
+            prs[1].stack = Some(crate::forge::types::PrStackRef {
+                number: 245,
+                id: 1,
+                position: 1,
+                size: 2,
+                base: None,
+            });
+        }
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+
+        // The merge that already landed is not undone.
+        assert_eq!(result.merged.len(), 1, "auth still merged");
+
+        assert!(
+            !gh.calls().iter().any(|c| c.starts_with("update_base:")),
+            "must not attempt a retarget GitHub will reject: {:?}",
+            gh.calls()
+        );
+
+        // Blocking still matters: jjpr must not carry on into a stack it cannot
+        // advance, even though evaluate_segment would also refuse the stacked PR.
+        let blocked = result.blocked_at.as_ref().expect("must stop after the skip");
+        assert_eq!(blocked.bookmark_name, "profile");
+
+        // Reported as the same BlockReason the pre-merge check emits, so the
+        // user sees one consistent explanation from either route.
+        assert!(
+            blocked.reasons.contains(&BlockReason::NativeStack {
+                pr_number: 2,
+                stack_number: 245,
+                position: 1,
+                size: 2,
+            }),
+            "expected a NativeStack block: {:?}",
+            blocked.reasons
+        );
+
+        // And crucially NOT as a forge failure: that would render "forge
+        // reconcile failed" with a retry hint, for something retrying cannot fix.
+        assert!(
+            !blocked.reasons.contains(&BlockReason::ForgeReconcileFailed),
+            "must not masquerade as a retryable forge failure: {:?}",
+            blocked.reasons
+        );
+        assert!(
+            result.local_warnings.is_empty(),
+            "nothing failed, so there should be no warning: {:?}",
+            result.local_warnings
+        );
+    }
+
+    // The ordinary path must keep retargeting: an unstacked next PR is
+    // unaffected by any of this.
+    #[test]
+    fn reconcile_still_retargets_an_unstacked_next_pr() {
+        let jj = RecordingJj::new();
+        let gh = RecordingGitHub::new()
+            .with_evaluatable_pr("auth", 1)
+            .with_evaluatable_pr("profile", 2);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
+
+        let plan = MergePlan {
+            actions: vec![
+                PrMergeStatus::Mergeable {
+                    bookmark_name: "auth".to_string(),
+                    pr: make_pr("auth", 1),
+                },
+                PrMergeStatus::Blocked {
+                    bookmark_name: "profile".to_string(),
+                    pr: Some(make_pr("profile", 2)),
+                    reasons: vec![BlockReason::ChecksPending],
+                },
+            ],
+            repo_info: repo_info(),
+            forge_kind: ForgeKind::GitHub,
+            options: default_options(),
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        let segments = vec![make_segment("auth"), make_segment("profile")];
+
+        execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
+        assert!(gh.calls().iter().any(|c| c == "update_base:#2:main"));
     }
 
     // `jj rebase` reports success even when it leaves conflicts, so the Err
@@ -2987,6 +3178,58 @@ mod tests {
         // LocalSyncFailed and ForgeReconcileFailed need user action; not transient.
         assert!(!BlockReason::LocalSyncFailed.is_transient());
         assert!(!BlockReason::ForgeReconcileFailed.is_transient());
+        // Native-stack membership never clears by waiting — treating it as
+        // transient would make `jjpr watch` poll forever.
+        assert!(
+            !BlockReason::NativeStack {
+                pr_number: 1,
+                stack_number: 223,
+                position: 2,
+                size: 4,
+            }
+            .is_transient()
+        );
+    }
+
+    #[test]
+    fn native_stack_reason_names_the_stack_and_the_command_that_works() {
+        let msg = format_block_reason(
+            &BlockReason::NativeStack {
+                pr_number: 221,
+                stack_number: 223,
+                position: 2,
+                size: 4,
+            },
+            ForgeKind::GitHub,
+        );
+        assert!(msg.contains("#223"), "should name the stack: {msg}");
+        assert!(msg.contains("2 of 4"), "should say where in the stack: {msg}");
+        // The remedy has to be the command that actually works — `jjpr merge`
+        // never will, and GitHub's own 403 text ("use the web interface") is
+        // stale now that `gh stack merge` exists.
+        assert!(msg.contains("gh stack merge 221"), "should give the remedy: {msg}");
+        assert!(msg.contains("the 1 below it"), "should say how much else lands: {msg}");
+    }
+
+    // Caught by running the real binary against a real stack: at the bottom of a
+    // stack nothing is below, so the generic "and everything below it" phrasing
+    // overstated what `gh stack merge` would do.
+    #[test]
+    fn native_stack_reason_does_not_overstate_at_the_bottom_of_the_stack() {
+        let msg = format_block_reason(
+            &BlockReason::NativeStack {
+                pr_number: 234,
+                stack_number: 236,
+                position: 1,
+                size: 2,
+            },
+            ForgeKind::GitHub,
+        );
+        assert!(msg.contains("which lands #234"), "{msg}");
+        assert!(
+            !msg.contains("below it"),
+            "nothing is below the bottom PR; the message must not claim otherwise: {msg}"
+        );
     }
 
     #[test]
@@ -3002,6 +3245,7 @@ mod tests {
         let s = ReconcileState {
             local_failed: true,
             forge_failed: false,
+            native_stack_block: None,
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Local,
                 message: "fetch failed".into(),
@@ -3016,6 +3260,7 @@ mod tests {
         let s = ReconcileState {
             local_failed: false,
             forge_failed: true,
+            native_stack_block: None,
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Forge,
                 message: "list_open_prs failed".into(),
@@ -3030,6 +3275,7 @@ mod tests {
         let s = ReconcileState {
             local_failed: true,
             forge_failed: true,
+            native_stack_block: None,
             warnings: vec![],
         };
         assert!(s.degraded());
@@ -3046,6 +3292,7 @@ mod tests {
         let s = ReconcileState {
             local_failed: false,
             forge_failed: false,
+            native_stack_block: None,
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Concurrent,
                 message: "rolled back".into(),
@@ -3346,6 +3593,7 @@ mod tests {
         let s = ReconcileState {
             local_failed: true,
             forge_failed: true,
+            native_stack_block: None,
             warnings: vec![],
         };
         let reasons = s.block_reasons();
@@ -3358,13 +3606,13 @@ mod tests {
 
     #[test]
     fn block_reasons_local_only_omits_forge() {
-        let s = ReconcileState { local_failed: true, forge_failed: false, warnings: vec![] };
+        let s = ReconcileState { local_failed: true, forge_failed: false, warnings: vec![], native_stack_block: None };
         assert_eq!(s.block_reasons(), vec![BlockReason::LocalSyncFailed]);
     }
 
     #[test]
     fn block_reasons_forge_only_omits_local() {
-        let s = ReconcileState { local_failed: false, forge_failed: true, warnings: vec![] };
+        let s = ReconcileState { local_failed: false, forge_failed: true, warnings: vec![], native_stack_block: None };
         assert_eq!(s.block_reasons(), vec![BlockReason::ForgeReconcileFailed]);
     }
 
@@ -3373,6 +3621,7 @@ mod tests {
         let mut s = ReconcileState {
             local_failed: true,
             forge_failed: true,
+            native_stack_block: None,
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Local,
                 message: "x".into(),
@@ -3423,6 +3672,7 @@ mod tests {
         let mut state = ReconcileState {
             local_failed: true,           // simulate caller re-entering
             forge_failed: false,
+            native_stack_block: None,
             warnings: vec![],
         };
         // Should panic in debug builds.

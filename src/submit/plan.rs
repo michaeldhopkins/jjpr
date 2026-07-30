@@ -26,6 +26,28 @@ pub struct BookmarkNeedingBaseUpdate {
     pub expected_base: String,
 }
 
+/// A base retarget jjpr cannot perform because the PR belongs to a GitHub
+/// native pull-request stack.
+///
+/// GitHub rejects `PATCH /pulls/{n}` with a `422` ("Cannot change the base
+/// branch because the pull request is part of a stack") for any stacked PR,
+/// even when the new base equals the current one. So this is not a race jjpr
+/// can retry or a permission it can acquire: while the PR is stacked, the
+/// retarget is impossible.
+///
+/// It only arises when the local stack's shape stops matching the native
+/// stack's declared order, which means jjpr's model and GitHub's genuinely
+/// disagree. Ordinary submits (amend and re-push, with the chain unchanged)
+/// need no retarget and are unaffected.
+#[derive(Debug)]
+pub struct NativeStackBaseConflict {
+    pub bookmark: Bookmark,
+    pub pr_number: u64,
+    pub current_base: String,
+    pub expected_base: String,
+    pub stack_number: u64,
+}
+
 /// What needs to happen for a bookmark whose PR body's managed section is stale.
 #[derive(Debug)]
 pub struct BookmarkNeedingBodyUpdate {
@@ -87,6 +109,9 @@ pub struct SubmissionPlan {
     pub bookmarks_needing_push: Vec<Bookmark>,
     pub bookmarks_needing_pr: Vec<BookmarkNeedingPr>,
     pub bookmarks_needing_base_update: Vec<BookmarkNeedingBaseUpdate>,
+    /// Base retargets GitHub will not accept because the PR is in a native
+    /// stack. Not actions: execute refuses up front when this is non-empty.
+    pub native_stack_base_conflicts: Vec<NativeStackBaseConflict>,
     pub bookmarks_needing_body_update: Vec<BookmarkNeedingBodyUpdate>,
     pub bookmarks_needing_ready: Vec<BookmarkNeedingReady>,
     /// Existing PRs that should receive reviewer requests. Already
@@ -114,6 +139,11 @@ pub struct SubmissionPlan {
 
 impl SubmissionPlan {
     /// Whether this plan has any actions that will modify remote state.
+    ///
+    /// Deliberately excludes `native_stack_base_conflicts`: those are things
+    /// jjpr *cannot* do, not things it will. Callers that skip execution on a
+    /// `false` here must check the conflicts separately, or the refusal is
+    /// never reported — see the early return in `watch::run_submit_phase`.
     pub fn has_actions(&self) -> bool {
         !self.bookmarks_needing_push.is_empty()
             || !self.bookmarks_needing_pr.is_empty()
@@ -410,6 +440,7 @@ pub fn create_submission_plan(
     let mut bookmarks_needing_push = Vec::new();
     let mut bookmarks_needing_pr = Vec::new();
     let mut bookmarks_needing_base_update = Vec::new();
+    let mut native_stack_base_conflicts = Vec::new();
     let mut bookmarks_needing_body_update = Vec::new();
     let mut bookmarks_needing_ready = Vec::new();
     let mut bookmarks_needing_reviewers = Vec::new();
@@ -493,11 +524,24 @@ pub fn create_submission_plan(
         if let Some(pr) = existing_pr {
             // Check if base needs updating
             if pr.base.ref_name != base_branch {
-                bookmarks_needing_base_update.push(BookmarkNeedingBaseUpdate {
-                    bookmark: bookmark.clone(),
-                    pr: pr.clone(),
-                    expected_base: base_branch,
-                });
+                // GitHub refuses to retarget a PR that is in a native stack, so
+                // recording this as an ordinary action would guarantee a 422
+                // partway through submit, after the pushes had already landed.
+                if let Some(stack) = &pr.stack {
+                    native_stack_base_conflicts.push(NativeStackBaseConflict {
+                        bookmark: bookmark.clone(),
+                        pr_number: pr.number,
+                        current_base: pr.base.ref_name.clone(),
+                        expected_base: base_branch,
+                        stack_number: stack.number,
+                    });
+                } else {
+                    bookmarks_needing_base_update.push(BookmarkNeedingBaseUpdate {
+                        bookmark: bookmark.clone(),
+                        pr: pr.clone(),
+                        expected_base: base_branch,
+                    });
+                }
             }
 
             // Reconcile the managed body section against the commit,
@@ -597,6 +641,7 @@ pub fn create_submission_plan(
         bookmarks_needing_push,
         bookmarks_needing_pr,
         bookmarks_needing_base_update,
+        native_stack_base_conflicts,
         bookmarks_needing_body_update,
         bookmarks_needing_ready,
         bookmarks_needing_reviewers,
@@ -722,6 +767,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         }
     }
 
@@ -786,6 +832,66 @@ mod tests {
             plan.bookmarks_needing_base_update[0].expected_base,
             "auth"
         );
+        assert!(plan.native_stack_base_conflicts.is_empty());
+    }
+
+    // The same reshape, but the PR is in a GitHub native stack. GitHub answers
+    // a retarget on a stacked PR with 422 regardless of the value, so planning
+    // it as an ordinary action would guarantee a mid-submit failure after the
+    // pushes had landed. It must be diverted to the conflict list instead.
+    #[test]
+    fn a_base_update_on_a_natively_stacked_pr_becomes_a_conflict_not_an_action() {
+        let mut pr = make_pr("profile", "main");
+        pr.stack = Some(crate::forge::types::PrStackRef {
+            number: 240,
+            id: 1,
+            position: 2,
+            size: 3,
+            base: None,
+        });
+        let gh = StubGitHub {
+            prs: HashMap::from([("profile".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("auth", true), make_segment("profile", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+
+        assert!(
+            plan.bookmarks_needing_base_update.is_empty(),
+            "must not be planned as an action jjpr cannot perform"
+        );
+        assert_eq!(plan.native_stack_base_conflicts.len(), 1);
+        let c = &plan.native_stack_base_conflicts[0];
+        assert_eq!(c.pr_number, 1);
+        assert_eq!(c.stack_number, 240);
+        assert_eq!(c.current_base, "main");
+        assert_eq!(c.expected_base, "auth");
+    }
+
+    // The common case, and the one that must not regress: amending commits
+    // without reshaping the stack needs no retarget, so a native stack is no
+    // obstacle to an ordinary submit. Pushing to a stacked PR is allowed.
+    #[test]
+    fn a_natively_stacked_pr_with_a_correct_base_plans_no_conflict() {
+        let mut pr = make_pr("feature", "main");
+        pr.stack = Some(crate::forge::types::PrStackRef {
+            number: 240,
+            id: 1,
+            position: 1,
+            size: 2,
+            base: None,
+        });
+        let gh = StubGitHub {
+            prs: HashMap::from([("feature".to_string(), pr)]),
+        };
+        let segments = vec![make_segment("feature", true)];
+        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+
+        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+
+        assert!(plan.native_stack_base_conflicts.is_empty());
+        assert!(plan.bookmarks_needing_base_update.is_empty());
     }
 
     #[test]
@@ -1514,6 +1620,7 @@ mod tests {
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
                         author: String::new(),
+                        stack: None,
                     }))
                 } else {
                     Ok(None)
@@ -1581,6 +1688,7 @@ mod tests {
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
                         author: String::new(),
+                        stack: None,
                     }))
                 } else {
                     Ok(None)
@@ -1644,6 +1752,7 @@ mod tests {
                     merged_at: None,
                     requested_reviewers: vec![],
                     author: String::new(),
+                    stack: None,
                 }])
             }
             fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
@@ -1660,6 +1769,7 @@ mod tests {
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
                         author: String::new(),
+                        stack: None,
                     }))
                 } else {
                     Ok(None)
@@ -1768,6 +1878,7 @@ mod tests {
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
                         requested_reviewers: vec![],
                         author: String::new(),
+                        stack: None,
                     }))
                 } else {
                     Ok(None)
@@ -2136,6 +2247,7 @@ mod tests {
                     merged_at: None,
                     requested_reviewers: vec![],
                     author: String::new(),
+                    stack: None,
                 },
             )]),
         };

@@ -41,6 +41,7 @@ pub(crate) fn format_resolved_reason(reason: &BlockReason) -> &'static str {
         BlockReason::LocalSyncFailed => "Local sync recovered",
         BlockReason::ForgeReconcileFailed => "Forge reconcile recovered",
         BlockReason::ConcurrentModification => "Concurrent modification cleared",
+        BlockReason::NativeStack { .. } => "No longer in a native stack",
     }
 }
 

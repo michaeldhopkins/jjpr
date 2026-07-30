@@ -418,6 +418,30 @@ fn run_merge_phase(
                     });
                 }
 
+                // Native-stack membership never clears on its own, so polling
+                // would spin at the poll interval forever. Stop and name the
+                // thing that will actually resolve it, as with NoPr above.
+                if let Some(line) = reasons
+                    .iter()
+                    .find(|r| matches!(r, BlockReason::NativeStack { .. }))
+                    .map(|r| format_block_reason(r, forge_kind))
+                {
+                    println!("\n  Blocked at '{bookmark_name}':");
+                    println!("    - {line}");
+                    let pr_number = pr.as_ref().map(|p| p.number);
+                    return Ok(MergePhaseOutcome {
+                        merged,
+                        skipped,
+                        blocked: Some(BlockedPr {
+                            bookmark_name,
+                            pr_number,
+                            reasons,
+                        }),
+                        all_done: false,
+                        waiting_on_block: false,
+                    });
+                }
+
                 if prev_reasons.is_none()
                     && let Some(hint) = reviewer_hint(pr.as_ref(), &reasons, &bookmark_name, forge_kind)
                 {
@@ -1081,7 +1105,12 @@ fn run_submit_phase(
         },
     )?;
 
-    if !submission_plan.has_actions() {
+    // A native-stack base conflict is not an "action" (nothing would be
+    // modified), so has_actions() is false for a plan carrying only that. Fall
+    // through anyway: execute_submission_plan turns it into an explanatory
+    // error, and returning early here would leave watch looping forever with no
+    // indication of why submit never does anything.
+    if !submission_plan.has_actions() && submission_plan.native_stack_base_conflicts.is_empty() {
         return Ok(vec![]);
     }
 
@@ -1131,6 +1160,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         }
     }
 
@@ -1682,6 +1712,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         }
     }
 
@@ -1900,6 +1931,52 @@ mod tests {
         );
     }
 
+    // The contrast with the test above: a native stack never clears, so it must
+    // come back as a hard `blocked`, which is what makes the outer watch loop
+    // break immediately instead of polling. Returning it as a soft wait would
+    // spin at the poll interval forever.
+    #[test]
+    fn run_merge_phase_hard_blocks_on_a_native_stack() {
+        let mut pr = gate_test_pr("auth", 1);
+        pr.stack = Some(crate::forge::types::PrStackRef {
+            number: 223,
+            id: 1,
+            position: 2,
+            size: 4,
+            base: Some(PullRequestRef {
+                ref_name: "main".into(),
+                label: String::new(),
+                sha: String::new(),
+            }),
+        });
+        let forge = UnapprovedForge::new(vec![pr]);
+        let segments = vec![gate_test_segment("auth")];
+        let plan = gate_test_plan();
+        let mut state = ReconcileState::default();
+        let mut prev_reasons: Option<Vec<BlockReason>> = None;
+        let mut consecutive_errors = 0u32;
+        let mut last_heartbeat = Instant::now();
+
+        let outcome = run_merge_phase(
+            &HealthyJj, &forge, &segments, &forge.prs, &plan.options,
+            &plan, ForgeKind::GitHub,
+            &mut prev_reasons, &mut consecutive_errors,
+            &mut last_heartbeat, &mut state, false,
+        ).expect("run_merge_phase should not error");
+
+        let blocked = outcome.blocked.expect("a native stack must be a hard block");
+        assert!(matches!(
+            blocked.reasons[..],
+            [BlockReason::NativeStack { stack_number: 223, .. }]
+        ));
+        assert_eq!(blocked.pr_number, Some(1), "the blocked PR should be identified");
+        assert!(
+            !outcome.waiting_on_block,
+            "must not be reported as an active wait; that would keep the loop polling",
+        );
+        assert!(outcome.merged.is_empty(), "nothing should merge");
+    }
+
     // --- classify_post_merge tests (the persistent-watch state machine) ---
     //
     // These cover the exact transition logic in run_watch_loop's outer
@@ -1920,6 +1997,7 @@ mod tests {
         ReconcileState {
             local_failed: true,
             forge_failed: false,
+            native_stack_block: None,
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Local,
                 message: "fetch failed".into(),
@@ -1931,6 +2009,7 @@ mod tests {
         ReconcileState {
             local_failed: false,
             forge_failed: true,
+            native_stack_block: None,
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Forge,
                 message: "list_open_prs failed".into(),
@@ -1995,6 +2074,7 @@ mod tests {
         let mixed = ReconcileState {
             local_failed: true,
             forge_failed: true,
+            native_stack_block: None,
             warnings: vec![],
         };
         let action = classify_post_merge(&mixed, &prev, Duration::ZERO, HEARTBEAT);

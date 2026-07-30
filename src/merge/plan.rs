@@ -36,6 +36,21 @@ pub enum BlockReason {
     /// the next poll retries. Persistent means another jj/jjpr process is still
     /// running on this repo and needs to be paused.
     ConcurrentModification,
+    /// The PR belongs to a GitHub native pull-request stack, which GitHub
+    /// refuses to merge over the ordinary merge endpoint (`403`). Users can
+    /// create these independently with `gh-stack` or the web UI, so this
+    /// blocks stacks jjpr never opted into.
+    ///
+    /// Caught before the merge rather than at the `403` on purpose: jjpr merges
+    /// bottom-up in sequence, so discovering it mid-run would leave the stack
+    /// half-landed with reconcile already applied to the PRs below.
+    NativeStack {
+        pr_number: u64,
+        stack_number: u64,
+        /// 1-based from the bottom. Also the number of PRs a merge here lands.
+        position: u32,
+        size: u32,
+    },
 }
 
 impl BlockReason {
@@ -156,6 +171,23 @@ pub fn evaluate_segment(
             }
         }
     };
+
+    // Before anything else, and before any mutation: a stacked PR cannot be
+    // merged through the endpoint jjpr uses, so marking it ready or spending
+    // mergeability/CI/review requests on it would all be wasted. Returning here
+    // keeps the refusal cheap and keeps jjpr from touching a PR it won't merge.
+    if let Some(stack) = &pr.stack {
+        return Ok(PrMergeStatus::Blocked {
+            bookmark_name: bookmark_name.to_string(),
+            reasons: vec![BlockReason::NativeStack {
+                pr_number: pr.number,
+                stack_number: stack.number,
+                position: stack.position,
+                size: stack.size,
+            }],
+            pr: Some(pr),
+        });
+    }
 
     let mut reasons = Vec::new();
     let mut prefetched = prefetched;
@@ -352,6 +384,7 @@ mod tests {
             merged_at: None,
             requested_reviewers: vec![],
             author: String::new(),
+            stack: None,
         }
     }
 
@@ -491,6 +524,75 @@ mod tests {
         assert_eq!(forge.per_pr_reads(), 3, "mergeability + checks + reviews");
     }
 
+    // Users can register jjpr's PRs as a native stack with `gh-stack` or the web
+    // UI at any time, so merge has to notice before it starts rather than at the
+    // 403 partway up the stack.
+    #[test]
+    fn a_stacked_pr_is_blocked_before_any_per_pr_read() {
+        let forge = CountingForge::new(
+            StubGitHub::new().with_stacked_pr("auth", 1, 223, 2, 4),
+            None,
+        );
+        let plan = create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &default_options(), None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+
+        match &plan.actions[0] {
+            PrMergeStatus::Blocked { reasons, .. } => assert_eq!(
+                reasons,
+                &vec![BlockReason::NativeStack {
+                    pr_number: 1,
+                    stack_number: 223,
+                    position: 2,
+                    size: 4,
+                }],
+                "stack membership should be the sole, dispositive reason"
+            ),
+            other => panic!("expected Blocked, got {other:?}"),
+        }
+        assert_eq!(
+            forge.per_pr_reads(),
+            0,
+            "a PR we cannot merge should cost no mergeability/CI/review requests"
+        );
+    }
+
+    // The check must precede the draft branch: marking a stacked PR ready would
+    // mutate a PR jjpr is about to refuse. StubGitHub::mark_pr_ready is
+    // unimplemented!(), so a wrong ordering panics here rather than passing.
+    #[test]
+    fn a_stacked_draft_pr_is_never_marked_ready() {
+        let forge = StubGitHub::new().with_stacked_pr("auth", 1, 223, 1, 2);
+        let options = MergeOptions { ready: true, ..default_options() };
+        let plan = create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &options, None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+        assert!(matches!(
+            &plan.actions[0],
+            PrMergeStatus::Blocked { reasons, .. }
+                if matches!(reasons[..], [BlockReason::NativeStack { .. }])
+        ));
+    }
+
+    // Guard the common path: an ordinary PR must be unaffected by the new field.
+    #[test]
+    fn an_unstacked_pr_is_still_mergeable() {
+        let forge = StubGitHub::new().with_mergeable_pr("auth", 1);
+        let plan = create_merge_plan(
+            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
+            "main", "origin", &default_options(), None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
+        assert!(matches!(plan.actions[0], PrMergeStatus::Mergeable { .. }));
+    }
+
     #[test]
     fn batched_and_unbatched_reach_the_same_verdict() {
         let blocked = PrStatusBundle {
@@ -618,6 +720,26 @@ mod tests {
             self.reviews.insert(number, ReviewSummary {
                 approved_count: 1,
                 changes_requested: false,
+            });
+            self
+        }
+
+        /// A PR that is green on every axis but belongs to a native stack —
+        /// isolating stack membership as the only thing that can block it.
+        fn with_stacked_pr(mut self, name: &str, number: u64, stack: u64, pos: u32, size: u32) -> Self {
+            self = self.with_mergeable_pr(name, number);
+            let pr = self.open_prs.last_mut().expect("just pushed");
+            pr.draft = true; // also proves the stack check runs before mark_pr_ready
+            pr.stack = Some(crate::forge::types::PrStackRef {
+                number: stack,
+                id: 1,
+                position: pos,
+                size,
+                base: Some(PullRequestRef {
+                    ref_name: "main".to_string(),
+                    label: String::new(),
+                    sha: String::new(),
+                }),
             });
             self
         }
