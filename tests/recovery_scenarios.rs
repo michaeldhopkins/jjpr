@@ -19,6 +19,11 @@ use std::process::{Command, Output};
 use jjpr::jj::{Jj, JjRunner};
 use tempfile::TempDir;
 
+/// Pinned commit timestamps. Two distinct values so a test can choose whether
+/// two operations produce identical commits or merely equivalent ones.
+const FIXED_TS: &str = "2001-02-03T04:05:06+07:00";
+const LATER_TS: &str = "2001-02-03T04:09:09+07:00";
+
 fn jj_available() -> bool {
     Command::new("jj").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
@@ -43,20 +48,53 @@ impl Repo {
         self.dir.path()
     }
     fn jj(&self, args: &[&str]) -> Output {
-        Command::new("jj")
-            .args(["--config=user.name=T", "--config=user.email=t@e.com"])
+        self.jj_inner(args, None)
+    }
+    /// Run with a pinned commit timestamp.
+    ///
+    /// A commit's identity includes its committer timestamp, so two operations
+    /// that are "the same" but land either side of a clock tick produce
+    /// *different* commits — and jj records that as a divergent change rather
+    /// than collapsing them. Pinning the clock is what lets a test choose
+    /// deterministically between the two, instead of racing a second boundary.
+    ///
+    /// `JJ_TIMESTAMP` is jj's mapping onto the `debug.commit-timestamp` config
+    /// key. It is a debug knob, not a stability-guaranteed interface: an
+    /// unparseable value fails loudly, but if a future jj simply stopped reading
+    /// the variable it would be ignored in silence and these tests would quietly
+    /// go back to being timing-dependent. `assert_timestamp_pin_works` guards
+    /// that, so the mechanism failing is a failure rather than a flake.
+    fn jj_at(&self, timestamp: &str, args: &[&str]) -> Output {
+        self.jj_inner(args, Some(timestamp))
+    }
+    fn jj_inner(&self, args: &[&str], timestamp: Option<&str>) -> Output {
+        let mut cmd = Command::new("jj");
+        cmd.args(["--config=user.name=T", "--config=user.email=t@e.com"])
             .args(args)
-            .current_dir(self.path())
-            .output()
-            .expect("jj command")
+            .current_dir(self.path());
+        if let Some(ts) = timestamp {
+            cmd.env("JJ_TIMESTAMP", ts);
+        }
+        cmd.output().expect("jj command")
     }
     /// A read, run working-copy-agnostically: a concurrent-fork scenario can
     /// leave the working copy stale, and an assertion read must not fail on that
     /// (this is how jjpr reads too, and it keeps the parallel suite from flaking).
+    ///
+    /// Fails loudly when the command does. Returning stdout alone turns any
+    /// error into an empty string, which then fails some unrelated assertion as
+    /// a wrong *value* — e.g. `jj log -r <id>` errors on a divergent change ID,
+    /// which surfaced as "expected 1 commit, got 0" and hid the real cause.
     fn out(&self, args: &[&str]) -> String {
         let mut full = vec!["--ignore-working-copy"];
         full.extend_from_slice(args);
-        String::from_utf8_lossy(&self.jj(&full).stdout).trim().to_string()
+        let output = self.jj(&full);
+        assert!(
+            output.status.success(),
+            "jj {full:?} failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
     fn write(&self, name: &str, content: &str) {
         std::fs::write(self.path().join(name), content).unwrap();
@@ -132,9 +170,15 @@ fn reconcile_preserves_divergent_same_change_edits() {
     assert!(!r.divergent().is_empty(), "same-change edits should reconcile to a divergent change (both kept)");
 }
 
-/// Two *equivalent* restacks (same change onto the same base) collapse to a
-/// single correct commit — not a divergent change. So the common two-watch race
-/// needs no resolution at all.
+/// Two *byte-identical* restacks (same change, same base, same commit
+/// timestamp) collapse to a single commit rather than a divergent change.
+///
+/// Read the precondition carefully: this is only reachable when both rebases
+/// produce the same commit, which requires the same committer timestamp. It is
+/// **not** a model of the two-watch race — see
+/// `restacks_a_realistic_race_apart_in_time_do_diverge`, which is the case
+/// jjpr actually has to survive. This test covers only the narrow mechanism:
+/// when jj sees the same commit twice, it does not manufacture divergence.
 #[test]
 fn equivalent_restacks_collapse_to_one_commit() {
     if !jj_available() {
@@ -156,9 +200,12 @@ fn equivalent_restacks_collapse_to_one_commit() {
     r.jj(&["bookmark", "set", "master", "-r", "@"]);
     let good = r.current_op();
 
-    // Two identical restacks of S onto master.
-    r.jj(&["rebase", "-s", &s_change, "-d", "master"]);
-    r.jj(&["--at-operation", &good, "rebase", "-s", &s_change, "-d", "master"]);
+    // Both rebases pinned to the SAME timestamp, so the two commits really are
+    // identical. On the wall clock they collapse only when both land inside the
+    // same second: measured 10/100 divergent back-to-back, and 12/12 divergent
+    // with a 2-second gap.
+    r.jj_at(FIXED_TS, &["rebase", "-s", &s_change, "-d", "master"]);
+    r.jj_at(FIXED_TS, &["--at-operation", &good, "rebase", "-s", &s_change, "-d", "master"]);
     r.jj(&["status"]); // reconcile
 
     let copies = r.out(&["log", "-r", &s_change, "--no-graph", "-T", r#"commit_id ++ "\n""#]);
@@ -166,6 +213,80 @@ fn equivalent_restacks_collapse_to_one_commit() {
     assert!(r.divergent().is_empty(), "equivalent restacks should not be divergent");
     // The single commit carries both S's file and master's file.
     assert_eq!(r.file_count(&s_change), 3, "collapsed commit should have base.txt + m.txt + s.txt");
+}
+
+/// The realistic two-watch race: the same restack performed twice, seconds
+/// apart, **does** produce a divergent change.
+///
+/// This is the case that matters. Two `jjpr watch` processes poll 30s apart, so
+/// their rebases never share a committer timestamp and their commits are never
+/// identical. Measured on the wall clock: 12/12 divergent at a 2-second gap.
+/// The timestamps here are pinned to two distinct values purely to get that
+/// determinism without a `sleep`.
+///
+/// So jjpr's divergence gating is the load-bearing path for concurrent watches,
+/// not a rare fallback — which is why `reconcile_local_state` checks
+/// `divergent_change_ids` three times and never rebases on top of a divergent
+/// stack.
+#[test]
+fn restacks_a_realistic_race_apart_in_time_do_diverge() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    r.write("base.txt", "b\n");
+    r.jj(&["describe", "-m", "BASE"]);
+    r.jj(&["bookmark", "create", "master", "-r", "@"]);
+    r.jj(&["new", "-m", "S"]);
+    r.write("s.txt", "s\n");
+    r.jj(&["status"]);
+    r.jj(&["bookmark", "create", "feat", "-r", "@"]);
+    let s_change = r.out(&["log", "-r", "feat", "--no-graph", "-T", "change_id.short(8)"]);
+    r.jj(&["new", "master", "-m", "M"]);
+    r.write("m.txt", "m\n");
+    r.jj(&["status"]);
+    r.jj(&["bookmark", "set", "master", "-r", "@"]);
+    let good = r.current_op();
+
+    // Same restack twice, but at different clock times — as two watch processes
+    // would inevitably do.
+    r.jj_at(FIXED_TS, &["rebase", "-s", &s_change, "-d", "master"]);
+    r.jj_at(LATER_TS, &["--at-operation", &good, "rebase", "-s", &s_change, "-d", "master"]);
+    r.jj(&["status"]); // reconcile
+
+    assert!(
+        !r.divergent().is_empty(),
+        "restacks at different times must diverge; if this ever passes, the \
+         claim that concurrent watches self-heal needs re-examining"
+    );
+    assert!(
+        r.divergent().iter().any(|c| c.starts_with(&s_change)),
+        "the divergent change should be the restacked one: {:?}",
+        r.divergent()
+    );
+}
+
+/// Guards the pinning mechanism itself.
+///
+/// `JJ_TIMESTAMP` is a debug knob (it maps to `debug.commit-timestamp`). If a
+/// future jj stopped honouring it, nothing would error — the variable would
+/// just be ignored, and the two tests above would silently revert to racing the
+/// clock, one of them flaking ~10% of runs and the other passing for the wrong
+/// reason. Assert the pin actually lands, so that regression is a failure.
+#[test]
+fn assert_timestamp_pin_works() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    r.write("f.txt", "x\n");
+    r.jj_at(FIXED_TS, &["describe", "-m", "PINNED"]);
+    let committed = r.out(&["log", "-r", "@", "--no-graph", "-T", "committer.timestamp()"]);
+    assert!(
+        committed.starts_with("2001-02-03"),
+        "JJ_TIMESTAMP is no longer honoured (got {committed:?}); the determinism \
+         in this suite depends on it"
+    );
 }
 
 /// THE central proof: restoring to the post-fetch op preserves both sides' work,
