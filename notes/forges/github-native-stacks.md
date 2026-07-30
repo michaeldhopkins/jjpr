@@ -830,6 +830,78 @@ to us" is not a one-line change.
 jjpr already parses conflicted bookmarks (`jj/templates.rs` has
 `test_parse_bookmark_conflicted_skipped`), so the detection primitive exists.
 
+### The three design-blocking questions, answered (2026-07-31)
+
+**1. Does GitHub enforce merge requirements on a stack merge? Yes, including
+against the repo owner.** With `main` protected at 1 required approval and a
+3-PR stack at 0 approvals, `merge-async` returned `202`, then failed at poll:
+
+> `"At least 1 approving review is required by reviewers with write access."`
+
+Nothing merged — atomicity held. The documented "bypassing merge requirements
+is not supported" is real: admin privileges did not override it. But the
+message **does not name which PR** is short, exactly as with the closed-member
+failure. So GitHub enforces *its own* branch rules per member, and jjpr's
+pre-flight is still needed for two distinct reasons: to apply jjpr's own
+stricter config (`required_approvals = 2` where the branch requires 1), and to
+name the offending PR, which GitHub never does.
+
+**2. Can jjpr repair a stranded WIP? Yes, with one `jj rebase`, and it clears
+the conflict too.** Set up so the WIP genuinely built on the rewritten commit's
+content (not just an unrelated file). After the cascade and fetch, the WIP was
+not merely stranded — it was **conflicted**, carrying jj conflict markers:
+
+```
+%%%%%%% diff from: xyxuunmk "feat: rep0731 c" (parents of rebased revision)
+\\\\\\\        to: pwpzoxzm "feat: rep0731 b" (rebase destination)
+```
+
+So the strand has two flavors: a WIP touching unrelated files reparents cleanly
+and silently loses context, while a WIP building on the rewritten commit
+conflicts loudly. The repair handles both:
+
+```
+jj rebase -s <wip-change-id> -d <bookmark>
+  → Existing conflicts were resolved or abandoned from 1 commits.
+  → content fully restored
+```
+
+Two things make this work, and both are worth relying on deliberately. The
+WIP's **change ID survives** the whole sequence, so jjpr can identify what to
+move. And the adopted commit is content-equivalent to the abandoned one
+(it *is* a rebase), so replaying onto it applies cleanly.
+
+There is also a structural reason the two hazards never compound: a strand only
+occurs when the cascade **succeeded**, and success means content-equivalence.
+The bad cascade case (conflict, below) leaves the bookmark unmoved, so nothing
+strands. Adoption-plus-repair is therefore viable, which was the open question.
+
+**3. Is there a signal that the cascade has settled? No. This is a negative
+result and it constrains the design.** Instrumented at 1s resolution:
+
+```
+t+7s   merge=merged   base=main   head=b025c859     ← retarget lands
+t+9s   merge=merged   base=main   head=d1b7d0cc     ← rebase lands
+```
+
+The **base retarget precedes the rebase**, so it marks "the cascade has begun"
+— but it happens in the declined case too. After the retarget, an unchanged
+head means either "still coming" or "declined", and nothing distinguishes them
+but elapsed time. `mergeable_state` does not help: in the declined case it went
+to `unknown` after the retarget and was **still `unknown` three minutes later**,
+because GitHub computes mergeability lazily.
+
+Consequences for the design:
+
+- jjpr must wait a bounded time after the retarget and treat the timeout as
+  "declined". There is no event to wait on.
+- Observed lag was ~2–3s across two runs, but that is two samples on a tiny
+  repo and must not become a hard-coded assumption.
+- Because the discriminator is a timeout, the "declined" branch can race a
+  late-landing cascade. Any push jjpr makes there **must** carry the `sha`
+  guard, so a late cascade turns into a clean rejection rather than jjpr
+  silently clobbering the server's rebase.
+
 ### jjpr's own behavior against a live native stack (2026-07-31)
 
 Half of "we don't understand this yet" was jjpr, not GitHub. Run against a

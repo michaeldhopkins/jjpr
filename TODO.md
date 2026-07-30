@@ -1,14 +1,42 @@
 # jjpr TODO
 
-## Known flake: `tests/recovery_scenarios.rs`
+## Fixed: `recovery_scenarios` flake (2026-07-31)
 
-Observed once on 2026-07-31: one of the six failed during a full `cargo test`,
-then passed on every subsequent run (3 isolated, 2 full-suite). Unrelated to
-the change in flight at the time, which touched only `main.rs` summaries. These
-are jj-integration tests that create real repos, so a timing or parallelism
-race is the obvious suspect — cf. the E2E suites, which are already documented
-as needing `--test-threads=1`. Not chased further because it did not reproduce;
-noted so the next sighting is a second data point rather than a first.
+`equivalent_restacks_collapse_to_one_commit` failed ~10% of runs. Two causes,
+both fixed:
+
+- **The test's premise was only usually true.** It performs two "identical"
+  restacks and asserts they collapse to one commit. A commit's identity
+  includes its committer timestamp, so when the two rebases straddled a clock
+  tick they produced *different* commits — a divergent change, the opposite of
+  what the test demonstrates. Fixed by pinning `JJ_TIMESTAMP` on just those two
+  operations (`Repo::jj_fixed_time`), which is the minimum that makes
+  "identical" true. Measured: 10/100 divergent before, 0/120 after.
+- **The harness turned a command failure into a wrong answer.** `Repo::out`
+  returned stdout without checking the exit status, so when
+  `jj log -r <divergent-id>` errored (jj refuses to resolve an ambiguous change
+  ID) it yielded an empty string, which failed an unrelated assertion as
+  `left: 0`. The real error was never shown, which is why three sightings
+  produced no diagnosis. `out` now asserts success and prints stderr.
+
+The second fix is the more valuable one: any jj failure in this suite is now
+self-diagnosing rather than surfacing as a nonsense value somewhere else.
+
+**Adversarial review then found the first fix had papered over a real
+behaviour.** The test's rationale claimed "the common two-watch race needs no
+resolution at all". Measured: restacks 2 seconds apart diverge **12/12**. Two
+`jjpr watch` processes poll 30s apart, so a real race essentially never
+collapses — the claim was false, and pinning the clock made the test assert it
+under conditions that do not occur. Corrected by scoping that test's doc to the
+narrow mechanism it actually covers, and adding
+`restacks_a_realistic_race_apart_in_time_do_diverge`, which asserts divergence
+for the case jjpr must survive. **jjpr's divergence gating is therefore the
+load-bearing path for concurrent watches, not a rare fallback.**
+
+Also added `assert_timestamp_pin_works`: `JJ_TIMESTAMP` maps to
+`debug.commit-timestamp`, a debug knob with no stability guarantee. A bad value
+errors, but a future jj that simply ignored the variable would silently return
+these tests to timing-dependence. The guard turns that into a failure.
 
 ## GitHub native stacks — detection shipped (0.36.0), rest remaining
 
@@ -45,6 +73,31 @@ Direction set 2026-07-30: jjpr should support native stacks on the forge's own
 terms. Read them, merge them through the async merge API, and on a partial
 merge **let the server's cascade rebase flow down to us** rather than
 re-asserting jj's commits.
+
+**Research status (2026-07-31): the three design-blocking questions are
+answered** — see "The three design-blocking questions" in the notes. GitHub
+enforces branch rules on a stack merge but never names the offending PR; a
+stranded WIP is repairable with a single `jj rebase` and the change ID
+survives; and there is **no** settle signal for the cascade, so the two
+outcomes can only be told apart by a bounded wait, which forces the `sha`
+guard on any push in the declined branch.
+
+The reconcile map is now written up in `docs-dev/native-stacks-design.md`,
+along with its headline result: **the `is_rooted_in` skip added in v0.35.0
+already discriminates the two cascade outcomes correctly** (verified live —
+rooted ⇒ adopt, not rooted ⇒ rebase and repair). The worry that jjpr would
+blindly overwrite the server's rebase is already handled by code written for
+an unrelated reason.
+
+What survives: the timing race (no settle signal, so the wait must be bounded
+and the declined-branch push must carry the `sha` guard), the stranded-WIP
+repair (a one-line `jj rebase` that nothing currently calls), and — now
+confirmed — **step 5's single-segment check is unsound for native stacks**. A
+mixed cascade outcome is reachable: GitHub rebases survivors until one
+conflicts, then stops. jjpr inspects only the first survivor, sees it rooted,
+skips, and never repairs the broken one above it. The predicate is right per
+segment; the loop around it assumes the remaining stack moves as a unit, which
+holds for jjpr's own rebase and not for an external partial cascade.
 
 **Nothing here gets implemented before the whole system is mapped and its
 correctness argued.** The investigation has already reversed its own
