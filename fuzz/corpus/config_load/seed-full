@@ -1,0 +1,4 @@
+merge_method = "squash"
+required_approvals = 2
+reconcile_strategy = "rebase"
+stack_nav = "comment"

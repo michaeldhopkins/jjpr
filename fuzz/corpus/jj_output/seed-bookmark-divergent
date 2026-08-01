@@ -1,0 +1,2 @@
+{"name":"feat","commitId":"c1","changeId":"ch1","localBookmarks":["feat"],"remoteBookmarks":["feat@origin"]}
+{"name":"remote-only","commitId":"c2","changeId":"ch2","localBookmarks":[],"remoteBookmarks":["x@origin"]}

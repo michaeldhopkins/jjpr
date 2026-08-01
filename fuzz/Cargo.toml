@@ -1,0 +1,79 @@
+# Standalone workspace (see the empty `[workspace]` below): the root
+# `cargo build` / `test` / `clippy` / `deny` never see it, so the main crate stays
+# on stable while this builds only under `cargo fuzz`, which needs nightly for
+# `-Zsanitizer`.
+
+[package]
+name = "jjpr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# The `Jj` trait returns anyhow::Result, so a stub implementation needs it.
+anyhow = "1"
+
+[dependencies.jjpr]
+path = ".."
+
+# Keep the fuzz build out of the root workspace.
+[workspace]
+
+# Line-level debug info in the optimised build, so a crash stack trace names the
+# jjpr function that panicked instead of an address. Cheap, and it is the
+# difference between a triageable artifact and a hex dump.
+#
+# This is NOT what makes a panic reach libFuzzer — `libfuzzer-sys` installs a
+# panic hook that calls `std::process::abort()` (lib.rs:92), so the panic
+# strategy is irrelevant here. An earlier comment claimed otherwise.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "jj_output"
+path = "fuzz_targets/jj_output.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "remote_url"
+path = "fuzz_targets/remote_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "comment_roundtrip"
+path = "fuzz_targets/comment_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "forge_payload"
+path = "fuzz_targets/forge_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_load"
+path = "fuzz_targets/config_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graph_invariants"
+path = "fuzz_targets/graph_invariants.rs"
+test = false
+doc = false
+bench = false

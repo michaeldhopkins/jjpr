@@ -1,0 +1,6 @@
+{"name":"feat-a","commitId":"c1","changeId":"ch1","localBookmarks":["feat-a"],"remoteBookmarks":[]}
+{"name":"feat-b","commitId":"c2","changeId":"ch2","localBookmarks":["feat-b"],"remoteBookmarks":[]}
+@@
+{"commitId":"c2","changeId":"ch2","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":["c1"],"localBookmarks":["feat-b"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"cm","changeId":"chm","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":["c1"],"localBookmarks":[],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"c1","changeId":"ch1","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":["c0"],"localBookmarks":["feat-a"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}
