@@ -1,0 +1,9 @@
+{"name":"bm_x","commitId":"cx2","changeId":"change_a","localBookmarks":["bm_x"],"remoteBookmarks":[]}
+{"name":"bm_b1","commitId":"cx1","changeId":"change_b","localBookmarks":["bm_b1"],"remoteBookmarks":[]}
+{"name":"bm_y","commitId":"cy2","changeId":"change_b","localBookmarks":["bm_y"],"remoteBookmarks":[]}
+{"name":"bm_a1","commitId":"cy1","changeId":"change_a","localBookmarks":["bm_a1"],"remoteBookmarks":[]}
+@@
+{"commitId":"cx2","changeId":"change_a","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":["cx1"],"localBookmarks":["bm_x"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"cx1","changeId":"change_b","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":[],"localBookmarks":["bm_b1"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"cy2","changeId":"change_b","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":["cy1"],"localBookmarks":["bm_y"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"cy1","changeId":"change_a","authorName":"A","authorEmail":"a@e.com","description":"d","descriptionFirstLine":"d","parents":[],"localBookmarks":["bm_a1"],"remoteBookmarks":[],"isWorkingCopy":"false","conflict":"false","empty":"false"}

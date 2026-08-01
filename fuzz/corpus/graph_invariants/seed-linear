@@ -1,0 +1,3 @@
+{"name":"feat","commitId":"c1","changeId":"ch1","localBookmarks":["feat"],"remoteBookmarks":["feat@origin"]}
+@@
+{"commitId":"def456","changeId":"abc123","authorName":"A Dev","authorEmail":"a@example.com","description":"feat: x\n\nbody","descriptionFirstLine":"feat: x","parents":["aaa111"],"localBookmarks":["feat"],"remoteBookmarks":["feat@origin"],"isWorkingCopy":"false","conflict":"false","empty":"false"}
