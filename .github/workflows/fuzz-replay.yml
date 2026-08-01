@@ -1,0 +1,126 @@
+name: Fuzz replay
+
+# The fast half of the fuzzing program; `fuzz.yml` is the slow half.
+#
+# Exploration — mutating for hours to find NEW paths — belongs nightly. This is the
+# REGRESSION gate: replay every input the nightly has already accumulated against the
+# code as it stands. It is deterministic (same corpus, same answer, no "it got lucky on
+# push #47"), it takes minutes rather than hours, and it answers the question a per-push
+# job should answer: did this change break a path we already explored?
+#
+# Read-only with respect to the corpus cache — the nightly owns the canonical corpus, so
+# nothing here writes it back. On a cache miss (a branch before any nightly has run) the
+# replay is a no-op rather than a failure, so a fresh branch is never blocked.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      burst_seconds:
+        description: "Seconds of extra mutation fuzzing after the replay"
+        default: "60"
+
+env:
+  CARGO_TERM_COLOR: always
+  TRIPLE: x86_64-unknown-linux-gnu
+
+jobs:
+  replay:
+    name: Replay ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false # one target regressing must not hide the others
+      matrix:
+        target:
+          - jj_output
+          - remote_url
+          - comment_roundtrip
+          - forge_payload
+          - config_load
+          - graph_invariants
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      # The build dominates this job's wall clock — nightly + sanitizer + instrumented
+      # std runs to minutes and dwarfs the replay itself — so caching it is what makes a
+      # per-push gate tolerable.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Build fuzz target
+        run: cargo +nightly fuzz build ${{ matrix.target }} --target "$TRIPLE"
+
+      # Read the nightly's canonical corpus. Caches written on main are readable from PR
+      # branches.
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # `-runs=0` executes each corpus input exactly once and exits: no mutation, no
+      # randomness. The committed `seed-*` inputs are in the tree, so this still gates
+      # something even on a cold cache.
+      - name: Replay corpus
+        run: |
+          set -euo pipefail
+          BIN="fuzz/target/$TRIPLE/release/${{ matrix.target }}"
+          mkdir -p fuzz/corpus/${{ matrix.target }} fuzz/artifacts/${{ matrix.target }}
+          COUNT=$(find fuzz/corpus/${{ matrix.target }} -type f | wc -l)
+          echo "Replaying $COUNT corpus inputs"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::notice::no corpus yet for ${{ matrix.target }} (the nightly populates it) — replay skipped"
+            exit 0
+          fi
+          "$BIN" -runs=0 -timeout=25 -rss_limit_mb=4096 \
+            -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/ \
+            fuzz/corpus/${{ matrix.target }}
+
+      # Opt-in only (manual dispatch), never on every push. In fork mode each child
+      # reloads the whole corpus before it mutates, and loading dominates — measured on
+      # safe-chains, a nominal 60s burst cost ~275s. That is a bad trade for seconds of
+      # mutation the nightly already does far better, and it turns a deterministic gate
+      # randomly red.
+      - name: Short mutation burst
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          BIN="fuzz/target/$TRIPLE/release/${{ matrix.target }}"
+          "$BIN" -fork=1 -ignore_crashes=1 \
+            -max_total_time=${{ github.event.inputs.burst_seconds || '60' }} \
+            -timeout=25 -rss_limit_mb=4096 \
+            -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/ \
+            fuzz/corpus/${{ matrix.target }}
+
+      - name: Upload findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-replay-findings-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      # The replay exits non-zero on a crash, but fork mode in the burst swallows it —
+      # so check explicitly, exactly as the nightly does.
+      - name: Fail on crashes
+        if: always()
+        run: |
+          hits=$(find fuzz/artifacts -type f \( -name 'crash-*' -o -name 'timeout-*' -o -name 'oom-*' \) 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::fuzzing saved crash/timeout artifacts (see fuzz-replay-findings-${{ matrix.target }})"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "no crash/timeout/oom artifacts"
