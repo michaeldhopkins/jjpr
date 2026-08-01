@@ -1,0 +1,327 @@
+name: Fuzz
+
+# Overnight coverage-guided fuzzing. Runs on nightly Rust (cargo-fuzz needs
+# -Zsanitizer); the fuzz crate is a standalone workspace, so this never touches the
+# stable CI in ci.yml.
+#
+# Shape: build every target ONCE, fan out to parallel shards that fuzz independently
+# from the same restored corpus, then a per-target merge job unions + minimizes the
+# shard corpora back into one canonical corpus for the next night to build on. Parallel
+# shards multiply crash-finding; the merge is what makes their coverage compound instead
+# of being dropped, since only one cache entry is ever restored. A coverage job then
+# measures which parts of jjpr the corpus actually reaches.
+#
+# Cost: this repo is public, so GitHub-hosted runners are free and unmetered. The
+# constraint being optimised for is the 6h per-job hard cap and wall clock, not
+# CPU-minutes — hence a budget comfortably under the cap rather than a scheduler.
+on:
+  schedule:
+    - cron: "0 7 * * *" # ~07:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: "Fuzz duration in seconds, per shard (default 4h). Use a small value to smoke-test the workflow."
+        default: "14400"
+
+env:
+  CARGO_TERM_COLOR: always
+  TRIPLE: x86_64-unknown-linux-gnu
+
+jobs:
+  build:
+    name: Build fuzz targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      # nightly + rust-src: cargo-fuzz builds std with the sanitizer instrumented.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # --target is pinned to the gnu host triple: cargo-fuzz ships as a prebuilt musl
+      # static binary and otherwise defaults the fuzz build to its own musl triple,
+      # whose static libc cannot carry AddressSanitizer ("sanitizer is incompatible
+      # with statically linked libc").
+      - name: Build all targets
+        run: cargo +nightly fuzz build --target "$TRIPLE"
+
+      # `cargo fuzz run` and `-merge=1` would each rebuild; building once here and
+      # handing the binaries to every downstream job avoids recompiling per shard. The
+      # cargo-fuzz output is a standalone libFuzzer executable, so shards and merge can
+      # exec it directly with the flags cargo-fuzz would have passed.
+      - name: Upload fuzz binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-binaries
+          path: |
+            fuzz/target/${{ env.TRIPLE }}/release/jj_output
+            fuzz/target/${{ env.TRIPLE }}/release/remote_url
+            fuzz/target/${{ env.TRIPLE }}/release/comment_roundtrip
+            fuzz/target/${{ env.TRIPLE }}/release/forge_payload
+            fuzz/target/${{ env.TRIPLE }}/release/config_load
+            fuzz/target/${{ env.TRIPLE }}/release/graph_invariants
+          if-no-files-found: error
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }} shard ${{ matrix.shard }}
+    needs: build
+    runs-on: ubuntu-latest
+    # GitHub force-cancels a job at a 6h hard cap. That shows as "cancelled" and
+    # SWALLOWS the "Fail on crashes" red signal, so an over-cap budget silently hides
+    # real crashes. Keep budget + setup under the cap so the job COMPLETES; this
+    # timeout is a backstop below it.
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false # one shard finding a crash must not cancel the others or the merge
+      matrix:
+        target:
+          - jj_output
+          - remote_url
+          - comment_roundtrip
+          - forge_payload
+          - config_load
+          - graph_invariants
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-binaries
+          path: bin
+
+      # Artifact upload does not preserve the executable bit.
+      - name: Make executable
+        run: chmod +x bin/*
+
+      # Every shard restores the same canonical corpus, then diverges (libFuzzer seeds
+      # its RNG randomly). Restore-only: shards hand findings to the merge job as
+      # artifacts, they never write the cache themselves.
+      - name: Restore corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # Fork mode + -ignore_crashes: a crash or timeout kills only the child, so the
+      # parent keeps fuzzing to -max_total_time and SAVES every finding rather than
+      # aborting on the first. Without it every shard trips the same shallow bug from
+      # the shared corpus and exits minutes in, wasting the parallelism.
+      #
+      # Two corpus dirs: libFuzzer WRITES new units only to the FIRST, so the shard
+      # uploads only what it DISCOVERED rather than a copy of everything it restored.
+      # That keeps the merge's incoming set scaling with discovery, not with shard count.
+      - name: Fuzz
+        run: |
+          set -euo pipefail
+          T=${{ matrix.target }}
+          mkdir -p fuzz/corpus/$T fuzz/corpus/new fuzz/artifacts/$T
+          DICT=""
+          [ -f "fuzz/dict/$T.dict" ] && DICT="-dict=fuzz/dict/$T.dict"
+          ./bin/$T \
+            -fork=1 -ignore_crashes=1 \
+            $DICT \
+            -max_total_time=${{ github.event.inputs.max_total_time || '14400' }} \
+            -timeout=25 \
+            -rss_limit_mb=4096 \
+            -artifact_prefix=fuzz/artifacts/$T/ \
+            fuzz/corpus/new fuzz/corpus/$T
+
+      - name: Upload shard finds
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.target }}-shard-${{ matrix.shard }}
+          path: fuzz/corpus/new
+          if-no-files-found: ignore
+
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes-${{ matrix.target }}-shard-${{ matrix.shard }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      # Fork mode swallows the non-zero exit, so surface findings explicitly or a
+      # regression hides behind a green run. slow-unit is uploaded for triage but is
+      # not fatal on its own.
+      - name: Fail on crashes
+        if: always()
+        run: |
+          hits=$(find fuzz/artifacts -type f \( -name 'crash-*' -o -name 'timeout-*' -o -name 'oom-*' \) 2>/dev/null || true)
+          if [ -n "$hits" ]; then
+            echo "::error::fuzzing saved crash/timeout artifacts for ${{ matrix.target }}"
+            printf '%s\n' "$hits"
+            exit 1
+          fi
+          echo "no crash/timeout/oom artifacts"
+
+  merge:
+    name: Merge ${{ matrix.target }} corpus
+    needs: [build, fuzz]
+    # Merge even when a shard went RED on a crash — its corpus is still worth keeping —
+    # but not when the build failed, since there would be no binary to merge with.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - jj_output
+          - remote_url
+          - comment_roundtrip
+          - forge_payload
+          - config_load
+          - graph_invariants
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download fuzz binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: fuzz-binaries
+          path: bin
+
+      - name: Make executable
+        run: chmod +x bin/*
+
+      - name: Restore prior corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Download shard finds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: corpus-${{ matrix.target }}-shard-*
+          path: incoming
+
+      # `-merge=1 DST SRC...` unions and minimizes in ONE step: libFuzzer copies into
+      # DST only inputs that add coverage, so starting from an empty DST over
+      # [prior corpus + committed seeds, every shard's finds] yields exactly the
+      # minimized union — no separate copy-then-cmin pass and no rebuild.
+      - name: Union and minimize
+        run: |
+          set -euo pipefail
+          T=${{ matrix.target }}
+          mkdir -p fuzz/corpus/$T minimized
+          echo "Prior corpus + seeds: $(find fuzz/corpus/$T -type f | wc -l) inputs"
+          echo "Incoming shard finds: $(find incoming -type f 2>/dev/null | wc -l)"
+          # Unquoted on purpose: each shard dir is a separate SRC argument.
+          shards=$(find incoming -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)
+          ./bin/$T -merge=1 minimized fuzz/corpus/$T $shards
+          rm -rf fuzz/corpus/$T
+          mv minimized fuzz/corpus/$T
+          echo "Minimized corpus size: $(find fuzz/corpus/$T -type f | wc -l) inputs"
+
+      # Save under a unique (always-miss) key so the merged corpus becomes the newest
+      # entry the next run's restore-keys prefix match will pull.
+      - name: Save merged corpus
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+
+  # What the crash signal CANNOT tell you: which parts of jjpr the corpus never reaches.
+  # A green night only means "no panic in the region explored" — this job measures that
+  # region. Informational: it gates nothing, but it is the input to deciding where the
+  # next target or seed should go.
+  coverage:
+    name: Coverage ${{ matrix.target }}
+    needs: merge
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [jj_output, graph_invariants, remote_url]
+    steps:
+      - uses: actions/checkout@v5
+
+      # llvm-tools-preview is REQUIRED: without it `cargo fuzz coverage` replays the
+      # corpus fine and then dies at "Merging raw coverage data", because llvm-profdata
+      # is absent from the nightly sysroot.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Restore merged corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # A separate build: coverage instrumentation differs from the sanitizer build, so
+      # this one cannot reuse the shared binary.
+      - name: Generate coverage data
+        run: cargo +nightly fuzz coverage ${{ matrix.target }} --target "$TRIPLE"
+
+      # Don't hardcode cargo-fuzz's layout — it differs with/without --target and has
+      # moved between releases. Search both target roots, then PROBE each candidate and
+      # keep the first llvm-cov accepts: the probe, not the path, is the real check, and
+      # it also rejects a stale non-instrumented binary from an earlier build.
+      - name: Render report
+        run: |
+          set -euo pipefail
+          T=${{ matrix.target }}
+          LLVM_COV="$(rustc +nightly --print sysroot)/lib/rustlib/$TRIPLE/bin/llvm-cov"
+          PROF=fuzz/coverage/$T/coverage.profdata
+          BIN=""
+          for cand in $(find target fuzz/target -path '*coverage*release*' -name "$T" -type f 2>/dev/null); do
+            if "$LLVM_COV" report "$cand" -instr-profile="$PROF" >/dev/null 2>&1; then
+              BIN="$cand"; break
+            fi
+          done
+          if [ -z "$BIN" ]; then
+            echo "::error::no INSTRUMENTED $T binary matched $PROF (cargo-fuzz layout changed?)"
+            find target fuzz/target -name "$T" -type f 2>/dev/null || true
+            exit 1
+          fi
+          # Report jjpr's OWN authored source only — not deps, std, the fuzz shim, or
+          # build-script-generated files.
+          IGNORE='(/\.cargo/|/rustc/|/fuzz/|/out/)'
+          {
+            echo "## Fuzz coverage (\`$T\` target)"
+            echo
+            echo "Corpus: $(find fuzz/corpus/$T -type f | wc -l) inputs"
+            echo
+            echo '```'
+            "$LLVM_COV" report "$BIN" -instr-profile="$PROF" -ignore-filename-regex="$IGNORE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          "$LLVM_COV" show "$BIN" -instr-profile="$PROF" -ignore-filename-regex="$IGNORE" \
+            -format=html -output-dir=coverage-html
+
+      - name: Upload HTML coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-coverage-html-${{ matrix.target }}
+          path: coverage-html
+          if-no-files-found: warn
