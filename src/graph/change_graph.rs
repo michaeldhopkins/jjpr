@@ -35,6 +35,40 @@ pub fn build_status_graph(jj: &dyn Jj, all_owned_stacks: bool) -> Result<ChangeG
     build_change_graph_from(jj, jj.get_status_bookmarks(all_owned_stacks)?)
 }
 
+/// Whether adding `child -> parent` would close a cycle — i.e. `child` is already
+/// reachable by walking parents from `parent`.
+///
+/// The graph keys segments by change id, and a change id is not unique: a
+/// DIVERGENT change is one id on two commits, and both copies can sit in a single
+/// ancestry chain (rebase one onto the other). Such a chain records the same id as
+/// two segments, and the links between them close a loop — `A -> B -> A` when one
+/// divergent change brackets another, and `A -> A` in the degenerate case where the
+/// repeats are adjacent.
+///
+/// Guarding only the adjacent case is not enough, which is how the first version of
+/// this fix was wrong: consecutive segments differ, so a self-edge check never fires
+/// on the bracketing shape. Checking reachability catches every length, including
+/// loops closed across two traversals, and it subsumes the self-edge case
+/// (`child == parent`).
+///
+/// Out-degree is at most one — `adjacency_list` is a map — so the walk is a simple
+/// chain, bounded by the number of edges. The step cap is defence against an
+/// already-cyclic map rather than an expected path.
+fn would_close_cycle(adjacency: &HashMap<String, String>, child: &str, parent: &str) -> bool {
+    if child == parent {
+        return true;
+    }
+    let mut node = parent;
+    for _ in 0..=adjacency.len() {
+        match adjacency.get(node) {
+            Some(next) if next == child => return true,
+            Some(next) => node = next,
+            None => return false,
+        }
+    }
+    true
+}
+
 fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<ChangeGraph> {
     let mut all_bookmarks: HashMap<String, Bookmark> = HashMap::new();
     let mut bookmark_to_change_id: HashMap<String, String> = HashMap::new();
@@ -65,6 +99,14 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
         let mut prev_change_id: Option<String> = None;
         for segment in &result.segments {
             if let Some(first_change) = segment.changes.first() {
+                // NOTE: a change id is the key for everything below, and it is not
+                // unique when a change is DIVERGENT. If both copies sit in one
+                // ancestry chain, two distinct segments collapse onto one key —
+                // `change_id_to_segment` overwrites, and the resulting stack reports
+                // bookmarks from different commits as one segment. `would_close_cycle`
+                // keeps that from becoming a hang, but it does not make the shape
+                // right, and only `merge` gates on divergence before getting here.
+                // See TODO.md, "Graph keys by change id".
                 let segment_change_id = segment
                     .bookmarks
                     .first()
@@ -81,7 +123,13 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
                     );
                 }
 
-                if let Some(prev) = &prev_change_id {
+                // Never close a loop. `adjacency_list` is consumed by traversal
+                // toward trunk and by `build_stacks`, neither of which carries a
+                // visited-set, so a cycle of ANY length is an infinite loop rather
+                // than a wrong answer. Found by the `graph_invariants` fuzz target.
+                if let Some(prev) = &prev_change_id
+                    && !would_close_cycle(&adjacency_list, prev, &segment_change_id)
+                {
                     adjacency_list.insert(prev.clone(), segment_change_id.clone());
                 }
                 prev_change_id = Some(segment_change_id.clone());
@@ -90,8 +138,14 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
             }
         }
 
-        // Link the last discovered segment to the already-collected change
-        if let (Some(last), Some(stopped)) = (&prev_change_id, &result.stopped_at) {
+        // Link the last discovered segment to the already-collected change it
+        // stopped at. Same guard: the stop can land on a change this traversal
+        // already recorded — two bookmarks on one change, a diamond re-reaching a
+        // collected node, or a divergent id seen twice — which would close a loop
+        // back into the chain just built.
+        if let (Some(last), Some(stopped)) = (&prev_change_id, &result.stopped_at)
+            && !would_close_cycle(&adjacency_list, last, stopped)
+        {
             adjacency_list.insert(last.clone(), stopped.clone());
         }
 
@@ -307,6 +361,99 @@ mod tests {
             change_id: change_id.to_string(),
             has_remote: false,
             is_synced: false,
+        }
+    }
+
+    /// A change is never its own parent — not even when it is DIVERGENT.
+    ///
+    /// A divergent change is one id on two commits, and nothing stops both from
+    /// landing in a single ancestry chain (rebase one copy onto the other). The
+    /// graph keys segments by change id, so such a chain yields two segments with
+    /// the SAME id and the adjacency link points the change at itself.
+    ///
+    /// That is a hang, not a wrong answer: `adjacency_list` is walked child→parent
+    /// by traversal toward trunk and by `build_stacks`, neither of which carries a
+    /// visited-set. And it is reachable exactly where jjpr is least able to afford
+    /// it — divergence is what the concurrent-watch recovery path exists to
+    /// survive.
+    ///
+    /// Found by the `graph_invariants` fuzz target; the reproducing input is kept
+    /// as `fuzz/corpus/graph_invariants/seed-self-edge` so the per-push replay
+    /// holds it down as well.
+    #[test]
+    fn a_divergent_change_in_one_chain_does_not_become_its_own_parent() {
+        // commit_hi and commit_lo BOTH carry "change_dup", and commit_lo is an
+        // ancestor of commit_hi. Each is bookmarked, so each ends a segment.
+        let chain = vec![
+            make_log_entry("commit_hi", "change_dup", vec!["commit_lo"], vec!["top"]),
+            make_log_entry("commit_lo", "change_dup", vec!["commit_root"], vec!["bottom"]),
+        ];
+        let jj = StubJj {
+            bookmarks: vec![
+                make_bookmark("top", "commit_hi", "change_dup"),
+                make_bookmark("bottom", "commit_lo", "change_dup"),
+            ],
+            log_entries: HashMap::from([
+                ("commit_hi".to_string(), chain.clone()),
+                ("commit_lo".to_string(), vec![chain[1].clone()]),
+            ]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+
+        for (child, parent) in &graph.adjacency_list {
+            assert_ne!(
+                child, parent,
+                "adjacency_list has a self-edge on {child:?}; any child→parent walk \
+                 over it would never terminate"
+            );
+        }
+    }
+
+    /// The shape that proved a self-edge guard insufficient.
+    ///
+    /// One divergent change BRACKETS another: `change_a -> change_b -> change_a`
+    /// in a single chain. Consecutive segments differ, so checking only
+    /// `child != parent` never fires, yet the second link closes a 2-cycle and any
+    /// child→parent walk spins forever.
+    ///
+    /// Found by `graph_invariants` after a divergent-at-different-depths seed was
+    /// added — the assertion had been general all along, but nothing reached this
+    /// shape. Reproducing input:
+    /// `fuzz/corpus/graph_invariants/seed-divergent-bracket`.
+    #[test]
+    fn a_divergent_change_bracketing_another_does_not_close_a_cycle() {
+        let chain = vec![
+            make_log_entry("cx2", "change_a", vec!["cx1"], vec!["bm_x"]),
+            make_log_entry("cx1", "change_b", vec!["cy1"], vec!["bm_y"]),
+            make_log_entry("cy1", "change_a", vec![], vec!["bm_a1"]),
+        ];
+        let jj = StubJj {
+            bookmarks: vec![
+                make_bookmark("bm_x", "cx2", "change_a"),
+                make_bookmark("bm_y", "cx1", "change_b"),
+                make_bookmark("bm_a1", "cy1", "change_a"),
+            ],
+            log_entries: HashMap::from([
+                ("cx2".to_string(), chain.clone()),
+                ("cx1".to_string(), chain[1..].to_vec()),
+                ("cy1".to_string(), chain[2..].to_vec()),
+            ]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+
+        for start in graph.adjacency_list.keys() {
+            let mut seen: HashSet<&str> = HashSet::new();
+            let mut node: &str = start;
+            while let Some(parent) = graph.adjacency_list.get(node) {
+                assert!(
+                    seen.insert(node),
+                    "adjacency_list has a cycle reachable from {start:?} (revisited \
+                     {node:?}); a child→parent walk over it would never terminate"
+                );
+                node = parent;
+            }
         }
     }
 
