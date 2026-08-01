@@ -95,6 +95,27 @@ pub fn parse_bookmark_output(output: &str) -> Result<(Vec<Bookmark>, Vec<String>
             }
         };
 
+        // A line can be valid JSON and still carry no usable identity — an empty
+        // `changeId` or `commitId`. Serde has nothing to object to, so without
+        // this the bookmark reaches the change graph with an empty change id,
+        // and from there `rebase_root` hands "" to revset construction
+        // (`change_id()::name` — a syntax error) and to `jj rebase -s ''`. The
+        // user would see an opaque jj parse error instead of the skip-and-warn
+        // this function already does for a line it cannot read.
+        //
+        // Not producible by jj today, whose templates always emit both. It is a
+        // trust-boundary guard: jjpr parses another program's output across
+        // version upgrades, and this costs one comparison. Found by the
+        // `graph_invariants` fuzz target.
+        if raw.change_id.is_empty() || raw.commit_id.is_empty() {
+            if raw.name.is_empty() {
+                seen_unknown_malformed = true;
+            } else {
+                malformed_names.push(raw.name);
+            }
+            continue;
+        }
+
         let non_git_remotes: Vec<&String> = raw
             .remote_bookmarks
             .iter()
@@ -215,6 +236,43 @@ mod tests {
         assert_eq!(bookmarks[0].commit_id, "abc123");
         assert!(!bookmarks[0].has_remote);
         assert!(!bookmarks[0].is_synced);
+    }
+
+    // Valid JSON, no usable identity. Serde accepts it, so the malformed-line
+    // branch never sees it, and the bookmark used to reach the change graph with
+    // an empty change id — which `rebase_root` then hands to revset construction
+    // as `change_id()::name`, a syntax error, and to `jj rebase -s ''`. Skipping
+    // and warning is what this function already does for a line it cannot read.
+    // Found by the `graph_invariants` fuzz target.
+    #[test]
+    fn a_bookmark_line_with_no_identity_is_treated_as_malformed() {
+        for line in [
+            r#"{"name":"feat","commitId":"c0","changeId":"","localBookmarks":["feat"],"remoteBookmarks":[]}"#,
+            r#"{"name":"feat","commitId":"","changeId":"ch0","localBookmarks":["feat"],"remoteBookmarks":[]}"#,
+        ] {
+            let (bookmarks, warnings) = parse_bookmark_output(line).unwrap();
+            assert!(
+                bookmarks.is_empty(),
+                "a bookmark with no usable identity must not reach the graph: {line}"
+            );
+            assert_eq!(warnings, vec!["feat".to_string()], "and the user is told: {line}");
+        }
+    }
+
+    // The counterpart: a healthy entry for the same name suppresses the warning,
+    // exactly as it does for an unparseable @origin target alongside a good local
+    // one. The empty-identity check must not break that.
+    #[test]
+    fn a_good_entry_still_suppresses_the_no_identity_warning() {
+        let output = concat!(
+            r#"{"name":"feat","commitId":"c0","changeId":"","localBookmarks":[],"remoteBookmarks":["feat@origin"]}"#,
+            "\n",
+            r#"{"name":"feat","commitId":"c1","changeId":"ch1","localBookmarks":["feat"],"remoteBookmarks":[]}"#,
+        );
+        let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
+        assert_eq!(bookmarks.len(), 1, "the healthy entry is kept");
+        assert_eq!(bookmarks[0].change_id, "ch1");
+        assert!(warnings.is_empty(), "no warning when a good entry exists: {warnings:?}");
     }
 
     #[test]
