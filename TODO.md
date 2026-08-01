@@ -1,5 +1,48 @@
 # jjpr TODO
 
+## Open: the change graph keys by change id, which divergence makes non-unique
+
+Found 2026-08-01 while reviewing the `graph_invariants` fuzz target. **Not
+introduced by that work — it is the layer underneath the cycle fix, and it is
+still open.**
+
+`build_change_graph_from` keys `change_id_to_segment`, `adjacency_list` and
+`fully_collected` by change id. A **divergent** change is one id on two commits,
+and both copies can occupy a single ancestry chain (rebase one onto the other).
+When that happens two genuinely distinct segments collapse onto one key.
+
+Measured, on the shape `cx2(change_a) → cx1(change_b) → cy1(change_a)` with a
+bookmark on each commit:
+
+```
+ADJ:    {"change_a": "change_b"}
+STACKS: 1 stack
+  segments: [["bm_y"], ["bm_a1", "bm_x"]]
+```
+
+`bm_a1` (on `cy1`) and `bm_x` (on `cx2`) are reported as **one segment** although
+they sit at opposite ends of the chain. `would_close_cycle` stops this from
+hanging, but the shape is still wrong.
+
+**Why it matters: only `merge` gates on divergence.** `reconcile_local_state`
+opens with a repo-wide `divergent()` check, so merge never builds a graph in this
+state. `submit`, `watch` and `status` have no such gate — `submit` would push
+bookmarks and create/retarget PRs from the conflated shape.
+
+Two ways out, both design calls rather than tidying:
+
+- **Gate `submit` on divergence** the way merge does. Small, consistent with
+  existing behaviour, and it fails closed — but it is a new refusal in a state
+  users can reach, so it wants a deliberate decision about the message and
+  whether `status` should refuse too (it probably should not; a degraded view
+  beats no view).
+- **Key the graph by commit id** and carry the change id alongside. Correct at
+  the root, but it touches every consumer of these maps.
+
+Reachability is not exotic: jjpr's own recovery path produces divergence
+(`recovery_scenarios` measures 12/12 for restacks two seconds apart), and a later
+rebase can stack one copy under the other.
+
 ## Fixed: `recovery_scenarios` flake (2026-07-31)
 
 `equivalent_restacks_collapse_to_one_commit` failed ~10% of runs. Two causes,
