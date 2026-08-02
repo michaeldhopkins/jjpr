@@ -22,22 +22,22 @@ pub fn analyze_submission_graph(
     graph: &ChangeGraph,
     target_bookmark: &str,
 ) -> Result<SubmissionAnalysis> {
-    let target_change_id = graph
-        .bookmark_to_change_id
-        .get(target_bookmark)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "bookmark '{}' not found. Is it created with `jj bookmark set`?",
-                target_bookmark
-            )
-        })?;
+    if !graph.bookmarks.contains_key(target_bookmark) {
+        anyhow::bail!(
+            "bookmark '{}' not found. Is it created with `jj bookmark set`?",
+            target_bookmark
+        );
+    }
 
-    // Find which stack contains this bookmark
+    // Match on the bookmark NAME. Resolving to a change id first and comparing
+    // that would pick the wrong segment when the change is divergent: two
+    // bookmarks on different commits share one change id, so the first segment
+    // carrying either of them wins. Names are unique; change ids are not.
     for stack in &graph.stacks {
         let target_idx = stack
             .segments
             .iter()
-            .position(|seg| seg.bookmarks.iter().any(|b| b.change_id == *target_change_id));
+            .position(|seg| seg.bookmarks.iter().any(|b| b.name == target_bookmark));
 
         if let Some(idx) = target_idx {
             let relevant = stack.segments[..=idx].to_vec();
@@ -71,7 +71,9 @@ pub fn infer_target_stack<'a>(
 fn overlapping_stacks<'a>(graph: &'a ChangeGraph, jj: &dyn Jj) -> Result<Vec<&'a BranchStack>> {
     let wc_commit_id = jj.get_working_copy_commit_id()?;
     let wc_ancestry = jj.get_changes_to_commit(&wc_commit_id)?;
-    let wc_change_ids: HashSet<String> = wc_ancestry.iter().map(|e| e.change_id.clone()).collect();
+    // Commit ids, not change ids: a divergent change puts one id on two commits,
+    // and matching by it would pull in a stack the working copy does not touch.
+    let wc_commit_ids: HashSet<String> = wc_ancestry.iter().map(|e| e.commit_id.clone()).collect();
 
     Ok(graph
         .stacks
@@ -80,7 +82,7 @@ fn overlapping_stacks<'a>(graph: &'a ChangeGraph, jj: &dyn Jj) -> Result<Vec<&'a
             stack
                 .segments
                 .iter()
-                .any(|seg| seg.bookmarks.iter().any(|b| wc_change_ids.contains(&b.change_id)))
+                .any(|seg| seg.bookmarks.iter().any(|b| wc_commit_ids.contains(&b.commit_id)))
         })
         .collect())
 }
@@ -209,7 +211,7 @@ mod tests {
             bookmarks,
             bookmark_to_change_id,
             adjacency_list: HashMap::new(),
-            change_id_to_segment: HashMap::new(),
+            commit_id_to_segment: HashMap::new(),
             stack_leafs: HashSet::new(),
             stack_roots: HashSet::new(),
             stacks: vec![BranchStack {
@@ -359,7 +361,7 @@ mod tests {
             bookmarks: HashMap::new(),
             bookmark_to_change_id: HashMap::new(),
             adjacency_list: HashMap::new(),
-            change_id_to_segment: HashMap::new(),
+            commit_id_to_segment: HashMap::new(),
             stack_leafs: HashSet::new(),
             stack_roots: HashSet::new(),
             stacks: vec![],
@@ -410,7 +412,7 @@ mod tests {
             bookmarks: HashMap::new(),
             bookmark_to_change_id: HashMap::new(),
             adjacency_list: HashMap::new(),
-            change_id_to_segment: HashMap::new(),
+            commit_id_to_segment: HashMap::new(),
             stack_leafs: HashSet::new(),
             stack_roots: HashSet::new(),
             stacks,

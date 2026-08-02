@@ -8,9 +8,9 @@ use crate::jj::Jj;
 /// Result of traversing from a bookmark toward trunk.
 pub struct TraversalResult {
     pub segments: Vec<BookmarkSegment>,
-    pub seen_change_ids: HashSet<String>,
-    /// If traversal stopped because it hit a fully_collected change, this is that change_id.
-    /// Used to link the new segments to the existing graph.
+    pub seen_commit_ids: HashSet<String>,
+    /// If traversal stopped because it hit an already-collected commit, this is that
+    /// commit_id. Used to link the new segments to the existing graph.
     pub stopped_at: Option<String>,
     /// If traversal stopped at a commit with a remote bookmark not owned by the user,
     /// this is the branch name (e.g., "coworker-auth"). Used to set the stack's base branch.
@@ -22,10 +22,16 @@ pub struct TraversalResult {
 /// A segment is a group of consecutive changes between two bookmarked changes
 /// (or between trunk and a bookmarked change).
 ///
-/// Stops early when hitting a change that was already fully collected.
+/// Stops early when hitting a commit that was already fully collected.
 /// When a merge commit is encountered, follows `parents[0]` and skips other arms.
-/// Skipped entries are NOT added to `seen_change_ids` so they remain available
+/// Skipped entries are NOT added to `seen_commit_ids` so they remain available
 /// for independent bookmark traversal.
+///
+/// Identity here is the COMMIT id, not the change id. A change id is not unique —
+/// a divergent change is one id on two commits — so matching bookmarks or deduping
+/// by change id merges two genuinely distinct commits into one segment. Commit id
+/// distinguishes them while still giving one segment when two bookmarks sit on the
+/// same commit, which is the case change-id matching was really serving.
 pub fn traverse_and_discover_segments(
     jj: &dyn Jj,
     start_commit_id: &str,
@@ -36,15 +42,15 @@ pub fn traverse_and_discover_segments(
     let mut current_segment_changes: Vec<LogEntry> = Vec::new();
     let mut current_segment_bookmarks: Vec<Bookmark> = Vec::new();
     let mut current_segment_merge_source_names: Vec<String> = Vec::new();
-    let mut seen_change_ids: HashSet<String> = HashSet::new();
+    let mut seen_commit_ids: HashSet<String> = HashSet::new();
 
     // After a merge, tracks which commit_ids are on our followed path.
     // None means no merge encountered yet (all entries are on path).
     let mut on_path: Option<HashSet<String>> = None;
 
-    let bookmark_change_ids: HashSet<&String> = all_bookmarks
+    let bookmark_commit_ids: HashSet<&String> = all_bookmarks
         .values()
-        .map(|b| &b.change_id)
+        .map(|b| &b.commit_id)
         .collect();
 
     // Reverse map: commit_id → bookmark name (for resolving merge parent names)
@@ -108,16 +114,16 @@ pub fn traverse_and_discover_segments(
             }
             return Ok(TraversalResult {
                 segments,
-                seen_change_ids,
+                seen_commit_ids,
                 stopped_at: None,
                 foreign_base: Some(foreign_name.to_string()),
             });
         }
 
-        seen_change_ids.insert(entry.change_id.clone());
+        seen_commit_ids.insert(entry.commit_id.clone());
 
         // If this is already fully collected, stop
-        if fully_collected.contains(&entry.change_id) {
+        if fully_collected.contains(&entry.commit_id) {
             if !current_segment_changes.is_empty() {
                 segments.push(BookmarkSegment {
                     bookmarks: std::mem::take(&mut current_segment_bookmarks),
@@ -127,20 +133,20 @@ pub fn traverse_and_discover_segments(
             }
             return Ok(TraversalResult {
                 segments,
-                seen_change_ids,
-                stopped_at: Some(entry.change_id.clone()),
+                seen_commit_ids,
+                stopped_at: Some(entry.commit_id.clone()),
                 foreign_base: None,
             });
         }
 
-        let is_bookmarked = bookmark_change_ids.contains(&entry.change_id);
+        let is_bookmarked = bookmark_commit_ids.contains(&entry.commit_id);
 
         current_segment_changes.push(entry.clone());
 
         if is_bookmarked {
             let mut matching_bookmarks: Vec<Bookmark> = all_bookmarks
                 .values()
-                .filter(|b| b.change_id == entry.change_id)
+                .filter(|b| b.commit_id == entry.commit_id)
                 .cloned()
                 .collect();
             matching_bookmarks.sort_by(|a, b| a.name.cmp(&b.name));
@@ -165,7 +171,7 @@ pub fn traverse_and_discover_segments(
 
     Ok(TraversalResult {
         segments,
-        seen_change_ids,
+        seen_commit_ids,
         stopped_at: None,
         foreign_base: None,
     })
@@ -295,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_merge_skipped_entries_not_in_seen() {
-        // Skipped arm entries should not appear in seen_change_ids
+        // Skipped arm entries should not appear in seen_commit_ids
         let b_bookmark = make_bookmark("feat-b", "cb", "chb");
         let all_bookmarks = HashMap::from([
             ("feat-b".to_string(), b_bookmark),
@@ -317,9 +323,9 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.seen_change_ids.contains("chb"));
-        assert!(result.seen_change_ids.contains("chc"));
-        assert!(!result.seen_change_ids.contains("chd"), "skipped arm should not be in seen");
+        assert!(result.seen_commit_ids.contains("cb"));
+        assert!(result.seen_commit_ids.contains("cc"));
+        assert!(!result.seen_commit_ids.contains("cd"), "skipped arm should not be in seen");
     }
 
     #[test]
@@ -422,8 +428,8 @@ mod tests {
         assert!(result.segments[2].merge_source_names.is_empty());
 
         // D and F should NOT be in seen
-        assert!(!result.seen_change_ids.contains("chd"));
-        assert!(!result.seen_change_ids.contains("chf"));
+        assert!(!result.seen_commit_ids.contains("cd"));
+        assert!(!result.seen_commit_ids.contains("cf"));
     }
 
     #[test]
@@ -476,8 +482,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.seen_change_ids.contains("ch2"));
-        assert!(result.seen_change_ids.contains("ch1"));
+        assert!(result.seen_commit_ids.contains("c2"));
+        assert!(result.seen_commit_ids.contains("c1"));
     }
 
     fn entry_with_remote_bookmarks(
@@ -547,8 +553,8 @@ mod tests {
         .unwrap();
 
         assert!(result.foreign_base.is_none());
-        assert!(result.seen_change_ids.contains("ch1"));
-        assert!(result.seen_change_ids.contains("ch2"));
+        assert!(result.seen_commit_ids.contains("c1"));
+        assert!(result.seen_commit_ids.contains("c2"));
     }
 
     #[test]
@@ -571,7 +577,7 @@ mod tests {
         .unwrap();
 
         assert!(result.foreign_base.is_none());
-        assert!(result.seen_change_ids.contains("ch1"));
+        assert!(result.seen_commit_ids.contains("c1"));
     }
 
     #[test]
@@ -641,8 +647,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.segments[0].merge_source_names, vec!["feat-d", "feat-e"]);
-        assert!(!result.seen_change_ids.contains("chd"));
-        assert!(!result.seen_change_ids.contains("che"));
+        assert!(!result.seen_commit_ids.contains("cd"));
+        assert!(!result.seen_commit_ids.contains("ce"));
     }
 
     #[test]

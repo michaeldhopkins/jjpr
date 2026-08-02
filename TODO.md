@@ -1,18 +1,13 @@
 # jjpr TODO
 
-## Open: the change graph keys by change id, which divergence makes non-unique
+## Fixed: the change graph keyed by change id (2026-08-01)
 
-Found 2026-08-01 while reviewing the `graph_invariants` fuzz target. **Not
-introduced by that work — it is the layer underneath the cycle fix, and it is
-still open.**
+`build_change_graph_from` and `traverse_and_discover_segments` keyed
+`adjacency_list`, the segment map and `fully_collected` by **change id**. A
+divergent change is one id on two commits, and both copies can occupy a single
+ancestry chain, so two genuinely distinct segments collapsed onto one key.
 
-`build_change_graph_from` keys `change_id_to_segment`, `adjacency_list` and
-`fully_collected` by change id. A **divergent** change is one id on two commits,
-and both copies can occupy a single ancestry chain (rebase one onto the other).
-When that happens two genuinely distinct segments collapse onto one key.
-
-Measured, on the shape `cx2(change_a) → cx1(change_b) → cy1(change_a)` with a
-bookmark on each commit:
+Measured before the fix, on `cx2(change_a) -> cx1(change_b) -> cy1(change_a)`:
 
 ```
 ADJ:    {"change_a": "change_b"}
@@ -20,28 +15,42 @@ STACKS: 1 stack
   segments: [["bm_y"], ["bm_a1", "bm_x"]]
 ```
 
-`bm_a1` (on `cy1`) and `bm_x` (on `cx2`) are reported as **one segment** although
-they sit at opposite ends of the chain. `would_close_cycle` stops this from
-hanging, but the shape is still wrong.
+`bm_a1` (on `cy1`) and `bm_x` (on `cx2`) were reported as one segment despite
+sitting at opposite ends of the chain.
 
-**Why it matters: only `merge` gates on divergence.** `reconcile_local_state`
-opens with a repo-wide `divergent()` check, so merge never builds a graph in this
-state. `submit`, `watch` and `status` have no such gate — `submit` would push
-bookmarks and create/retarget PRs from the conflated shape.
+**Fixed by keying on commit id** throughout the graph and traversal. The two
+keyings are isomorphic whenever change ids are unique, so for every
+non-divergent repo this is a no-op — the whole suite passed unchanged across the
+switch, which is the evidence for that. It also preserves the case change-id
+keying was really serving: two bookmarks on one commit still form one segment,
+because they share a commit id.
 
-Two ways out, both design calls rather than tidying:
+`analyze.rs` matched the submit target by change id too, and now matches by
+bookmark **name** (unique) and working-copy ancestry by **commit** id.
 
-- **Gate `submit` on divergence** the way merge does. Small, consistent with
-  existing behaviour, and it fails closed — but it is a new refusal in a state
-  users can reach, so it wants a deliberate decision about the message and
-  whether `status` should refuse too (it probably should not; a degraded view
-  beats no view).
-- **Key the graph by commit id** and carry the change id alongside. Correct at
-  the root, but it touches every consumer of these maps.
+Policy, decided rather than inherited: a divergent change with both copies in
+the stack now makes `submit` and `watch` refuse before pushing anything, scoped
+to the stack being submitted (an unrelated divergent change elsewhere does not
+block). `merge` already refused via its repo-wide gate. `status` never refuses —
+it marks the segment `?? divergent`, since it is where a user diagnoses this.
 
-Reachability is not exotic: jjpr's own recovery path produces divergence
-(`recovery_scenarios` measures 12/12 for restacks two seconds apart), and a later
-rebase can stack one copy under the other.
+**Reachability, measured.** The shape needs two copies whose diffs DIFFER but do
+not conflict. Identical diffs cannot stack at all: jj answers a rebase of one
+onto the other with "Abandoned 1 divergent commits that were already present in
+the destination". So a racing restack — which produces identical diffs — yields
+sibling divergence that never forms this shape, and an earlier note here saying
+otherwise was wrong. Same-file/different-content copies do stack but conflict,
+and jjpr's conflict check refuses first (found by driving the real binary in
+e2e). What reaches the divergence refusal is the clean case: one copy adding a
+file the other does not.
+
+Covered end to end by `divergent_change_refuses_before_pushing_all_forges`
+(`tests/forge_e2e.rs`), which drives the real binary against all three sandbox
+forges and asserts nothing was pushed.
+
+`would_close_cycle` is retained as defence in depth: with unique commit ids and
+DAG ancestry a cycle should be unreachable, and the guard makes that a checked
+property rather than an assumption.
 
 ## Fixed: `recovery_scenarios` flake (2026-07-31)
 
