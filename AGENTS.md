@@ -58,6 +58,31 @@ The one artifact produced was a `slow-unit` in `comment_roundtrip` — a **false
 
 **Not yet fuzzed, and why.** Revset *construction* (`segment_range` and friends) is where a recent real bug lived, but jj rejects bookmark names containing revset metacharacters (`a|b`, `a&b`, `x(y)` are all refused — verified), so the injection surface is much smaller than it looks; it would need a target that shells out to jj, which no target does today. `src/merge/` and `src/submit/` planning logic is invariant-shaped and would suit a target, but needs stub seams first.
 
+### Mutation testing (project specifics)
+
+General method is in the **`rust-mutation-testing` skill**. This section is only what is true of jjpr, and most of it exists because a first attempt was measured and found wrong.
+
+**What runs:** `.github/workflows/mutants.yml` on PRs and pushes to main, restricted to mutants overlapping the diff (`--in-diff`). Nothing runs a full tree in CI yet.
+
+**Measured 2026-08-02**, so nobody re-derives it:
+
+- **1246 mutants** across the tree (`cargo mutants --list | wc -l`), concentrated in `main.rs` 190, `watch.rs` 105, `merge/execute.rs` 99, `submit/plan.rs` 88, `forge/github.rs` 84.
+- **~88s/mutant**, i.e. a full run is hours. Baseline is `12s build + 17s test`, and the cost is **build/link-bound, not test-bound** — cutting the per-mutant suite from 17s to 5s moved a 56-mutant file from 241s to 213s, a 12% gain. Restricting the test command is not the lever here.
+- `forge/remote.rs`: 39 caught / 2 missed / 15 unviable → **95%**. The two misses were both `||`→`&&` in an emptiness guard; one test killed both.
+
+**Two things a first pass got wrong, recorded so the next one doesn't:**
+
+- **`src/main.rs` is NOT untestable and must not be excluded.** A partial run showed "76 of 76 missed mutants in main.rs" and the obvious inference was that its command handlers are e2e-only. Wrong: **all 163 tested mutants were in main.rs**, 77 of them *caught* — cargo-mutants walks files in order and the run simply never reached anything else.
+- **Do not restrict to `--lib`/`--bins`.** `tests/cli.rs` drives the real binary via `assert_cmd` and is exactly what catches the `cmd_submit -> Ok(())` class. Dropping it converts caught into missed and reads as a test-quality problem.
+
+Consequently there is **no `.cargo/mutants.toml`** — nothing measured justifies a setting, and a config built on the misreading above would have been worse than none.
+
+**Reading a MISSED mutant.** Three legitimate responses, in order: write the test that kills it; judge it *equivalent* (cannot change observable behaviour) and say why; or exclude the code with a comment. Never delete the code to make it go away.
+
+Beware a second finding riding along: writing the test for the `||` guard surfaced `parse_gitlab_path` keeping a leading slash on an empty namespace component (see TODO.md). That is a real issue but not the one the mutant proved — record it, don't quietly change behaviour to match a test written mid-triage.
+
+**Not done yet:** a completed full-tree run. At ~88s/mutant that needs sharding across machines, and its missed list — not an estimate — is what should decide whether a nightly gate is worth adding.
+
 ## After every code change
 
 **`cargo install --path .`** — reinstall the local binary so the `jjpr` on `PATH` matches the source you just changed.

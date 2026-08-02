@@ -1,0 +1,188 @@
+name: Mutants
+
+# Mutation testing of the code a change actually touches.
+#
+# `cargo mutants` generates plausible bugs and reports the ones the tests fail to
+# notice. A full-tree run on jjpr is ~1246 mutants at roughly 88s each — hours, and
+# build-bound rather than test-bound, so it belongs on a schedule and across
+# machines, not here. `--in-diff` restricts it to mutants overlapping the changed
+# regions, which is minutes and puts a finding in the review conversation where it
+# is cheapest to act on.
+#
+# General method is in the `rust-mutation-testing` skill; jjpr's specifics are in
+# AGENTS.md.
+on:
+  pull_request:
+    # Skip doc-only changes; mutants can only come from source anyway.
+    paths:
+      - ".cargo/mutants.toml"
+      - ".github/workflows/mutants.yml"
+      - "Cargo.*"
+      - "src/**"
+      - "tests/**"
+  push:
+    branches: [main]
+    paths:
+      - ".cargo/mutants.toml"
+      - ".github/workflows/mutants.yml"
+      - "Cargo.*"
+      - "src/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  in-diff:
+    name: Mutants in changed code
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need history to diff against the base ref (PR) or the previous
+          # commit (push). A shallow clone has neither.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Prebuilt binary; `cargo install` would rebuild it on every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # jj MUST be present or this job reports nonsense.
+      #
+      # 46 call sites across 10 test files gate on `jj_available()` and silently
+      # return when the binary is missing — a skipped test reports as passed, so
+      # every mutant covered only by those tests would come back MISSED. That is
+      # the "mutation testing measures the tests it can run" trap, and here it is
+      # caused by an absent binary rather than an env gate, which makes it
+      # invisible rather than merely quiet.
+      #
+      # Pinned rather than :latest for two reasons: a jj release must not change
+      # what this job reports overnight, and this is the version the suite was
+      # actually verified against locally. These tests have never run on Linux
+      # (see below), so this job should not also be the first to try a jj version
+      # nobody has run them against. jjpr requires 0.36+; bump deliberately, and
+      # expect the bump itself to be the interesting change.
+      - name: Install jj
+        env:
+          JJ_VERSION: v0.39.0
+        run: |
+          set -euo pipefail
+          url="https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          # Extract the whole archive and install the one file, rather than
+          # naming a member: the archive stores paths as `./jj`, and whether a
+          # bare `jj` matches that differs between GNU tar (CI) and bsdtar
+          # (macOS, where this was written). Into ~/.local/bin, not
+          # /usr/local/bin, so no sudo is needed.
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" | tar xz -C "$tmp"
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/jj" --version
+
+      # jjpr lands work by pushing to main as well as by PR, so both need a diff.
+      # A PR diffs against its base; a push diffs against the commit it replaced.
+      # `github.event.before` is all-zeros for a newly created branch, in which
+      # case fall back to the first parent.
+      - name: Compute diff
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+          else
+            before="${{ github.event.before }}"
+            if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              base="HEAD~1"
+            else
+              base="$before"
+            fi
+          fi
+          echo "Diffing against $base"
+          git diff "$base".. > mutants.diff
+          wc -l mutants.diff
+
+      # A diff touching only tests or docs yields no mutants — cargo-mutants
+      # matches the diff against the code under test, not the test code
+      # (verified: a test-only diff selects 0).
+      #
+      # The early exits are for the MESSAGE, not the exit code: cargo-mutants
+      # already exits 0 on an empty selection with "No mutants to filter". Without
+      # them the job is a silent green and nobody can tell whether it ran.
+      - name: Mutants
+        id: mutants
+        run: |
+          set -euo pipefail
+          if [ ! -s mutants.diff ]; then
+            echo "::notice::empty diff — nothing to mutate"
+            exit 0
+          fi
+          selected=$(cargo mutants --list --in-diff mutants.diff | wc -l)
+          echo "Selected $selected mutants in changed regions"
+          if [ "$selected" -eq 0 ]; then
+            echo "::notice::no mutants overlap the changed regions (test- or doc-only change)"
+            exit 0
+          fi
+          # Exit codes worth knowing when this goes red (see the book):
+          #   2  a mutant was MISSED — the finding; write a test or justify it
+          #   3  a mutant TIMED OUT — usually an injected infinite loop, which is
+          #      also a real result: the code is only safe because of the guard
+          #      that was mutated
+          #   5  the diff's new side does not match the tree — a harness bug in
+          #      the "Compute diff" step above, NOT a problem with the code
+          #   6  the diff is malformed — likewise a harness bug
+          # 2 and 3 are about jjpr; 5 and 6 are about this workflow.
+          # No --timeout on purpose. cargo-mutants derives one from the measured
+          # baseline (89s for jjpr's full suite locally) and therefore ADAPTS to a
+          # slower CI runner; a hardcoded value does not. It also bounds the job:
+          # at 300s a diff with nine hang-prone mutants would reach the 45-minute
+          # job timeout, and a CANCELLED job can skip the `if: always()` steps
+          # below — losing exactly the report that explains why it went red.
+          cargo mutants --no-shuffle -vV --in-diff mutants.diff
+
+      # Put the finding in the run summary so a reviewer sees it without
+      # downloading an artifact. `missed.txt` is the actual deliverable.
+      - name: Summarise
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo '## Mutants in changed code'
+            echo
+            echo "_step outcome: ${{ steps.mutants.outcome }}_"
+            echo
+            for kind in missed caught unviable timeout; do
+              f="mutants.out/$kind.txt"
+              n=0
+              [ -f "$f" ] && n=$(wc -l < "$f" | tr -d ' ')
+              echo "- **$kind**: $n"
+            done
+            if [ -s mutants.out/missed.txt ]; then
+              echo
+              echo '### Missed — a bug was inserted here and no test noticed'
+              echo
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+              echo
+              echo 'Three legitimate responses: write a test that fails on it;'
+              echo 'judge it an *equivalent* mutant that cannot change behaviour;'
+              echo 'or exclude the code with a comment saying why.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive mutants.out
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-in-diff
+          path: mutants.out
+          if-no-files-found: ignore
