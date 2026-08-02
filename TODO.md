@@ -1,23 +1,75 @@
 # jjpr TODO
 
-## Open: `parse_gitlab_path` keeps a leading slash on an empty namespace component
+## Open: `auth test` misdiagnoses ambiguous remotes
 
-Found 2026-08-02 while evaluating cargo-mutants. `https://gitlab.com//sub/repo`
-parses to `owner = "/sub"`, `repo = "repo"`. The emptiness guard only checks
-whether `owner` is empty, and `"/sub"` is not — so an empty leading path
-component survives as a leading slash. No GitLab namespace has one, and jjpr
-URL-encodes `owner` into the project id, producing `%2Fsub%2Frepo` instead of
-`sub%2Frepo`.
+Found 2026-08-02 while reviewing the empty-path-components fix. With two
+recognised forge remotes the two code paths disagree:
 
-Garbage input, so low priority, and the failure is a confusing 404 rather than
-anything destructive. Worth deciding rather than leaving implicit: reject a path
-with an empty component, or normalise leading/duplicate slashes before parsing.
-The GitHub/Forgejo parser (`parse_owner_repo`) is unaffected — it splits on the
-FIRST slash, so an empty leading component yields an empty owner and is rejected.
+- `submit`/`status` (via `resolve_remote`) say
+  `multiple forge remotes found: origin, second. Use --remote to specify one.`
+- `auth test` (via `detect_forge_for_cwd`) says
+  `could not detect forge. Run from a jj repo with a supported remote, or set
+  forge = "..."`
 
-Not fixed inline because it surfaced from a test written mid-review; changing
-parser behaviour to match an invented expectation is how you get a "fix" nobody
-asked for.
+The second is actively wrong: it reports *no* supported remote when the problem
+is *two*, and the advice it gives cannot help. It matters more than a stray
+message because `auth test` is what jjpr's other errors tell you to run — the
+forge failure path literally prints ``try `jjpr auth test` ``. So the diagnostic
+of last resort is the one that lies.
+
+Not fixed here: it is a different code path from the parser change that surfaced
+it, and changing auth behaviour inside a release is the kind of unrelated risk
+this file exists to defer. The fix is presumably to route
+`detect_forge_for_cwd` through `resolve_remote` so there is one answer.
+
+Verified pre-existing, not caused by the parser change: two *clean* GitLab
+remotes reproduce it identically.
+
+## Fixed: empty path components in remote URLs (2026-08-02)
+
+Filed as "`parse_gitlab_path` keeps a leading slash" — `https://gitlab.com//sub/repo`
+gave `owner = "/sub"`, which jjpr encodes into `%2Fsub%2Frepo`. Judged garbage
+input and low priority.
+
+Measuring the neighbouring cases before fixing it changed that assessment. The
+leading slash was the rare symptom; the same missing normalisation made GitLab
+reject a **trailing** slash outright — `https://gitlab.com/group/repo/`, which is
+what you get copying a URL out of a browser address bar. GitHub's parser already
+accepted it, so the same remote worked on one forge and reported "no supported
+forge remotes found" on the other. That is the case a user actually hits.
+
+Fixed by dropping empty path components before splitting, rather than by
+rejecting them: a remote URL always names a repository, never a group page, so a
+trailing slash is punctuation. `group/sub/` therefore reads as repo `sub` in
+group `group`, not as an empty-project subgroup.
+
+Fixing it surfaced a third defect in both parsers: `.git` was stripped from the
+whole path before the slashes were normalised, so `owner/repo.git/` kept the repo
+named `repo.git` and every API call 404d. GitHub had this one too. Both now strip
+`.git` from the repo component.
+
+All forges now share one rule. Leaving GitHub stricter than GitLab was the first
+plan, on the grounds that its prevalent case already worked — but that is the
+cross-forge split this fix exists to remove, reproduced in miniature, and two
+parsers reading the raw path independently is how they drifted apart to begin
+with. Both now go through `path_components` and `strip_git_suffix`.
+
+**This is not purely additive, which an early draft of this entry claimed.** The
+reasoning was "every shape whose behaviour changed was previously failing, so
+nothing that worked before works differently" — false. `resolve_remote` errors
+when it finds MORE than one forge remote, so a repo whose second remote was
+previously ignored *because its URL was malformed* now has two recognised
+remotes and starts failing with `multiple forge remotes found ... use --remote`.
+A mirror added with a trailing slash is enough. Narrow, but it is a real way a
+working setup breaks, and it is why this went out as a minor rather than a patch.
+
+Verified these are functional remotes rather than merely parseable strings, which
+is the premise the whole fix rests on. `git ls-remote` fetches all of
+`gitlab.com/gitlab-org/gitlab-runner/`, `gitlab.com//gitlab-org/gitlab-runner`,
+and `github.com/rust-lang/log/`. So a user can have any of them configured, `jj
+git push` works, and jjpr was the only thing refusing. GitLab redirects the first
+two to `…/gitlab-runner.git/` — `.git` followed by a trailing slash, i.e. the
+third defect is not hypothetical; the forge's own redirect emits that form.
 
 ## Fixed: the change graph keyed by change id (2026-08-01)
 
