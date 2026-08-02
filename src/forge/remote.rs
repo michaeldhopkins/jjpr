@@ -115,33 +115,64 @@ fn is_forgejo_host(host: &str) -> bool {
     host == "codeberg.org"
 }
 
+/// Split a remote-URL path into its meaningful components.
+///
+/// Empty components are dropped rather than preserved, because a remote URL
+/// always names a repository — never a group or user page — so a leading,
+/// doubled, or trailing slash is punctuation, not an anonymous path segment.
+///
+/// Every forge shares this rule deliberately. Reading the raw path per forge is
+/// how the two parsers drifted apart: `gitlab.com/group/repo/` was rejected
+/// outright while `github.com/owner/repo/` worked, so the same copied-from-the-
+/// browser URL succeeded on one forge and reported "no supported forge remotes
+/// found" on the other.
+fn path_components(path: &str) -> Vec<&str> {
+    path.split('/')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// Strip a `.git` suffix from a single path component.
+///
+/// Applied to the component, never to the whole path: on `owner/repo.git/` the
+/// path's own suffix is the slash, so stripping first leaves the repo named
+/// `repo.git` and every API call 404s. Returns `None` when nothing is left, so
+/// `owner/.git` is not a repo.
+fn strip_git_suffix(component: &str) -> Option<&str> {
+    let stripped = component.strip_suffix(".git").unwrap_or(component);
+    (!stripped.is_empty()).then_some(stripped)
+}
+
+/// GitHub and Forgejo have no nested groups: the path is `owner/repo`, and
+/// anything after it (a `/tree/main` web-UI tail, say) is ignored.
 fn parse_owner_repo(path: &str) -> Option<RepoInfo> {
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let (owner, repo) = path.split_once('/')?;
-    let owner = owner.trim();
-    let repo = repo.split('/').next()?.trim();
-    if owner.is_empty() || repo.is_empty() {
-        return None;
-    }
+    let parts = path_components(path);
+    let owner = *parts.first()?;
+    let repo = strip_git_suffix(parts.get(1)?)?;
     Some(RepoInfo {
         owner: owner.to_string(),
         repo: repo.to_string(),
     })
 }
 
-/// GitLab supports nested groups: `group/subgroup/repo`.
-/// The last segment is the repo, everything before is the namespace.
+/// GitLab supports nested groups (`group/subgroup/repo`), so everything before
+/// the last component is the namespace.
+///
+/// The nested-group shape makes a trailing slash genuinely ambiguous —
+/// `group/sub/` is either repo `sub` in group `group`, or the subgroup
+/// `group/sub` with no repo at all. It is read as the former: only the first can
+/// be a git remote.
 fn parse_gitlab_path(path: &str) -> Option<RepoInfo> {
-    let path = path.strip_suffix(".git").unwrap_or(path);
-    let last_slash = path.rfind('/')?;
-    let owner = path[..last_slash].trim();
-    let repo = path[last_slash + 1..].trim();
-    if owner.is_empty() || repo.is_empty() {
+    let parts = path_components(path);
+    let (repo, namespace) = parts.split_last()?;
+    // A repo with no namespace is not addressable on GitLab.
+    if namespace.is_empty() {
         return None;
     }
     Some(RepoInfo {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
+        owner: namespace.join("/"),
+        repo: strip_git_suffix(repo)?.to_string(),
     })
 }
 
@@ -208,14 +239,19 @@ mod tests {
         assert_eq!(info.repo, "repo");
     }
 
-    /// A half-empty path is not a repo. `owner.is_empty() || repo.is_empty()`
-    /// must reject when EITHER side is missing — every existing test supplied
-    /// both, so nothing pinned the `||`, and swapping it to `&&` (reject only
-    /// when both are empty) passed the whole suite. jjpr would then accept
-    /// `https://github.com/owner/` and build API paths like `/repos/owner//pulls`.
+    /// A path missing either half is not a repo, however many slashes dress it
+    /// up. jjpr must not accept `https://github.com/owner/` and go on to build
+    /// API paths like `/repos/owner//pulls`.
     ///
-    /// Found by cargo-mutants; the fuzz target missed it because it asserts on a
-    /// fixed well-formed URL frame and never varies the path shape.
+    /// Originally written to pin an `owner.is_empty() || repo.is_empty()` guard:
+    /// every existing test supplied both halves, so nothing stopped `||` from
+    /// becoming `&&` (reject only when BOTH are empty) and the whole suite still
+    /// passed. Found by cargo-mutants; the fuzz target missed it because it
+    /// asserts on a fixed well-formed URL frame and never varies the path shape.
+    ///
+    /// That guard is gone — emptiness is now structural, since components are
+    /// dropped before the halves are taken — but the behaviour it protected is
+    /// the point, so the cases stay.
     #[test]
     fn a_path_missing_either_side_is_not_a_repo() {
         for url in [
@@ -229,22 +265,89 @@ mod tests {
                 "must reject a half-empty path: {url}"
             );
         }
-        // GitLab's nested-group parser has the same guard, and the same gap.
-        //
-        // NOT asserted here: `https://gitlab.com//sub/repo` currently parses to
-        // owner `/sub` — an empty leading component leaves a leading slash, which
-        // no GitLab namespace has, and jjpr encodes it into a malformed project
-        // id. That is a separate finding from the missed mutant and is recorded
-        // in TODO.md rather than fixed by a test written mid-review.
+        // GitLab needs a namespace AND a repo, so one usable component is not a
+        // repo no matter how many slashes surround it.
         for url in [
-            "https://gitlab.com/group/sub/",
             "https://gitlab.com/group/",
+            "https://gitlab.com/group",
+            "https://gitlab.com//",
+            "https://gitlab.com///group///",
         ] {
             assert!(
                 parse_gitlab_url(url).is_none(),
-                "must reject a half-empty gitlab path: {url}"
+                "must reject a gitlab path with no namespace: {url}"
             );
         }
+    }
+
+    /// A remote URL always names a repository — never a group page — so a
+    /// trailing slash is punctuation, not an empty final component. GitHub's
+    /// parser already read it that way; GitLab's did not, which made the same
+    /// copied-from-the-browser URL work on one forge and fail on the other.
+    #[test]
+    fn empty_gitlab_path_components_are_not_significant() {
+        for url in [
+            "https://gitlab.com/group/repo",
+            "https://gitlab.com/group/repo/", // trailing: browser copy
+            "https://gitlab.com//group/repo", // leading: used to give owner "/group"
+            "https://gitlab.com/group//repo", // doubled: used to give owner "group/"
+            "https://gitlab.com//group//repo/", // all three at once
+            "https://gitlab.com/group/repo.git/",
+        ] {
+            let info = parse_gitlab_url(url).unwrap_or_else(|| panic!("must parse: {url}"));
+            assert_eq!(info.owner, "group", "owner from {url}");
+            assert_eq!(info.repo, "repo", "repo from {url}");
+        }
+    }
+
+    /// Every forge applies the same rule, so one malformed-but-obvious URL does
+    /// not succeed on one forge and fail on another. That cross-forge split was
+    /// the bug being fixed; leaving GitHub stricter than GitLab would have
+    /// reproduced it in miniature.
+    #[test]
+    fn all_forges_agree_on_empty_path_components() {
+        let github = parse_github_url("https://github.com//owner//repo/").unwrap();
+        assert_eq!((github.owner.as_str(), github.repo.as_str()), ("owner", "repo"));
+
+        let forgejo = parse_forgejo_url("https://codeberg.org//owner//repo/").unwrap();
+        assert_eq!((forgejo.owner.as_str(), forgejo.repo.as_str()), ("owner", "repo"));
+
+        let gitlab = parse_gitlab_url("https://gitlab.com//group//repo/").unwrap();
+        assert_eq!((gitlab.owner.as_str(), gitlab.repo.as_str()), ("group", "repo"));
+    }
+
+    /// Both parsers strip `.git` from the repo component, so a trailing slash
+    /// after it cannot smuggle the suffix into the repo name.
+    #[test]
+    fn a_git_suffix_is_stripped_even_behind_a_trailing_slash() {
+        for url in [
+            "https://github.com/owner/repo.git/",
+            "https://github.com/owner/repo.git",
+        ] {
+            let info = parse_github_url(url).unwrap_or_else(|| panic!("must parse: {url}"));
+            assert_eq!(info.repo, "repo", "repo from {url}");
+        }
+        for url in [
+            "https://gitlab.com/group/repo.git/",
+            "https://gitlab.com/group/repo.git",
+        ] {
+            let info = parse_gitlab_url(url).unwrap_or_else(|| panic!("must parse: {url}"));
+            assert_eq!(info.repo, "repo", "repo from {url}");
+        }
+    }
+
+    /// The ambiguity a trailing slash creates for nested groups: `group/sub/` is
+    /// read as repo `sub` in group `group`, NOT as the empty-project subgroup
+    /// `group/sub`. Only the first can be a git remote.
+    #[test]
+    fn a_trailing_slash_does_not_extend_the_gitlab_namespace() {
+        let info = parse_gitlab_url("https://gitlab.com/group/sub/").unwrap();
+        assert_eq!(info.owner, "group");
+        assert_eq!(info.repo, "sub");
+
+        let nested = parse_gitlab_url("https://gitlab.com/group/sub/repo/").unwrap();
+        assert_eq!(nested.owner, "group/sub");
+        assert_eq!(nested.repo, "repo");
     }
 
     #[test]
@@ -381,7 +484,10 @@ mod tests {
         assert_eq!(info.repo, "r");
 
         // The extracted host carries no userinfo, so the API base URL is clean.
-        assert_eq!(extract_host("https://user:token@gitlab.com/o/r.git"), Some("gitlab.com"));
+        assert_eq!(
+            extract_host("https://user:token@gitlab.com/o/r.git"),
+            Some("gitlab.com")
+        );
     }
 
     // detect_forge tests
@@ -496,21 +602,27 @@ mod tests {
     // parse_url_as tests — used when config explicitly sets forge type
     #[test]
     fn test_parse_url_as_github_from_any_host() {
-        let info = parse_url_as("https://forgejo.example.com/me/repo.git", ForgeKind::GitHub).unwrap();
+        let info =
+            parse_url_as("https://forgejo.example.com/me/repo.git", ForgeKind::GitHub).unwrap();
         assert_eq!(info.owner, "me");
         assert_eq!(info.repo, "repo");
     }
 
     #[test]
     fn test_parse_url_as_forgejo_from_any_host() {
-        let info = parse_url_as("git@git.mycompany.com:team/project.git", ForgeKind::Forgejo).unwrap();
+        let info =
+            parse_url_as("git@git.mycompany.com:team/project.git", ForgeKind::Forgejo).unwrap();
         assert_eq!(info.owner, "team");
         assert_eq!(info.repo, "project");
     }
 
     #[test]
     fn test_parse_url_as_gitlab_uses_nested_groups() {
-        let info = parse_url_as("https://git.mycompany.com/group/sub/repo.git", ForgeKind::GitLab).unwrap();
+        let info = parse_url_as(
+            "https://git.mycompany.com/group/sub/repo.git",
+            ForgeKind::GitLab,
+        )
+        .unwrap();
         assert_eq!(info.owner, "group/sub");
         assert_eq!(info.repo, "repo");
     }
