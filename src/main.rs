@@ -592,6 +592,7 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         trunk_dismisses_stale,
         below_pr,
         forge_kind: info.forge_kind,
+        divergent_change_ids: divergent_change_ids_in(&stacks_to_show),
     };
 
     let multi = stacks_to_show.len() > 1;
@@ -788,6 +789,35 @@ struct StatusRender<'a> {
     below_pr: HashMap<String, u64>,
     /// For formatting the lower PR reference (`#123` vs `!123`).
     forge_kind: Option<ForgeKind>,
+    /// Change ids carried by more than one commit in the stacks being shown — a
+    /// DIVERGENT change. Marked on the segment line because `submit` and `watch`
+    /// now refuse on it, and status is where a user looks to find out why. Status
+    /// itself never refuses: a degraded view is what makes the state diagnosable.
+    divergent_change_ids: HashSet<String>,
+}
+
+/// Change ids appearing on more than one distinct commit across `stacks`.
+///
+/// Deliberately computed over everything being displayed rather than per stack: a
+/// change id on two commits is divergent regardless of which stack you are looking
+/// at, and the marker should not depend on the scope of the view.
+fn divergent_change_ids_in(stacks: &[&BranchStack]) -> HashSet<String> {
+    let mut commits_by_change: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for stack in stacks {
+        for segment in &stack.segments {
+            for change in &segment.changes {
+                commits_by_change
+                    .entry(&change.change_id)
+                    .or_default()
+                    .insert(&change.commit_id);
+            }
+        }
+    }
+    commits_by_change
+        .into_iter()
+        .filter(|(_, commits)| commits.len() > 1)
+        .map(|(change_id, _)| change_id.to_string())
+        .collect()
 }
 
 impl StatusRender<'_> {
@@ -861,7 +891,14 @@ impl StatusRender<'_> {
             .map(|s| format!(", {s}"))
             .unwrap_or_default();
 
-        let mut lines = vec![format!("  {name} ({count} change{plural}{merge_label}{pr_label}{slot})")];
+        let divergent = segment
+            .changes
+            .iter()
+            .any(|c| self.divergent_change_ids.contains(&c.change_id));
+        let divergent_label = if divergent { "  ?? divergent" } else { "" };
+
+        let mut lines =
+            vec![format!("  {name} ({count} change{plural}{merge_label}{pr_label}{slot}){divergent_label}")];
         lines.extend(self.render_detail(segment, &pr, mine));
         lines
     }
@@ -2191,6 +2228,7 @@ mod tests {
             trunk_dismisses_stale: None,
             below_pr: HashMap::new(),
             forge_kind: None,
+            divergent_change_ids: HashSet::new(),
         }
     }
 
@@ -2305,6 +2343,7 @@ mod tests {
             trunk_dismisses_stale: dismiss,
             below_pr: below_pr.clone(),
             forge_kind: kind,
+            divergent_change_ids: HashSet::new(),
         };
         let note = |r: StatusRender, name: &str, mine: bool| r.dismiss_stale_note(name, mine);
 
@@ -2350,6 +2389,7 @@ mod tests {
             trunk_dismisses_stale: Some(true),
             below_pr,
             forge_kind: Some(ForgeKind::GitHub),
+            divergent_change_ids: HashSet::new(),
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
@@ -2408,6 +2448,53 @@ mod tests {
         );
     }
 
+    /// The marker that makes submit's refusal diagnosable.
+    ///
+    /// `submit` and `watch` refuse when a divergent change is in the stack, so
+    /// status has to say which segment carries it — otherwise the user is told
+    /// "resolve the divergence" with nothing to act on. Status itself never
+    /// refuses; showing the degraded stack is the whole point.
+    #[test]
+    fn render_segment_marks_a_divergent_change() {
+        let (pr_map, merged_map, status_map): (
+            HashMap<String, PullRequest>,
+            HashMap<String, PullRequest>,
+            HashMap<String, SegmentDisplayStatus>,
+        ) = (HashMap::new(), HashMap::new(), HashMap::new());
+        let my: HashSet<String> = ["mine".to_string()].into_iter().collect();
+
+        // `seg` builds a bookmarks-only segment; the marker reads `changes`, so
+        // give it one commit to carry the divergent change id.
+        let mut segment = seg(&["mine"]);
+        segment.changes = vec![jjpr::jj::types::LogEntry {
+            commit_id: "c_mine".to_string(),
+            change_id: "ch_mine".to_string(),
+            author_name: "T".to_string(),
+            author_email: "t@x".to_string(),
+            description: "d".to_string(),
+            description_first_line: "d".to_string(),
+            parents: vec![],
+            local_bookmarks: vec!["mine".to_string()],
+            remote_bookmarks: vec![],
+            is_working_copy: false,
+            conflict: false,
+            empty: false,
+        }];
+        let its_change = "ch_mine".to_string();
+
+        let quiet = render_with(&pr_map, &merged_map, &my, &status_map);
+        assert!(
+            !quiet.render_segment(&segment)[0].contains("divergent"),
+            "a normal stack must not be marked: {:?}",
+            quiet.render_segment(&segment)[0]
+        );
+
+        let mut loud = render_with(&pr_map, &merged_map, &my, &status_map);
+        loud.divergent_change_ids = [its_change].into_iter().collect();
+        let line = loud.render_segment(&segment)[0].clone();
+        assert!(line.contains("?? divergent"), "must mark the segment: {line}");
+    }
+
     #[test]
     fn draft_pr_suppresses_dismiss_stale_note() {
         // A draft hides its review detail, so it must hide the review-loss note
@@ -2431,6 +2518,7 @@ mod tests {
             trunk_dismisses_stale: Some(true),
             below_pr,
             forge_kind: Some(ForgeKind::GitHub),
+            divergent_change_ids: HashSet::new(),
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
@@ -2571,6 +2659,7 @@ mod tests {
             trunk_dismisses_stale: None,
             below_pr: HashMap::new(),
             forge_kind: None,
+            divergent_change_ids: HashSet::new(),
         };
         let seg = segment_of(vec![bm("feat", false)]);
         assert!(r.segment_is_yours(&seg), "your own PR (by login) must count as yours");

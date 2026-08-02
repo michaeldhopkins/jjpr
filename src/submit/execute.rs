@@ -37,6 +37,14 @@ pub fn execute_submission_plan(
         anyhow::bail!("{}", native_stack_conflict_message(plan, fk));
     }
 
+    // Also before Phase 1. A divergent change with both copies in the stack means
+    // publishing two PRs for what the user still has as one unresolved change —
+    // and a created PR notifies reviewers and is awkward to retract, so this must
+    // refuse before the first push rather than warn afterwards.
+    if !plan.divergent_changes.is_empty() {
+        anyhow::bail!("{}", divergent_change_message(plan));
+    }
+
     // Report merged bookmarks
     for item in &plan.bookmarks_already_merged {
         println!(
@@ -346,6 +354,34 @@ fn print_body_conflict_warnings(
 /// Deliberately says what jjpr wanted to do, why it cannot, and what the user
 /// can do instead. The bare `422` ("Validation Failed") that GitHub would
 /// otherwise surface names none of those.
+/// Why submit stopped, and the two commits the user has to choose between.
+///
+/// Names the commits explicitly: "resolve the divergence" is not actionable
+/// without knowing which commits collided, and `jj log` will not obviously show
+/// it when the copies sit at different depths in the stack.
+fn divergent_change_message(plan: &SubmissionPlan) -> String {
+    let mut out = String::from("Refusing to submit: this stack contains a divergent change.\n");
+    for d in &plan.divergent_changes {
+        let short = &d.change_id[..d.change_id.len().min(12)];
+        out.push_str(&format!(
+            "\n  change {} is on {} commits: {}",
+            short,
+            d.commit_ids.len(),
+            d.commit_ids.join(", ")
+        ));
+        if !d.bookmarks.is_empty() {
+            out.push_str(&format!("\n    bookmarks: {}", d.bookmarks.join(", ")));
+        }
+    }
+    out.push_str(
+        "\n\njjpr will not publish both copies as separate pull requests. Resolve the \n\
+         divergence first — `jj abandon <commit>` to drop one, or `jj duplicate` to \n\
+         give it its own change id — then re-run.\n\n\
+         Nothing has been pushed.",
+    );
+    out
+}
+
 fn native_stack_conflict_message(plan: &SubmissionPlan, fk: ForgeKind) -> String {
     let abbr = fk.request_abbreviation();
     let mut out = String::from(
@@ -810,6 +846,7 @@ mod tests {
         SubmissionPlan {
             bookmarks_needing_push: vec![make_bookmark("auth")],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![super::super::plan::BookmarkNeedingPr {
                 bookmark: make_bookmark("auth"),
                 base_branch: "main".to_string(),
@@ -854,6 +891,40 @@ mod tests {
             github.calls().is_empty(),
             "dry run should not call GitHub API"
         );
+    }
+
+    /// A divergent change in the stack must stop submit before the first push.
+    ///
+    /// Pushing then failing would be the worst outcome: the branches move, PRs may
+    /// exist, and the user still has the divergence to resolve. `merge` already
+    /// refuses on divergence; this keeps submit and watch consistent, and watch
+    /// gets it for free because it builds its plan through the same function.
+    #[test]
+    fn a_divergent_change_refuses_before_pushing_anything() {
+        let jj = RecordingJj::new();
+        let github = RecordingGitHub::new();
+        let mut plan = make_plan();
+        plan.divergent_changes = vec![super::super::plan::DivergentChange {
+            change_id: "chdupdupdup".to_string(),
+            commit_ids: vec!["commit_hi".to_string(), "commit_lo".to_string()],
+            bookmarks: vec!["upper".to_string(), "lower".to_string()],
+        }];
+
+        let err = execute_submission_plan(&jj, &github, &plan)
+            .expect_err("must refuse rather than publish both copies");
+
+        assert!(jj.pushes().is_empty(), "nothing may be pushed: {:?}", jj.pushes());
+        assert!(github.calls().is_empty(), "no forge mutation: {:?}", github.calls());
+
+        let msg = err.to_string();
+        assert!(msg.contains("divergent"), "says what is wrong: {msg}");
+        assert!(
+            msg.contains("commit_hi") && msg.contains("commit_lo"),
+            "names BOTH commits, since 'resolve the divergence' is not actionable \
+             without them: {msg}"
+        );
+        assert!(msg.contains("jj abandon"), "gives the remedy: {msg}");
+        assert!(msg.contains("Nothing has been pushed"), "states the state: {msg}");
     }
 
     // The whole reason this is checked at plan time rather than caught from
@@ -1184,6 +1255,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1237,6 +1309,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![super::super::plan::BookmarkNeedingBaseUpdate {
                 bookmark: make_bookmark("profile"),
@@ -1277,6 +1350,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
@@ -1356,6 +1430,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
@@ -1410,6 +1485,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![super::super::plan::BookmarkNeedingBodyUpdate {
@@ -1468,6 +1544,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1508,6 +1585,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1561,6 +1639,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1614,6 +1693,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1667,6 +1747,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1726,6 +1807,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![make_bookmark("auth"), make_bookmark("profile")],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1758,6 +1840,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1796,6 +1879,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1827,6 +1911,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1881,6 +1966,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![make_bookmark("auth")],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -1978,6 +2064,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -2075,6 +2162,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],
@@ -2213,6 +2301,7 @@ mod tests {
         let plan = SubmissionPlan {
             bookmarks_needing_push: vec![],
             native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
             bookmarks_needing_pr: vec![],
             bookmarks_needing_base_update: vec![],
             bookmarks_needing_body_update: vec![],

@@ -118,6 +118,24 @@ fetches, so it costs no extra request. See
 a stack, and [Reshaping a native stack](submit.md#reshaping-a-native-stack) for
 what submit can and cannot do with one.
 
+## Divergent changes
+
+When two commits carry the same change ID — a *divergent* change, which jj marks
+`??` — the segment carrying it is flagged:
+
+```
+  feat-a (1 change, #41 open)
+  feat-b (1 change, #42 open)  ?? divergent
+```
+
+Status always shows the stack, even when it is in this state; it is where you
+look to find out which segment to fix. `jjpr submit`, `jjpr watch` and
+`jjpr merge` all refuse while a divergent change is in the stack — see
+[submit](submit.md#divergent-changes).
+
+Resolve with `jj abandon <commit>` to drop one copy, or `jj duplicate` to give it
+its own change ID.
+
 ## Branches that aren't yours
 
 `status` shows the whole stack down to your default branch, including a
