@@ -21,6 +21,33 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # REQUIRED, not optional. 41 tests across cli, jj_integration,
+      # recovery_scenarios, rebase_working_copy, identity_ownership, parity,
+      # status_foreign_stack, tty_watch and watch_heartbeat gate on
+      # `jj_available()` and silently RETURN when the binary is missing — a
+      # skipped test reports as passed. Without this step the suite reported the
+      # same 712 passing tests while those 41 did nothing, and the runtime gave it
+      # away only if you looked: recovery_scenarios 2975ms -> 133ms,
+      # jj_integration 3779ms -> 113ms.
+      #
+      # Pinned so a jj release cannot change CI's verdict overnight; jjpr requires
+      # 0.36+. Bump deliberately and expect the bump to be the interesting change.
+      - name: Install jj
+        env:
+          JJ_VERSION: v0.39.0
+        run: |
+          set -euo pipefail
+          url="https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          # The archive stores paths as `./jj`; extract wholesale and install the
+          # one file rather than naming a member, since GNU tar (CI) and bsdtar
+          # differ on whether a bare `jj` matches.
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" | tar xz -C "$tmp"
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/jj" --version
+
       - name: cargo check
         run: cargo check --locked
 
