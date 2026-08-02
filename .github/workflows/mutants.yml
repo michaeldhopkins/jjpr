@@ -58,12 +58,16 @@ jobs:
 
       # jj MUST be present or this job reports nonsense.
       #
-      # 46 call sites across 10 test files gate on `jj_available()` and silently
-      # return when the binary is missing — a skipped test reports as passed, so
-      # every mutant covered only by those tests would come back MISSED. That is
-      # the "mutation testing measures the tests it can run" trap, and here it is
-      # caused by an absent binary rather than an env gate, which makes it
-      # invisible rather than merely quiet.
+      # 41 `#[test]` functions across 10 test files gate on `jj_available()` and
+      # silently return when the binary is missing — a skipped test reports as
+      # passed, so every mutant covered only by those tests would come back
+      # MISSED. That is the "mutation testing measures the tests it can run"
+      # trap, and here it is caused by an absent binary rather than an env gate,
+      # which makes it invisible rather than merely quiet.
+      #
+      # 31 is the number that matters to THIS job: the other 10 also sit behind
+      # `JJPR_E2E`, which no CI job sets, so they skip whatever we do here and
+      # their coverage is unavailable to mutation testing either way.
       #
       # Pinned rather than :latest for two reasons: a jj release must not change
       # what this job reports overnight, and this is the version the suite was
@@ -107,8 +111,24 @@ jobs:
             fi
           fi
           echo "Diffing against $base"
-          git diff "$base".. > mutants.diff
+          # Force standard a/ b/ prefixes. `diff.mnemonicPrefix` (common in
+          # personal git configs, and set in this project's author's) emits
+          # `i/` and `w/` instead, which cargo-mutants does not recognise: it
+          # matches no files, logs "No mutants to filter" and EXITS 0. That is
+          # the worst failure mode for a gate — a silent pass. Measured locally:
+          # a one-line edit selected 3 mutants with a/b prefixes and 0 with i/w.
+          git -c diff.mnemonicPrefix=false -c diff.noprefix=false \
+              diff "$base".. > mutants.diff
           wc -l mutants.diff
+
+          # Belt and braces: if the diff is non-empty it must carry the prefixes
+          # cargo-mutants can read. Without this the above regressing would look
+          # like "nothing to test" rather than a broken harness.
+          if [ -s mutants.diff ] && ! grep -q '^diff --git a/' mutants.diff; then
+            echo "::error::diff lacks a/ b/ prefixes — cargo-mutants would silently match nothing"
+            head -3 mutants.diff
+            exit 1
+          fi
 
       # A diff touching only tests or docs yields no mutants — cargo-mutants
       # matches the diff against the code under test, not the test code
