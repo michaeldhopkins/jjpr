@@ -5,15 +5,11 @@ use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
+mod common;
+use common::jj_available;
+
 fn jjpr() -> assert_cmd::Command {
     cargo_bin_cmd!("jjpr")
-}
-
-fn jj_available() -> bool {
-    Command::new("jj")
-        .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success())
 }
 
 fn run_cmd(program: &str, args: &[&str], dir: &Path) {

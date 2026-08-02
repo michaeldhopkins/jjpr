@@ -208,11 +208,23 @@ pub fn list_comments(number: u64) -> Vec<serde_json::Value> {
     serde_json::from_slice(&output.stdout).unwrap_or_default()
 }
 
+/// Whether the real `jj` binary is on PATH.
+///
+/// Kept separate from `tests/common`'s copy because the parity harness is its own
+/// module tree, but it carries the same CI assertion for the same reason: callers
+/// use this as `if !jj_available() { return; }`, and an early return still reports
+/// as **passed**, so a CI box without jj reports green on tests that did nothing.
 pub fn jj_available() -> bool {
-    Command::new("jj")
+    let ok = Command::new("jj")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    assert!(
+        ok || std::env::var_os("CI").is_none(),
+        "jj is not on PATH, but CI is set — parity tests would SKIP and still \
+         report as passed. Install jj in the workflow."
+    );
+    ok
 }
 
 pub fn gh_available() -> bool {
