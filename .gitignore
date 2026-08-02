@@ -4,6 +4,14 @@
 # Playwright MCP session artifacts: page snapshots, console logs, screenshots.
 .playwright-mcp/
 
+# cargo-mutants output (caught/missed/unviable/timeout lists, per-mutant logs, and
+# a full scratch copy of the tree). CI uploads it as an artifact; locally it is
+# regenerable. Under jj this is not merely tidiness — the working copy is
+# snapshotted on every command, so an unignored mutants.out lands in whatever
+# commit happens to be @ without anyone running an add.
+/mutants.out/
+/mutants.out.old/
+
 # Fuzzing. The canonical corpus lives in the nightly's GitHub Actions cache, not in
 # git — it grows without bound and is regenerable, so committing it would add
 # megabytes per night for nothing. What IS committed is the hand-written `seed-*`
