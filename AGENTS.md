@@ -81,6 +81,11 @@ Consequently there is **no `.cargo/mutants.toml`** — nothing measured justifie
 
 Beware a second finding riding along: writing the test for the `||` guard surfaced `parse_gitlab_path` keeping a leading slash on an empty namespace component (see TODO.md). That is a real issue but not the one the mutant proved — record it, don't quietly change behaviour to match a test written mid-triage.
 
+**Two traps the `--in-diff` job hit, both measured 2026-08-02:**
+
+- **`diff.mnemonicPrefix` silently disables it.** Set in this author's global git config, it makes `git diff` emit `i/`/`w/` instead of `a/`/`b/`; cargo-mutants matches nothing, logs `No mutants to filter` and exits 0 — a gate reporting green while testing nothing. The workflow now forces the prefixes and fails if they are absent. Note it works fine on a CI runner's clean config, so this breaks locally and not in CI, which is the harder direction to notice.
+- **A one-line edit selects the enclosing function's mutants**, not just that line's. Touching one comparison in `parse_owner_repo` selected the `||`→`&&` mutant *and* both `replace parse_owner_repo -> ...` mutants anchored at the signature. So touching an untested function surfaces its whole pre-existing gap as a "new" finding — honest scope, but decide deliberately whether that blocks a PR.
+
 **Not done yet:** a completed full-tree run. At ~88s/mutant that needs sharding across machines, and its missed list — not an estimate — is what should decide whether a nightly gate is worth adding.
 
 ## After every code change
