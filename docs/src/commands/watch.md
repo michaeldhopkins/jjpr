@@ -131,6 +131,14 @@ it and exits instead of polling forever. See
 [GitHub native stacks](merge.md#github-native-stacks) in the merge docs for
 the ways out.
 
+## Divergent changes
+
+Watch submits through the same planner as `jjpr submit`, so it refuses for the
+same reason: if two commits in the stack share a change ID, nothing is pushed and
+watch stops with the message described in
+[submit](submit.md#divergent-changes). Resolve the divergence and start watch
+again.
+
 ## One watcher per repo
 
 Run only one `jjpr watch` per repository. Two watchers poll the forge

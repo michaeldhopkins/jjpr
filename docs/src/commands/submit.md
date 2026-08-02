@@ -146,6 +146,39 @@ Error: cannot push — some commits have unresolved conflicts:
 To resolve: jj edit pnnmmvmu, fix the conflicts, then re-run jjpr submit.
 ```
 
+## Divergent changes
+
+A change is *divergent* when two commits carry the same change ID — usually the
+result of two processes rewriting the same change concurrently. jj marks these
+`??`.
+
+If both copies are in the stack you are submitting, jjpr stops before pushing
+anything:
+
+```
+Error: Refusing to submit: this stack contains a divergent change.
+
+  change qkpwpsrsmuto is on 2 commits: 8bf5f5f34cfe, f24f394275ab
+    bookmarks: feat-b, feat-a
+
+jjpr will not publish both copies as separate pull requests. Resolve the
+divergence first — `jj abandon <commit>` to drop one, or `jj duplicate` to
+give it its own change id — then re-run.
+
+Nothing has been pushed.
+```
+
+The two copies are genuinely different commits, so publishing them would mean
+two pull requests for what you still have as one unresolved change — and a
+created PR notifies reviewers and is awkward to retract. `jjpr merge` already
+refuses on divergence; submit and `jjpr watch` behave the same way.
+
+The check is scoped to the stack being submitted. A divergent change elsewhere
+in the repository does not block you.
+
+`jjpr status` marks the segment that carries it, so you can see which one to
+resolve.
+
 ## Reshaping a native stack
 
 If your PRs are registered as a GitHub native stack (with `gh stack submit` or

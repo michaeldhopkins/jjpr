@@ -272,3 +272,134 @@ fn feature1_scenario(
         );
     }
 }
+
+/// A divergent change in the stack must stop the REAL binary before it pushes.
+///
+/// Everything else covering this is stubbed or library-level, and the skill's
+/// warning applies exactly here: a green library suite does not prove the binary
+/// works, because the binary re-derives forge detection, token resolution and
+/// the API base from the clone. This drives `jjpr submit` for real and asserts
+/// the safety property directly — no branch reached the forge and no PR was
+/// opened.
+///
+/// Safe to run against the shared sandbox: everything is prefixed, and if the
+/// refusal ever regresses the pushed refs are exactly what `Drop` cleans up.
+#[test]
+fn divergent_change_refuses_before_pushing_all_forges() {
+    let drivers = configured_drivers();
+    if drivers.is_empty() {
+        return;
+    }
+    if !forge_e2e_harness::tool_available("jj") {
+        return;
+    }
+
+    for driver in drivers {
+        let name = driver.name();
+        eprintln!("=== divergence refusal: {name} ===");
+        let ctx = ForgeE2eContext::new(driver);
+
+        // A normal bottom segment, then a change we deliberately diverge.
+        ctx.commit_bookmark("dvbot", "dvbot.txt", &format!("dv base {}", ctx.prefix));
+
+        // Concurrent rewrites of one change reconcile to a divergent change.
+        //
+        // The two copies must differ, but in DIFFERENT FILES. Identical diffs make
+        // the rebase below produce an empty commit that jj drops; the same file
+        // with different content makes it CONFLICT, and jjpr's conflict check runs
+        // before the divergence check, so the test would assert the wrong refusal.
+        // Adding a file on one side only gives a clean, non-empty rebase.
+        let top_file = ctx.prefixed("dvtop.txt");
+        let extra_file = ctx.prefixed("dvextra.txt");
+        std::fs::write(ctx.repo_path.join(&top_file), "one\n").expect("write");
+        ctx.run_jj(&["describe", "-m", &format!("dv leaf {}", ctx.prefix)]);
+        let good_op = ctx
+            .run_jj(&["op", "log", "--no-graph", "-T", "id.short() ++ \"\\n\""])
+            .lines()
+            .next()
+            .expect("an operation")
+            .trim()
+            .to_string();
+        // "ours" gains an extra file; "theirs" (at the older operation) only gains
+        // a new description, so its diff is a strict subset of ours.
+        std::fs::write(ctx.repo_path.join(&extra_file), "extra\n").expect("write");
+        ctx.run_jj(&["status"]);
+        ctx.run_jj(&["--at-operation", &good_op, "describe", "-m", &format!("dv leaf alt {}", ctx.prefix)]);
+        ctx.run_jj(&["status"]);
+
+        // Identify the copies by description: "ours" kept the original message and
+        // carries the extra file; "theirs" was re-described at the older operation.
+        let listing = ctx.run_jj(&[
+            "--ignore-working-copy", "log", "-r", "divergent()", "--no-graph",
+            "-T", "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
+        ]);
+        let pick = |marker: &str| -> String {
+            listing
+                .lines()
+                .find(|l| l.contains(marker))
+                .unwrap_or_else(|| panic!("{name}: no divergent copy matching {marker:?}:\n{listing}"))
+                .split_whitespace()
+                .next()
+                .expect("a commit id")
+                .to_string()
+        };
+        let theirs = pick("dv leaf alt");
+        let ours = listing
+            .lines()
+            .filter(|l| !l.contains("dv leaf alt"))
+            .find(|l| l.contains("dv leaf"))
+            .map(|l| l.split_whitespace().next().expect("a commit id").to_string())
+            .unwrap_or_else(|| panic!("{name}: no 'ours' copy:\n{listing}"));
+        assert_ne!(ours, theirs, "{name}: two distinct copies expected:\n{listing}");
+
+        // Stack OURS on THEIRS: ours' diff is a superset, so this is clean and
+        // non-empty, leaving both copies in the range submit would push.
+        ctx.run_jj(&["rebase", "-r", &ours, "-d", &theirs]);
+        // The rebase gave "ours" a new commit id, so find it as the divergent
+        // descendant of "theirs" — which did not move.
+        let upper = ctx
+            .run_jj(&["--ignore-working-copy", "log", "-r",
+                      &format!("divergent() & (descendants({t}) ~ {t})", t = theirs),
+                      "--no-graph", "-T", "commit_id.short() ++ \"\\n\""])
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .expect("the rebased copy")
+            .to_string();
+
+        let lower_bm = ctx.prefixed("dvlow");
+        let upper_bm = ctx.prefixed("dvup");
+        ctx.run_jj(&["bookmark", "create", &lower_bm, "-r", &theirs]);
+        ctx.run_jj(&["bookmark", "create", &upper_bm, "-r", &upper]);
+        ctx.run_jj(&["new", &upper_bm]);
+
+        // The real binary, no dry-run: refusing is the behaviour under test.
+        let out = ctx.run_jjpr(&["submit", &upper_bm]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+
+        assert!(!out.status.success(), "{name}: submit must fail\nstdout:{stdout}\nstderr:{stderr}");
+        assert!(stderr.contains("divergent"), "{name}: must say why: {stderr}");
+        assert!(stderr.contains("jj abandon"), "{name}: must give the remedy: {stderr}");
+        assert!(
+            stderr.contains(&theirs) && stderr.contains(&upper),
+            "{name}: must name BOTH commits ({theirs}, {upper}): {stderr}"
+        );
+
+        // The safety property: nothing reached the forge.
+        for bm in [&lower_bm, &upper_bm] {
+            assert!(
+                ctx.driver.find_request_by_head(bm).is_none(),
+                "{name}: no pull request may exist for {bm}"
+            );
+        }
+        let remotes = ctx.run_jj(&["bookmark", "list", "--all-remotes", "-T", "name ++ \"@\" ++ remote ++ \"\\n\""]);
+        for bm in [&lower_bm, &upper_bm] {
+            assert!(
+                !remotes.contains(&format!("{bm}@origin")),
+                "{name}: {bm} must not have been pushed:\n{remotes}"
+            );
+        }
+        eprintln!("=== {name}: divergence refusal OK ===");
+    }
+}

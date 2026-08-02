@@ -240,3 +240,102 @@ fn a_divergent_rebase_root_is_only_screenable_via_change_id() {
         "the change_id() form must resolve despite the divergence"
     );
 }
+
+/// End-to-end over REAL jj: a divergent change with both copies in one ancestry
+/// chain must yield two DISTINCT segments, and submit's detector must see it.
+///
+/// Every other test of this behaviour uses stubs, which means they only prove the
+/// logic is self-consistent. This proves the shape is reachable in real jj at all
+/// (it is — rebase one copy of a divergent change onto the other), that jjpr's
+/// bookmark/log templates carry it through, and that the graph keyed by commit id
+/// keeps the copies apart where change-id keying merged them.
+#[test]
+fn real_divergent_change_in_one_chain_stays_two_segments() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = common::JjTestRepo::new();
+    let one = |r: &str, t: &str| {
+        repo.run_jj(&["--ignore-working-copy", "log", "-r", r, "--no-graph", "-T", t])
+            .trim()
+            .to_string()
+    };
+
+    repo.write_file("base.txt", "base\n");
+    repo.run_jj(&["describe", "-m", "base"]);
+    repo.run_jj(&["bookmark", "create", "master", "-r", "@"]);
+    repo.run_jj(&["new", "-m", "layer"]);
+
+    // Two concurrent rewrites of the same change reconcile to a divergent change.
+    // The copies must differ in CONTENT: with identical diffs, rebasing one onto
+    // the other produces an empty commit and jj drops it, so the shape under test
+    // never forms. The resulting conflict is incidental — jjpr's graph does not
+    // care, and keeping it makes the fixture honest about what divergence is.
+    repo.write_file("one.txt", "one\n");
+    repo.run_jj(&["status"]);
+    let good_op = repo
+        .run_jj(&["op", "log", "--no-graph", "-T", "id.short() ++ \"\\n\""])
+        .lines()
+        .next()
+        .expect("an operation")
+        .trim()
+        .to_string();
+    repo.write_file("one.txt", "ours\n");
+    repo.run_jj(&["status"]);
+    repo.run_jj(&["--at-operation", &good_op, "describe", "-m", "layer (theirs)"]);
+    repo.run_jj(&["status"]);
+
+    let divergent = repo.run_jj(&[
+        "--ignore-working-copy", "log", "-r", "divergent()", "--no-graph",
+        "-T", "commit_id.short() ++ \"\\n\"",
+    ]);
+    let copies: Vec<&str> = divergent.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    assert_eq!(copies.len(), 2, "expected one divergent change on two commits: {copies:?}");
+
+    // Put one copy ON TOP of the other, so both sit in a single chain.
+    repo.run_jj(&["rebase", "-r", copies[0], "-d", copies[1]]);
+    // The rebase gave the moved copy a new commit id; find it as the divergent
+    // descendant of the one that stayed put.
+    let upper = one(
+        &format!("divergent() & (descendants({c}) ~ {c})", c = copies[1]),
+        "commit_id.short() ++ \"\\n\"",
+    );
+    let upper = upper
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .expect("the rebased copy must exist")
+        .to_string();
+
+    repo.run_jj(&["bookmark", "create", "lower", "-r", copies[1]]);
+    repo.run_jj(&["bookmark", "create", "upper", "-r", &upper]);
+    repo.run_jj(&["new", "upper"]);
+
+    let graph = jjpr::graph::change_graph::build_change_graph(&repo.runner()).unwrap();
+
+    let seg_of = |name: &str| {
+        graph.stacks.iter().flat_map(|s| s.segments.iter()).position(|seg| {
+            seg.bookmarks.iter().any(|b| b.name == name)
+        })
+    };
+    let (lo, up) = (seg_of("lower"), seg_of("upper"));
+    assert!(lo.is_some() && up.is_some(), "both bookmarks must be segments: {lo:?} {up:?}");
+    assert_ne!(lo, up, "the two copies are distinct commits and must be distinct segments");
+
+    // And submit's detector must fire on the real segments, not just on stubs.
+    let narrowed: Vec<jjpr::jj::types::NarrowedSegment> = graph
+        .stacks
+        .iter()
+        .flat_map(|s| s.segments.iter())
+        .filter_map(|seg| {
+            Some(jjpr::jj::types::NarrowedSegment {
+                bookmark: seg.bookmarks.first()?.clone(),
+                changes: seg.changes.clone(),
+                merge_source_names: seg.merge_source_names.clone(),
+            })
+        })
+        .collect();
+    let found = jjpr::submit::plan::divergent_changes_in_stack(&narrowed);
+    assert_eq!(found.len(), 1, "submit must see exactly one divergent change: {found:?}");
+    assert_eq!(found[0].commit_ids.len(), 2, "naming both commits: {:?}", found[0]);
+}

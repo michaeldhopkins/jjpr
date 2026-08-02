@@ -48,6 +48,27 @@ pub struct NativeStackBaseConflict {
     pub stack_number: u64,
 }
 
+/// A change id carried by more than one commit in the stack being submitted —
+/// a DIVERGENT change with both copies in range.
+///
+/// jjpr refuses rather than publishing both. The graph represents them correctly
+/// (they are distinct commits, so distinct segments), but "correctly" here means
+/// two PRs for what the user still regards as one change, and PR creation
+/// notifies reviewers and is awkward to retract. jj itself marks this state `??`
+/// and expects it resolved. `merge` already refuses on divergence; this makes
+/// submit and watch consistent.
+///
+/// Scoped to the stack on purpose: an unrelated divergent change elsewhere in the
+/// repo is not a reason to block this submission.
+#[derive(Debug, Clone)]
+pub struct DivergentChange {
+    pub change_id: String,
+    /// The distinct commits sharing it, in the order the stack walks them.
+    pub commit_ids: Vec<String>,
+    /// Bookmarks sitting on those commits, if any.
+    pub bookmarks: Vec<String>,
+}
+
 /// What needs to happen for a bookmark whose PR body's managed section is stale.
 #[derive(Debug)]
 pub struct BookmarkNeedingBodyUpdate {
@@ -112,6 +133,9 @@ pub struct SubmissionPlan {
     /// Base retargets GitHub will not accept because the PR is in a native
     /// stack. Not actions: execute refuses up front when this is non-empty.
     pub native_stack_base_conflicts: Vec<NativeStackBaseConflict>,
+    /// Divergent changes with both copies inside this stack. Not actions:
+    /// execute refuses up front when this is non-empty.
+    pub divergent_changes: Vec<DivergentChange>,
     pub bookmarks_needing_body_update: Vec<BookmarkNeedingBodyUpdate>,
     pub bookmarks_needing_ready: Vec<BookmarkNeedingReady>,
     /// Existing PRs that should receive reviewer requests. Already
@@ -414,6 +438,46 @@ pub struct SubmitOptions<'a> {
 }
 
 /// Build a submission plan by comparing local state with forge state.
+/// Change ids carried by more than one commit across `segments`.
+///
+/// Order-preserving so the message names commits in stack order rather than in
+/// whatever order a hash map iterates — a diagnostic the user has to act on
+/// should be stable between runs.
+pub fn divergent_changes_in_stack(segments: &[NarrowedSegment]) -> Vec<DivergentChange> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_change: HashMap<String, Vec<String>> = HashMap::new();
+
+    for segment in segments {
+        for change in &segment.changes {
+            let commits = by_change.entry(change.change_id.clone()).or_insert_with(|| {
+                order.push(change.change_id.clone());
+                Vec::new()
+            });
+            // A commit can appear once per segment it belongs to; only distinct
+            // commits count as divergence.
+            if !commits.contains(&change.commit_id) {
+                commits.push(change.commit_id.clone());
+            }
+        }
+    }
+
+    order
+        .into_iter()
+        .filter_map(|change_id| {
+            let commit_ids = by_change.remove(&change_id)?;
+            if commit_ids.len() < 2 {
+                return None;
+            }
+            let bookmarks = segments
+                .iter()
+                .filter(|seg| commit_ids.contains(&seg.bookmark.commit_id))
+                .map(|seg| seg.bookmark.name.clone())
+                .collect();
+            Some(DivergentChange { change_id, commit_ids, bookmarks })
+        })
+        .collect()
+}
+
 pub fn create_submission_plan(
     github: &dyn Forge,
     segments: &[NarrowedSegment],
@@ -642,6 +706,7 @@ pub fn create_submission_plan(
         bookmarks_needing_pr,
         bookmarks_needing_base_update,
         native_stack_base_conflicts,
+        divergent_changes: divergent_changes_in_stack(segments),
         bookmarks_needing_body_update,
         bookmarks_needing_ready,
         bookmarks_needing_reviewers,
@@ -752,6 +817,58 @@ mod tests {
             }],
             merge_source_names: vec![],
         }
+    }
+
+    /// The normal case: distinct changes, nothing to refuse. Guards against the
+    /// gate firing on every ordinary submit.
+    #[test]
+    fn a_normal_stack_has_no_divergent_changes() {
+        let segments = vec![
+            make_segment("auth", true),
+            make_segment("profile", true),
+            make_segment("settings", true),
+        ];
+        assert!(divergent_changes_in_stack(&segments).is_empty());
+    }
+
+    /// Two bookmarks on the SAME commit share a change id legitimately — one
+    /// commit, two names. That is not divergence and must not refuse.
+    #[test]
+    fn two_bookmarks_on_one_commit_are_not_divergent() {
+        let mut a = make_segment("auth", true);
+        let mut b = make_segment("alias", true);
+        // Same commit AND same change: one commit wearing two names.
+        b.bookmark.commit_id = a.bookmark.commit_id.clone();
+        b.bookmark.change_id = a.bookmark.change_id.clone();
+        b.changes = a.changes.clone();
+        a.merge_source_names.clear();
+        assert!(
+            divergent_changes_in_stack(&[a, b]).is_empty(),
+            "one commit with two bookmarks is not a divergent change"
+        );
+    }
+
+    /// The real thing: one change id on two DIFFERENT commits in the stack.
+    #[test]
+    fn one_change_on_two_commits_is_reported_with_both() {
+        let mut lower = make_segment("lower", true);
+        let upper = make_segment("upper", true);
+        // `lower` carries `upper`'s change id on its own distinct commit.
+        lower.bookmark.change_id = upper.bookmark.change_id.clone();
+        lower.changes[0].change_id = upper.changes[0].change_id.clone();
+
+        let found = divergent_changes_in_stack(&[upper.clone(), lower.clone()]);
+        assert_eq!(found.len(), 1, "exactly one divergent change: {found:?}");
+        let d = &found[0];
+        assert_eq!(d.change_id, upper.bookmark.change_id);
+        assert_eq!(
+            d.commit_ids,
+            vec![upper.bookmark.commit_id.clone(), lower.bookmark.commit_id.clone()],
+            "both commits named, in stack order"
+        );
+        let mut names = d.bookmarks.clone();
+        names.sort();
+        assert_eq!(names, vec!["lower".to_string(), "upper".to_string()]);
     }
 
     fn make_pr(name: &str, base: &str) -> PullRequest {
