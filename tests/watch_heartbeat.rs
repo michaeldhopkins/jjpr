@@ -8,9 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 
-fn jj_available() -> bool {
-    Command::new("jj").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-}
+mod common;
+use common::jj_available;
 
 #[test]
 fn second_watch_exits_when_one_is_already_running() {

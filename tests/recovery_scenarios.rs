@@ -19,14 +19,13 @@ use std::process::{Command, Output};
 use jjpr::jj::{Jj, JjRunner};
 use tempfile::TempDir;
 
+mod common;
+use common::jj_available;
+
 /// Pinned commit timestamps. Two distinct values so a test can choose whether
 /// two operations produce identical commits or merely equivalent ones.
 const FIXED_TS: &str = "2001-02-03T04:05:06+07:00";
 const LATER_TS: &str = "2001-02-03T04:09:09+07:00";
-
-fn jj_available() -> bool {
-    Command::new("jj").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-}
 
 struct Repo {
     dir: TempDir,

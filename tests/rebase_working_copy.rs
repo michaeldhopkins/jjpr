@@ -16,9 +16,8 @@ use std::process::{Command, Output};
 use jjpr::jj::{Jj, JjRunner};
 use tempfile::TempDir;
 
-fn jj_available() -> bool {
-    Command::new("jj").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-}
+mod common;
+use common::jj_available;
 
 struct Repo {
     dir: TempDir,

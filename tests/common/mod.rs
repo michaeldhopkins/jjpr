@@ -5,11 +5,41 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+/// Whether the real `jj` binary is on PATH.
+///
+/// Every caller uses this as `if !jj_available() { return; }`, and a test that
+/// returns early still reports as **passed** — so without the assertion below the
+/// suite is indistinguishable from one that ran. That is not hypothetical: jjpr's
+/// CI had no jj for as long as these tests existed. The only tell was runtime.
+/// Measured on the `jj_integration` binary: **9 passed in 6.37s** with jj, and
+/// **9 passed in 0.00s** without it. Identical pass counts, which is precisely
+/// why it went unnoticed.
+///
+/// Counted rather than estimated: **41** `#[test]` functions across **ten** files
+/// gate on this. **31** of them are gated on jj ALONE and are the ones that
+/// silently did nothing in CI. The other 10 (in `e2e.rs`, `tty_watch.rs`,
+/// `parity.rs`) also sit behind `JJPR_E2E`, which CI does not set, so they skip
+/// there regardless of jj and were never part of the hole.
 pub fn jj_available() -> bool {
-    Command::new("jj")
+    let ok = Command::new("jj")
         .arg("--version")
         .output()
-        .is_ok_and(|o| o.status.success())
+        .is_ok_and(|o| o.status.success());
+    // In CI a missing jj is a CONFIGURATION ERROR, not a legitimate local
+    // condition, so fail loudly rather than skip. An `eprintln!` here would be
+    // useless: cargo captures output for PASSING tests, so a warning about a
+    // silent skip is itself silently swallowed — invisible exactly when it
+    // matters. A panic is the only signal libtest cannot hide.
+    //
+    // This also makes the CI workflow self-enforcing: delete the jj install step
+    // and the suite fails instead of quietly reporting green on 31 no-ops.
+    assert!(
+        ok || std::env::var_os("CI").is_none(),
+        "jj is not on PATH, but CI is set. Every test that needs jj would SKIP \
+         and still report as passed — 31 of them, with the pass count unchanged, \
+         which is how this went unnoticed. Install jj in the workflow."
+    );
+    ok
 }
 
 /// A jj repo in a temp directory with a local bare-git "origin" remote.

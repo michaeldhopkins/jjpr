@@ -18,16 +18,11 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+mod common;
+use common::jj_available;
+
 fn e2e_enabled() -> bool {
     std::env::var("JJPR_E2E").is_ok()
-}
-
-fn jj_available() -> bool {
-    Command::new("jj")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 fn jjpr_bin() -> &'static str {

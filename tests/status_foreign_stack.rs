@@ -16,9 +16,8 @@ use jjpr::graph::change_graph::{build_change_graph, build_status_graph, ChangeGr
 use jjpr::jj::JjRunner;
 use tempfile::TempDir;
 
-fn jj_available() -> bool {
-    Command::new("jj").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
-}
+mod common;
+use common::jj_available;
 
 struct Repo {
     dir: TempDir,
