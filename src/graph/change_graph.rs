@@ -12,10 +12,15 @@ use super::traversal;
 pub struct ChangeGraph {
     pub bookmarks: HashMap<String, Bookmark>,
     pub bookmark_to_change_id: HashMap<String, String>,
-    /// child change_id -> parent change_id (single parent only, linear stacks)
+    /// child commit_id -> parent commit_id (single parent only, linear stacks).
+    ///
+    /// Keyed by COMMIT id, not change id: a change id is not unique — a divergent
+    /// change is one id on two commits — so keying by it merges two distinct
+    /// segments onto one entry. Commit id still yields a single segment when two
+    /// bookmarks share a commit, which is what change-id keying was really for.
     pub adjacency_list: HashMap<String, String>,
-    /// bookmarked change_id -> the changes in that segment
-    pub change_id_to_segment: HashMap<String, Vec<LogEntry>>,
+    /// bookmarked commit_id -> the changes in that segment
+    pub commit_id_to_segment: HashMap<String, Vec<LogEntry>>,
     pub stack_leafs: HashSet<String>,
     pub stack_roots: HashSet<String>,
     pub stacks: Vec<BranchStack>,
@@ -38,18 +43,18 @@ pub fn build_status_graph(jj: &dyn Jj, all_owned_stacks: bool) -> Result<ChangeG
 /// Whether adding `child -> parent` would close a cycle — i.e. `child` is already
 /// reachable by walking parents from `parent`.
 ///
-/// The graph keys segments by change id, and a change id is not unique: a
-/// DIVERGENT change is one id on two commits, and both copies can sit in a single
-/// ancestry chain (rebase one onto the other). Such a chain records the same id as
-/// two segments, and the links between them close a loop — `A -> B -> A` when one
-/// divergent change brackets another, and `A -> A` in the degenerate case where the
-/// repeats are adjacent.
+/// Defence in depth. The graph is now keyed by COMMIT id, and since commit ids are
+/// unique and ancestry is a DAG, a cycle should be unreachable by construction —
+/// this guard is what makes that a checked property rather than an assumption.
 ///
-/// Guarding only the adjacent case is not enough, which is how the first version of
-/// this fix was wrong: consecutive segments differ, so a self-edge check never fires
-/// on the bracketing shape. Checking reachability catches every length, including
-/// loops closed across two traversals, and it subsumes the self-edge case
-/// (`child == parent`).
+/// It is kept because the alternative was a hang, not a wrong answer:
+/// `adjacency_list` is walked child-to-parent by traversal toward trunk and by
+/// `build_stacks`, neither of which carries a visited-set. Cycles were reachable
+/// under the previous change-id keying, and the shapes are instructive — `A -> A`
+/// when a divergent change repeated in adjacent segments, and `A -> B -> A` when one
+/// divergent change bracketed another. A first attempt rejected only the self-edge
+/// and missed the bracketing case entirely, which is why this checks reachability at
+/// any length rather than equality.
 ///
 /// Out-degree is at most one — `adjacency_list` is a map — so the walk is a simple
 /// chain, bounded by the number of edges. The step cap is defence against an
@@ -73,11 +78,11 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
     let mut all_bookmarks: HashMap<String, Bookmark> = HashMap::new();
     let mut bookmark_to_change_id: HashMap<String, String> = HashMap::new();
     let mut adjacency_list: HashMap<String, String> = HashMap::new();
-    let mut change_id_to_segment: HashMap<String, Vec<LogEntry>> = HashMap::new();
+    let mut commit_id_to_segment: HashMap<String, Vec<LogEntry>> = HashMap::new();
     let mut fully_collected: HashSet<String> = HashSet::new();
-    // Maps root change_id → foreign branch name for stacks based on non-trunk branches
+    // Maps root commit_id → foreign branch name for stacks based on non-trunk branches
     let mut foreign_bases: HashMap<String, String> = HashMap::new();
-    // Maps segment change_id → merge source names for segments containing merge commits
+    // Maps segment commit_id → merge source names for segments containing merge commits
     let mut merge_source_map: HashMap<String, Vec<String>> = HashMap::new();
 
     for bookmark in &bookmarks {
@@ -96,29 +101,23 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
 
         // Record segments and adjacencies.
         // Segments are ordered leaf-to-root; adjacency maps child → parent.
-        let mut prev_change_id: Option<String> = None;
+        let mut prev_commit_id: Option<String> = None;
         for segment in &result.segments {
             if let Some(first_change) = segment.changes.first() {
-                // NOTE: a change id is the key for everything below, and it is not
-                // unique when a change is DIVERGENT. If both copies sit in one
-                // ancestry chain, two distinct segments collapse onto one key —
-                // `change_id_to_segment` overwrites, and the resulting stack reports
-                // bookmarks from different commits as one segment. `would_close_cycle`
-                // keeps that from becoming a hang, but it does not make the shape
-                // right, and only `merge` gates on divergence before getting here.
-                // See TODO.md, "Graph keys by change id".
-                let segment_change_id = segment
+                // The segment's identity is its bookmarked COMMIT. See the note on
+                // `adjacency_list` for why this must not be the change id.
+                let segment_commit_id = segment
                     .bookmarks
                     .first()
-                    .map(|b| b.change_id.clone())
-                    .unwrap_or_else(|| first_change.change_id.clone());
+                    .map(|b| b.commit_id.clone())
+                    .unwrap_or_else(|| first_change.commit_id.clone());
 
-                change_id_to_segment
-                    .insert(segment_change_id.clone(), segment.changes.clone());
+                commit_id_to_segment
+                    .insert(segment_commit_id.clone(), segment.changes.clone());
 
                 if !segment.merge_source_names.is_empty() {
                     merge_source_map.insert(
-                        segment_change_id.clone(),
+                        segment_commit_id.clone(),
                         segment.merge_source_names.clone(),
                     );
                 }
@@ -127,14 +126,14 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
                 // toward trunk and by `build_stacks`, neither of which carries a
                 // visited-set, so a cycle of ANY length is an infinite loop rather
                 // than a wrong answer. Found by the `graph_invariants` fuzz target.
-                if let Some(prev) = &prev_change_id
-                    && !would_close_cycle(&adjacency_list, prev, &segment_change_id)
+                if let Some(prev) = &prev_commit_id
+                    && !would_close_cycle(&adjacency_list, prev, &segment_commit_id)
                 {
-                    adjacency_list.insert(prev.clone(), segment_change_id.clone());
+                    adjacency_list.insert(prev.clone(), segment_commit_id.clone());
                 }
-                prev_change_id = Some(segment_change_id.clone());
+                prev_commit_id = Some(segment_commit_id.clone());
 
-                fully_collected.insert(segment_change_id);
+                fully_collected.insert(segment_commit_id);
             }
         }
 
@@ -143,19 +142,19 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
         // already recorded — two bookmarks on one change, a diamond re-reaching a
         // collected node, or a divergent id seen twice — which would close a loop
         // back into the chain just built.
-        if let (Some(last), Some(stopped)) = (&prev_change_id, &result.stopped_at)
+        if let (Some(last), Some(stopped)) = (&prev_commit_id, &result.stopped_at)
             && !would_close_cycle(&adjacency_list, last, stopped)
         {
             adjacency_list.insert(last.clone(), stopped.clone());
         }
 
         // Track foreign base for this path's root
-        if let (Some(root), Some(base)) = (&prev_change_id, &result.foreign_base) {
+        if let (Some(root), Some(base)) = (&prev_commit_id, &result.foreign_base) {
             foreign_bases.insert(root.clone(), base.clone());
         }
 
-        for change_id in result.seen_change_ids {
-            fully_collected.insert(change_id);
+        for commit_id in result.seen_commit_ids {
+            fully_collected.insert(commit_id);
         }
     }
 
@@ -172,10 +171,10 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
             bookmarks
                 .iter()
                 .filter(|b| {
-                    !adjacency_list.contains_key(&b.change_id)
-                        && !parents.contains(&b.change_id)
+                    !adjacency_list.contains_key(&b.commit_id)
+                        && !parents.contains(&b.commit_id)
                 })
-                .map(|b| b.change_id.clone()),
+                .map(|b| b.commit_id.clone()),
         )
         .collect();
 
@@ -189,7 +188,7 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
     let stacks = build_stacks(
         &stack_leafs,
         &adjacency_list,
-        &change_id_to_segment,
+        &commit_id_to_segment,
         &all_bookmarks,
         &foreign_bases,
         &merge_source_map,
@@ -199,7 +198,7 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
         bookmarks: all_bookmarks,
         bookmark_to_change_id,
         adjacency_list,
-        change_id_to_segment,
+        commit_id_to_segment,
         stack_leafs,
         stack_roots,
         stacks,
@@ -209,7 +208,7 @@ fn build_change_graph_from(jj: &dyn Jj, bookmarks: Vec<Bookmark>) -> Result<Chan
 fn build_stacks(
     leafs: &HashSet<String>,
     adjacency_list: &HashMap<String, String>,
-    change_id_to_segment: &HashMap<String, Vec<LogEntry>>,
+    commit_id_to_segment: &HashMap<String, Vec<LogEntry>>,
     bookmarks: &HashMap<String, Bookmark>,
     foreign_bases: &HashMap<String, String>,
     merge_source_map: &HashMap<String, Vec<String>>,
@@ -237,11 +236,11 @@ fn build_stacks(
 
         let segments: Vec<BookmarkSegment> = path
             .iter()
-            .filter_map(|change_id| {
-                let changes = change_id_to_segment.get(change_id)?.clone();
+            .filter_map(|commit_id| {
+                let changes = commit_id_to_segment.get(commit_id)?.clone();
                 let mut segment_bookmarks: Vec<Bookmark> = bookmarks
                     .values()
-                    .filter(|b| b.change_id == *change_id)
+                    .filter(|b| b.commit_id == *commit_id)
                     .cloned()
                     .collect();
                 segment_bookmarks.sort_by(|a, b| a.name.cmp(&b.name));
@@ -253,7 +252,7 @@ fn build_stacks(
                     bookmarks: segment_bookmarks,
                     changes,
                     merge_source_names: merge_source_map
-                        .get(change_id)
+                        .get(commit_id)
                         .cloned()
                         .unwrap_or_default(),
                 })
@@ -455,6 +454,24 @@ mod tests {
                 node = parent;
             }
         }
+
+        // The point of keying by commit id: the two copies of `change_a` are
+        // DISTINCT commits and must be distinct segments. Keying by change id put
+        // `bm_x` and `bm_a1` in one segment although they sit at opposite ends of
+        // the chain, and every consumer of `stacks` then saw a stack that does not
+        // exist.
+        let segment_of = |name: &str| {
+            graph.stacks.iter().flat_map(|st| st.segments.iter()).position(|seg| {
+                seg.bookmarks.iter().any(|b| b.name == name)
+            })
+        };
+        let (x, a1) = (segment_of("bm_x"), segment_of("bm_a1"));
+        assert!(x.is_some() && a1.is_some(), "both bookmarks must appear: {x:?} {a1:?}");
+        assert_ne!(
+            x, a1,
+            "bm_x (on cx2) and bm_a1 (on cy1) are different commits and must not \
+             share a segment"
+        );
     }
 
     #[test]
@@ -846,7 +863,7 @@ mod tests {
             bookmarks: HashMap::new(),
             bookmark_to_change_id: HashMap::new(),
             adjacency_list: HashMap::new(),
-            change_id_to_segment: HashMap::new(),
+            commit_id_to_segment: HashMap::new(),
             stack_leafs: HashSet::new(),
             stack_roots: HashSet::new(),
             stacks,

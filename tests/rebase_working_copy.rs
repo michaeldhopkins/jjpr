@@ -227,6 +227,9 @@ fn unbookmarked_work_above_stack_is_never_a_push_target() {
     r.jj(&["status"]);
     r.write("ongoing.txt", "work\nwip\n");
     let ongoing_change = r.out(&["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "change_id"]);
+    // The segment map is keyed by COMMIT id (a change id is not unique under
+    // divergence), so the "is it a segment" assertion below needs the commit.
+    let ongoing_commit = r.out(&["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"]);
 
     let graph = jjpr::graph::change_graph::build_change_graph(&r.runner()).unwrap();
 
@@ -249,7 +252,7 @@ fn unbookmarked_work_above_stack_is_never_a_push_target() {
         "ongoing work must not be a bookmarked change"
     );
     assert!(
-        !graph.change_id_to_segment.contains_key(&ongoing_change),
+        !graph.commit_id_to_segment.contains_key(&ongoing_commit),
         "ongoing work must not form a stack segment"
     );
 }
