@@ -208,6 +208,45 @@ mod tests {
         assert_eq!(info.repo, "repo");
     }
 
+    /// A half-empty path is not a repo. `owner.is_empty() || repo.is_empty()`
+    /// must reject when EITHER side is missing — every existing test supplied
+    /// both, so nothing pinned the `||`, and swapping it to `&&` (reject only
+    /// when both are empty) passed the whole suite. jjpr would then accept
+    /// `https://github.com/owner/` and build API paths like `/repos/owner//pulls`.
+    ///
+    /// Found by cargo-mutants; the fuzz target missed it because it asserts on a
+    /// fixed well-formed URL frame and never varies the path shape.
+    #[test]
+    fn a_path_missing_either_side_is_not_a_repo() {
+        for url in [
+            "https://github.com/owner/",     // empty repo
+            "https://github.com/owner/.git", // empty repo, .git stripped
+            "https://github.com//repo",      // empty owner
+            "https://github.com//",          // both empty
+        ] {
+            assert!(
+                parse_github_url(url).is_none(),
+                "must reject a half-empty path: {url}"
+            );
+        }
+        // GitLab's nested-group parser has the same guard, and the same gap.
+        //
+        // NOT asserted here: `https://gitlab.com//sub/repo` currently parses to
+        // owner `/sub` — an empty leading component leaves a leading slash, which
+        // no GitLab namespace has, and jjpr encodes it into a malformed project
+        // id. That is a separate finding from the missed mutant and is recorded
+        // in TODO.md rather than fixed by a test written mid-review.
+        for url in [
+            "https://gitlab.com/group/sub/",
+            "https://gitlab.com/group/",
+        ] {
+            assert!(
+                parse_gitlab_url(url).is_none(),
+                "must reject a half-empty gitlab path: {url}"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_github_https_no_git_suffix() {
         let info = parse_github_url("https://github.com/owner/repo").unwrap();

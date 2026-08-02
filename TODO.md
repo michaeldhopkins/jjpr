@@ -1,5 +1,24 @@
 # jjpr TODO
 
+## Open: `parse_gitlab_path` keeps a leading slash on an empty namespace component
+
+Found 2026-08-02 while evaluating cargo-mutants. `https://gitlab.com//sub/repo`
+parses to `owner = "/sub"`, `repo = "repo"`. The emptiness guard only checks
+whether `owner` is empty, and `"/sub"` is not — so an empty leading path
+component survives as a leading slash. No GitLab namespace has one, and jjpr
+URL-encodes `owner` into the project id, producing `%2Fsub%2Frepo` instead of
+`sub%2Frepo`.
+
+Garbage input, so low priority, and the failure is a confusing 404 rather than
+anything destructive. Worth deciding rather than leaving implicit: reject a path
+with an empty component, or normalise leading/duplicate slashes before parsing.
+The GitHub/Forgejo parser (`parse_owner_repo`) is unaffected — it splits on the
+FIRST slash, so an empty leading component yields an empty owner and is rejected.
+
+Not fixed inline because it surfaced from a test written mid-review; changing
+parser behaviour to match an invented expectation is how you get a "fix" nobody
+asked for.
+
 ## Fixed: the change graph keyed by change id (2026-08-01)
 
 `build_change_graph_from` and `traverse_and_discover_segments` keyed
