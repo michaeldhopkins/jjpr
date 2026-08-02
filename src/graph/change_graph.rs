@@ -546,6 +546,48 @@ mod tests {
         assert_eq!(stack.segments[1].bookmarks[0].name, "profile");
     }
 
+    /// The same two-segment stack, but with the LEAF bookmark traversed first.
+    ///
+    /// Bookmark order decides which code path links the segments, and the two are
+    /// not interchangeable. With the root first (`test_multi_bookmark_stack`) each
+    /// traversal finds one segment and the link comes from the *stopped-at* edge.
+    /// With the leaf first, one traversal discovers BOTH segments and the link
+    /// comes from the segment-to-segment edge instead — a different line, and the
+    /// one that was uncovered: inverting its cycle guard left all 33 graph tests
+    /// green. Real bookmark order is alphabetical, so both orders occur in the wild.
+    ///
+    /// Found by cargo-mutants (`delete ! in build_change_graph_from`).
+    #[test]
+    fn a_stack_links_its_segments_when_the_leaf_is_traversed_first() {
+        let top = make_log_entry("commit_b", "change_b", vec!["commit_a"], vec!["profile"]);
+        let bottom = make_log_entry("commit_a", "change_a", vec!["trunk"], vec!["auth"]);
+        let jj = StubJj {
+            // Leaf first — the opposite of test_multi_bookmark_stack.
+            bookmarks: vec![
+                make_bookmark("profile", "commit_b", "change_b"),
+                make_bookmark("auth", "commit_a", "change_a"),
+            ],
+            log_entries: HashMap::from([
+                ("commit_b".to_string(), vec![top, bottom.clone()]),
+                ("commit_a".to_string(), vec![bottom]),
+            ]),
+        };
+
+        let graph = build_change_graph(&jj).unwrap();
+
+        assert_eq!(
+            graph.stacks.len(),
+            1,
+            "the two segments belong to ONE stack; separate stacks mean the \
+             segment-to-segment link was never made: {:?}",
+            graph.stacks
+        );
+        let stack = &graph.stacks[0];
+        assert_eq!(stack.segments.len(), 2, "root then leaf: {:?}", stack.segments);
+        assert_eq!(stack.segments[0].bookmarks[0].name, "auth");
+        assert_eq!(stack.segments[1].bookmarks[0].name, "profile");
+    }
+
     #[test]
     fn test_merge_commit_included_in_stack() {
         // A merge bookmark should now be included in a stack, not excluded.
