@@ -141,14 +141,52 @@ jobs:
         id: mutants
         run: |
           set -euo pipefail
+
+          # Every exit path records WHY here, because `Summarise` runs on
+          # `if: always()` and has no other way to tell "tested nothing" from
+          # "tested everything and found nothing". Without it, an early exit
+          # produced a summary reading `missed: 0, caught: 0` — indistinguishable
+          # from a clean pass, which is the exact misreading this job exists to
+          # prevent.
+          echo "ran" > mutants-status.txt
+
           if [ ! -s mutants.diff ]; then
+            echo "empty" > mutants-status.txt
             echo "::notice::empty diff — nothing to mutate"
             exit 0
           fi
           selected=$(cargo mutants --list --in-diff mutants.diff | wc -l)
+          echo "$selected" > mutants-selected.txt
           echo "Selected $selected mutants in changed regions"
           if [ "$selected" -eq 0 ]; then
+            echo "none" > mutants-status.txt
             echo "::notice::no mutants overlap the changed regions (test- or doc-only change)"
+            exit 0
+          fi
+
+          # `--in-diff` assumes the diff is a FOCUSED change. A sweep breaks that
+          # assumption completely: the 0.38.0 reformat touched 45 files, and
+          # because rustfmt moved lines inside nearly every function, selection
+          # went from 12 mutants to 236 — a 20x jump from a commit that changed
+          # no behaviour at all. At the ~20s/mutant this job actually measures,
+          # that is ~75 minutes; it ran 138 of them and was cancelled by the
+          # 45-minute job timeout.
+          #
+          # Skipping loudly beats both alternatives. Raising the timeout makes a
+          # slow gate slower without bounding it, and sampling with `--shard`
+          # would report a partial run as a pass — a reviewer cannot tell 1/3 of
+          # the mutants from all of them by looking at a green tick.
+          #
+          # Exit 0 because a broad diff is not a test failure, but emit a WARNING
+          # rather than a notice: this is coverage the gate did not provide, and
+          # per AGENTS.md a bounded run must say what it dropped.
+          MAX_SELECTED=100
+          if [ "$selected" -gt "$MAX_SELECTED" ]; then
+            echo "skipped" > mutants-status.txt
+            # One line, no backslash continuations: a `\`-continued string keeps
+            # the next line's indentation, so the annotation renders with a run
+            # of spaces in the middle of the sentence.
+            echo "::warning::Mutants skipped: $selected selected, over the limit of $MAX_SELECTED. A diff this broad is a sweep rather than a changed-code gate and would exceed the job timeout. Nothing was mutation-tested for this push."
             exit 0
           fi
           # Exit codes worth knowing when this goes red (see the book):
@@ -162,10 +200,14 @@ jobs:
           # 2 and 3 are about jjpr; 5 and 6 are about this workflow.
           # No --timeout on purpose. cargo-mutants derives one from the measured
           # baseline (89s for jjpr's full suite locally) and therefore ADAPTS to a
-          # slower CI runner; a hardcoded value does not. It also bounds the job:
-          # at 300s a diff with nine hang-prone mutants would reach the 45-minute
-          # job timeout, and a CANCELLED job can skip the `if: always()` steps
-          # below — losing exactly the report that explains why it went red.
+          # slower CI runner; a hardcoded value does not.
+          #
+          # Correction, measured 2026-08-03: this comment used to claim a job
+          # timeout could skip the `if: always()` steps below and lose the report.
+          # It does not. The 0.38.0 run was cancelled at exactly 45 minutes and
+          # both Summarise and Archive still ran and succeeded, so a timed-out run
+          # does report its partial results. The reason to avoid hitting the
+          # timeout is the wasted 45 minutes, not a lost report.
           cargo mutants --no-shuffle -vV --in-diff mutants.diff
 
       # Put the finding in the run summary so a reviewer sees it without
@@ -174,29 +216,78 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          status="$(cat mutants-status.txt 2>/dev/null || echo unknown)"
+          selected="$(cat mutants-selected.txt 2>/dev/null || echo '?')"
           {
             echo '## Mutants in changed code'
             echo
             echo "_step outcome: ${{ steps.mutants.outcome }}_"
             echo
-            for kind in missed caught unviable timeout; do
-              f="mutants.out/$kind.txt"
-              n=0
-              [ -f "$f" ] && n=$(wc -l < "$f" | tr -d ' ')
-              echo "- **$kind**: $n"
-            done
-            if [ -s mutants.out/missed.txt ]; then
-              echo
-              echo '### Missed — a bug was inserted here and no test noticed'
-              echo
-              echo '```'
-              cat mutants.out/missed.txt
-              echo '```'
-              echo
-              echo 'Three legitimate responses: write a test that fails on it;'
-              echo 'judge it an *equivalent* mutant that cannot change behaviour;'
-              echo 'or exclude the code with a comment saying why.'
-            fi
+            # Branch on WHY the step ended. Printing the counts unconditionally
+            # renders `missed: 0, caught: 0` for a run that tested nothing, which
+            # is indistinguishable from a clean pass — the misreading this whole
+            # job exists to prevent, reproduced in its own report.
+            case "$status" in
+              empty)
+                echo 'No diff to analyse. Nothing was mutation-tested.'
+                ;;
+              none)
+                echo 'No mutants overlap the changed regions — a test-only or'
+                echo 'docs-only change. Nothing was mutation-tested, and that is'
+                echo 'expected: cargo-mutants does not mutate test code.'
+                ;;
+              skipped)
+                echo "**Skipped: $selected mutants selected, over the limit.**"
+                echo
+                echo 'This is what a reformat or mass refactor looks like — the diff'
+                echo 'touches many functions without changing behaviour, so `--in-diff`'
+                echo 'selects a large share of the tree and cannot finish in the job'
+                echo 'budget. **Nothing was mutation-tested for this push.**'
+                echo
+                echo 'To cover it deliberately, shard a manual run:'
+                echo '`cargo mutants --in-diff <diff> --shard 0/4`'
+                ;;
+              unknown)
+                # No status file: the Mutants step never reached its first line,
+                # so an earlier step (Compute diff, the jj install) failed. Say so
+                # instead of falling through to the counts, which would be zeros
+                # and would read as a clean pass for a job that never started.
+                echo 'The mutants step did not run — an earlier step failed.'
+                echo 'Check "Compute diff": a malformed or empty diff, or a base'
+                echo 'ref that does not resolve, stops the job before any mutant'
+                echo 'is generated. **Nothing was mutation-tested.**'
+                ;;
+              *)
+                if [ ! -d mutants.out ]; then
+                  # `ran` was recorded but no results exist, so cargo-mutants died
+                  # partway (exit 5/6 are harness bugs, not findings). Zeros here
+                  # would be a lie in the most dangerous direction.
+                  echo 'cargo-mutants started but produced no results directory —'
+                  echo 'it failed before reporting. See the step log; exit 5 and 6'
+                  echo 'are harness bugs in this workflow, not findings about jjpr.'
+                  echo '**Treat this as no coverage, not as a pass.**'
+                  exit 0
+                fi
+                for kind in missed caught unviable timeout; do
+                  f="mutants.out/$kind.txt"
+                  n=0
+                  [ -f "$f" ] && n=$(wc -l < "$f" | tr -d ' ')
+                  echo "- **$kind**: $n"
+                done
+                if [ -s mutants.out/missed.txt ]; then
+                  echo
+                  echo '### Missed — a bug was inserted here and no test noticed'
+                  echo
+                  echo '```'
+                  cat mutants.out/missed.txt
+                  echo '```'
+                  echo
+                  echo 'Three legitimate responses: write a test that fails on it;'
+                  echo 'judge it an *equivalent* mutant that cannot change behaviour;'
+                  echo 'or exclude the code with a comment saying why.'
+                fi
+                ;;
+            esac
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Archive mutants.out
