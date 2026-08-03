@@ -2,7 +2,7 @@
     clippy::unwrap_used,
     clippy::redundant_clone,
     clippy::too_many_lines,
-    clippy::excessive_nesting,
+    clippy::excessive_nesting
 )]
 
 use std::env;
@@ -17,16 +17,19 @@ use std::collections::{HashMap, HashSet};
 use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
 use jjpr::config;
 use jjpr::forge::remote;
-use jjpr::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
-use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgejoForge, ForgeKind, GitHubForge, GitLabForge, PaginationStyle};
-use jjpr::forge::token as forge_token;
 use jjpr::forge::status as forge_status;
-use jjpr::parallel;
+use jjpr::forge::token as forge_token;
+use jjpr::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
+use jjpr::forge::{
+    AuthScheme, Forge, ForgeClient, ForgeKind, ForgejoForge, GitHubForge, GitLabForge,
+    PaginationStyle,
+};
 use jjpr::graph::change_graph;
 use jjpr::identity::Identity;
 use jjpr::jj::types::{Bookmark, BookmarkSegment, BranchStack};
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
+use jjpr::parallel;
 use jjpr::submit::{analyze, execute, plan, resolve};
 
 fn main() -> Result<()> {
@@ -134,36 +137,34 @@ fn main() -> Result<()> {
                 ready,
             })
         }
-        Some(Commands::Auth { command }) => {
-            match command {
-                AuthCommands::Test => {
-                    let Some(detected) = detect_forge_for_cwd() else {
-                        anyhow::bail!(
-                            "could not detect forge. Run from a jj repo with a supported remote, \
+        Some(Commands::Auth { command }) => match command {
+            AuthCommands::Test => {
+                let Some(detected) = detect_forge_for_cwd() else {
+                    anyhow::bail!(
+                        "could not detect forge. Run from a jj repo with a supported remote, \
                              or set forge = \"...\" in .jj/jjpr.toml"
-                        );
-                    };
-                    print_forge_detection(&detected);
-                    let forge = build_forge(
-                        detected.kind,
-                        detected.host.as_deref(),
-                        detected.token,
-                        detected.token_env_var.as_deref(),
-                    )?;
-                    jjpr::auth::test_auth(forge.as_ref())
-                }
-                AuthCommands::Setup => {
-                    match detect_forge_for_cwd() {
-                        Some(detected) => {
-                            print_forge_detection(&detected);
-                            jjpr::auth::print_auth_help(detected.kind);
-                        }
-                        None => jjpr::auth::print_auth_help_all(),
-                    }
-                    Ok(())
-                }
+                    );
+                };
+                print_forge_detection(&detected);
+                let forge = build_forge(
+                    detected.kind,
+                    detected.host.as_deref(),
+                    detected.token,
+                    detected.token_env_var.as_deref(),
+                )?;
+                jjpr::auth::test_auth(forge.as_ref())
             }
-        }
+            AuthCommands::Setup => {
+                match detect_forge_for_cwd() {
+                    Some(detected) => {
+                        print_forge_detection(&detected);
+                        jjpr::auth::print_auth_help(detected.kind);
+                    }
+                    None => jjpr::auth::print_auth_help_all(),
+                }
+                Ok(())
+            }
+        },
         Some(Commands::Config { command }) => match command {
             ConfigCommands::Init { repo } => {
                 if repo {
@@ -250,7 +251,9 @@ fn resolve_stack(
             }
             match inferred {
                 Some(inferred) => {
-                    println!("{command_verb} stack for '{inferred}' (inferred from working copy)\n");
+                    println!(
+                        "{command_verb} stack for '{inferred}' (inferred from working copy)\n"
+                    );
                     inferred
                 }
                 // A bookmark is present but authored under an email jjpr doesn't
@@ -258,19 +261,28 @@ fn resolve_stack(
                 None if unowned_bookmark => {
                     println!("A bookmark in the working copy isn't recognized as yours —");
                     println!("likely authored under a different email. Add it with");
-                    println!("`[identity] emails = [\"...\"]` in the jjpr config, or name it explicitly.");
+                    println!(
+                        "`[identity] emails = [\"...\"]` in the jjpr config, or name it explicitly."
+                    );
                     return Ok(None);
                 }
                 None => {
                     println!("No bookmark found in the working copy's ancestry.");
-                    println!("Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr <command> <bookmark>`");
+                    println!(
+                        "Set a bookmark with `jj bookmark set <name>` or specify one: `jjpr <command> <bookmark>`"
+                    );
                     return Ok(None);
                 }
             }
         }
     };
 
-    let ResolvedForge { forge, kind: forge_kind, remote_name, repo_info } = forge_result?;
+    let ResolvedForge {
+        forge,
+        kind: forge_kind,
+        remote_name,
+        repo_info,
+    } = forge_result?;
 
     let default_branch = jj.get_default_branch()?;
     let mut graph = change_graph::build_change_graph(&jj)?;
@@ -328,7 +340,9 @@ fn augment_identity_from_forge(
 /// Gates the Tier 2 forge call: only reach for `/user/emails` when there's work
 /// we might be failing to recognize as yours.
 fn working_copy_has_bookmark(jj: &dyn Jj) -> bool {
-    change_graph::build_status_graph(jj, false).map(|g| !g.stacks.is_empty()).unwrap_or(false)
+    change_graph::build_status_graph(jj, false)
+        .map(|g| !g.stacks.is_empty())
+        .unwrap_or(false)
 }
 
 struct SubmitOptions<'a> {
@@ -343,14 +357,30 @@ struct SubmitOptions<'a> {
 }
 
 fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
-    let Some(stack) = resolve_stack(opts.bookmark, opts.preferred_remote, opts.no_fetch, "Submitting", true)? else {
+    let Some(stack) = resolve_stack(
+        opts.bookmark,
+        opts.preferred_remote,
+        opts.no_fetch,
+        "Submitting",
+        true,
+    )?
+    else {
         return Ok(());
     };
 
     // Pre-flight: check for conflicted commits before attempting any pushes
-    let conflicted: Vec<_> = stack.segments.iter()
-        .flat_map(|seg| seg.changes.iter().filter(|c| c.conflict)
-            .map(|c| (seg.bookmark.name.as_str(), c.change_id.as_str(), c.description_first_line.as_str())))
+    let conflicted: Vec<_> = stack
+        .segments
+        .iter()
+        .flat_map(|seg| {
+            seg.changes.iter().filter(|c| c.conflict).map(|c| {
+                (
+                    seg.bookmark.name.as_str(),
+                    c.change_id.as_str(),
+                    c.description_first_line.as_str(),
+                )
+            })
+        })
         .collect();
     if !conflicted.is_empty() {
         eprintln!("Error: cannot push; some commits have unresolved conflicts:\n");
@@ -443,16 +473,19 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
     // on it) vs. someone else's (display-only). Discovery above is agnostic.
     // Propagate a failure rather than fall back to an empty set — an empty set
     // would mislabel your own stack as entirely someone else's.
-    let my_names: HashSet<String> =
-        jj.get_my_bookmarks()?.into_iter().map(|b| b.name).collect();
+    let my_names: HashSet<String> = jj.get_my_bookmarks()?.into_iter().map(|b| b.name).collect();
     let segment_is_mine =
         |seg: &BookmarkSegment| seg.bookmarks.iter().any(|b| my_names.contains(&b.name));
 
-    let stacks_to_show = match analyze::select_stacks_to_show(&graph, bookmark, all, &jj, &my_names)? {
+    let stacks_to_show = match analyze::select_stacks_to_show(
+        &graph, bookmark, all, &jj, &my_names,
+    )? {
         analyze::StackScope::Show(stacks) => stacks,
         analyze::StackScope::NoTarget => {
             println!("No bookmark in working copy ancestry.");
-            println!("Use `jjpr status --all` to see your stacks, or `jj bookmark set <name>` to mark one.");
+            println!(
+                "Use `jjpr status --all` to see your stacks, or `jj bookmark set <name>` to mark one."
+            );
             return Ok(());
         }
         analyze::StackScope::Unknown(name) => {
@@ -494,7 +527,10 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
                     // A diamond puts the shared segments in more than one stack;
                     // without this the same PR is queried once per stack it
                     // appears in.
-                    if !status_targets.iter().any(|(name, _)| name == &bookmark.name) {
+                    if !status_targets
+                        .iter()
+                        .any(|(name, _)| name == &bookmark.name)
+                    {
                         status_targets.push((bookmark.name.clone(), pr.clone()));
                     }
                 } else if !segment_is_mine(segment) && !merged_lookups.contains(&bookmark.name) {
@@ -515,11 +551,10 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
 
         status_map = fetch_all_segment_status(forge.as_ref(), repo_info, &status_targets);
 
-        let merged = parallel::map_bounded(
-            &merged_lookups,
-            parallel::MAX_CONCURRENT_REQUESTS,
-            |name| forge.find_merged_pr(&repo_info.owner, &repo_info.repo, name),
-        );
+        let merged =
+            parallel::map_bounded(&merged_lookups, parallel::MAX_CONCURRENT_REQUESTS, |name| {
+                forge.find_merged_pr(&repo_info.owner, &repo_info.repo, name)
+            });
         for (name, result) in merged_lookups.iter().zip(merged) {
             if let Ok(Some(pr)) = result {
                 merged_map.insert(name.clone(), pr);
@@ -538,9 +573,7 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
                     info.pr_map.contains_key(&b.name) || merged_map.contains_key(&b.name)
                 })
         });
-        if could_reclassify
-            && let Ok(login) = forge.get_authenticated_user()
-        {
+        if could_reclassify && let Ok(login) = forge.get_authenticated_user() {
             identity.add_login(&login);
         }
     }
@@ -558,7 +591,9 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
                 continue;
             };
             if let Some(lower_pr) = info.pr_map.get(&lower.name) {
-                below_pr.entry(upper.name.clone()).or_insert(lower_pr.number);
+                below_pr
+                    .entry(upper.name.clone())
+                    .or_insert(lower_pr.number);
             }
         }
     }
@@ -650,7 +685,12 @@ struct PrInfoResult {
 /// the op-log lock. Take the remotes before calling.
 fn load_pr_info(remotes: &[jjpr::jj::GitRemote], cfg: &config::Config) -> Option<PrInfoResult> {
     let resolved = resolve_forge(remotes, cfg, None).ok()?;
-    let ResolvedForge { forge, repo_info, kind, .. } = resolved;
+    let ResolvedForge {
+        forge,
+        repo_info,
+        kind,
+        ..
+    } = resolved;
 
     let all_prs = match forge.list_open_prs(&repo_info.owner, &repo_info.repo) {
         Ok(prs) => prs,
@@ -736,7 +776,11 @@ fn format_status_line(status: &SegmentDisplayStatus) -> String {
         }
         parts.push(format!(
             "{} {} approval{}",
-            if r.approved_count > 0 { "\u{2713}" } else { "\u{2717}" },
+            if r.approved_count > 0 {
+                "\u{2713}"
+            } else {
+                "\u{2717}"
+            },
             r.approved_count,
             if r.approved_count == 1 { "" } else { "s" },
         ));
@@ -832,7 +876,10 @@ impl StatusRender<'_> {
     }
 
     fn segment_is_mine(&self, segment: &BookmarkSegment) -> bool {
-        segment.bookmarks.iter().any(|b| self.my_names.contains(&b.name))
+        segment
+            .bookmarks
+            .iter()
+            .any(|b| self.my_names.contains(&b.name))
     }
 
     /// "Yours" for display = mine by email, OR (login supplement) the segment's
@@ -844,10 +891,13 @@ impl StatusRender<'_> {
         let Some(identity) = self.identity else {
             return false;
         };
-        segment.bookmarks.first().is_some_and(|b| match self.resolve_pr(&b.name) {
-            SegmentPr::Open(p) | SegmentPr::Merged(p) => identity.owns_login(&p.author),
-            SegmentPr::None => false,
-        })
+        segment
+            .bookmarks
+            .first()
+            .is_some_and(|b| match self.resolve_pr(&b.name) {
+                SegmentPr::Open(p) | SegmentPr::Merged(p) => identity.owns_login(&p.author),
+                SegmentPr::None => false,
+            })
     }
 
     fn stack_is_all_foreign(&self, stack: &BranchStack) -> bool {
@@ -870,7 +920,12 @@ impl StatusRender<'_> {
     }
 
     fn render_segment(&self, segment: &BookmarkSegment) -> Vec<String> {
-        let name = segment.bookmarks.iter().map(|b| b.name.as_str()).collect::<Vec<_>>().join(", ");
+        let name = segment
+            .bookmarks
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let count = segment.changes.len();
         let plural = if count == 1 { "" } else { "s" };
         let merge_label = if segment.merge_source_names.is_empty() {
@@ -897,8 +952,9 @@ impl StatusRender<'_> {
             .any(|c| self.divergent_change_ids.contains(&c.change_id));
         let divergent_label = if divergent { "  ?? divergent" } else { "" };
 
-        let mut lines =
-            vec![format!("  {name} ({count} change{plural}{merge_label}{pr_label}{slot}){divergent_label}")];
+        let mut lines = vec![format!(
+            "  {name} ({count} change{plural}{merge_label}{pr_label}{slot}){divergent_label}"
+        )];
         lines.extend(self.render_detail(segment, &pr, mine));
         lines
     }
@@ -913,7 +969,11 @@ impl StatusRender<'_> {
             return None;
         }
         let below = self.below_pr.get(name)?;
-        let n = self.status_map.get(name).and_then(|s| s.reviews.as_ref())?.approved_count;
+        let n = self
+            .status_map
+            .get(name)
+            .and_then(|s| s.reviews.as_ref())?
+            .approved_count;
         if n == 0 {
             return None;
         }
@@ -961,7 +1021,11 @@ impl StatusRender<'_> {
         let lands = match stack.position {
             0 => format!("use `gh stack merge {}`", pr.number),
             1 => format!("`gh stack merge {}` lands it", pr.number),
-            n => format!("`gh stack merge {}` lands it and the {} below", pr.number, n - 1),
+            n => format!(
+                "`gh stack merge {}` lands it and the {} below",
+                pr.number,
+                n - 1
+            ),
         };
         Some(format!(
             "    \u{26a0} in {which}{position}, so jjpr cannot merge it; {lands}"
@@ -979,16 +1043,24 @@ impl StatusRender<'_> {
                     if p.draft {
                         String::new()
                     } else {
-                        self.status_map.get(&bookmark.name).map(format_status_line).unwrap_or_default()
+                        self.status_map
+                            .get(&bookmark.name)
+                            .map(format_status_line)
+                            .unwrap_or_default()
                     }
                 } else {
-                    self.status_map.get(&bookmark.name).map(format_mergeability_line).unwrap_or_default()
+                    self.status_map
+                        .get(&bookmark.name)
+                        .map(format_mergeability_line)
+                        .unwrap_or_default()
                 };
                 if !detail.is_empty() {
                     lines.push(detail);
                 }
                 // Drafts hide review detail, so they hide the review-loss note too.
-                if !p.draft && let Some(note) = self.dismiss_stale_note(&bookmark.name, mine) {
+                if !p.draft
+                    && let Some(note) = self.dismiss_stale_note(&bookmark.name, mine)
+                {
                     lines.push(note);
                 }
                 // Shown for drafts too: it is not review detail, and a draft in a
@@ -1007,7 +1079,10 @@ impl StatusRender<'_> {
                     lines.push(format!(
                         "    \u{2713} merged{when}; remote branch deleted, local bookmark is stale"
                     ));
-                    lines.push(format!("       clean up: jj bookmark forget {}", bookmark.name));
+                    lines.push(format!(
+                        "       clean up: jj bookmark forget {}",
+                        bookmark.name
+                    ));
                 }
                 lines
             }
@@ -1027,11 +1102,17 @@ impl StatusRender<'_> {
     fn render_base(&self, base: &str) -> Vec<String> {
         match self.resolve_pr(base) {
             SegmentPr::Open(p) => vec![
-                format!("  (based on {base} \u{2014} PR open{})", author_suffix(p, false)),
+                format!(
+                    "  (based on {base} \u{2014} PR open{})",
+                    author_suffix(p, false)
+                ),
                 format!("    {}", p.html_url),
             ],
             SegmentPr::Merged(p) => vec![
-                format!("  (based on {base} \u{2014} PR merged{})", author_suffix(p, false)),
+                format!(
+                    "  (based on {base} \u{2014} PR merged{})",
+                    author_suffix(p, false)
+                ),
                 format!("    {}", p.html_url),
             ],
             SegmentPr::None => vec![format!("  (based on {base})")],
@@ -1049,7 +1130,10 @@ impl StatusRender<'_> {
         } else {
             "someone else's branch"
         };
-        let mut lines = vec![format!("On {leaf_name} \u{2014} {qualifier}:"), String::new()];
+        let mut lines = vec![
+            format!("On {leaf_name} \u{2014} {qualifier}:"),
+            String::new(),
+        ];
         for segment in &stack.segments {
             lines.extend(self.render_segment(segment));
         }
@@ -1109,19 +1193,33 @@ struct MergeArgs<'a> {
 }
 
 fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
-    let Some(stack) = resolve_stack(args.bookmark, args.preferred_remote, no_fetch, "Merging", true)? else {
+    let Some(stack) = resolve_stack(
+        args.bookmark,
+        args.preferred_remote,
+        no_fetch,
+        "Merging",
+        true,
+    )?
+    else {
         return Ok(());
     };
 
     let merge_options = merge::plan::MergeOptions {
         merge_method: args.merge_method.unwrap_or(stack.config.merge_method),
-        required_approvals: args.required_approvals.unwrap_or(stack.config.required_approvals),
-        require_ci_pass: args.ci_pass_override.unwrap_or(stack.config.require_ci_pass),
-        reconcile_strategy: args.reconcile_strategy.unwrap_or(stack.config.reconcile_strategy),
+        required_approvals: args
+            .required_approvals
+            .unwrap_or(stack.config.required_approvals),
+        require_ci_pass: args
+            .ci_pass_override
+            .unwrap_or(stack.config.require_ci_pass),
+        reconcile_strategy: args
+            .reconcile_strategy
+            .unwrap_or(stack.config.reconcile_strategy),
         ready: args.ready,
     };
 
-    let stack_base_str = args.base_override
+    let stack_base_str = args
+        .base_override
         .map(|s| s.to_string())
         .or(stack.stack_base.clone());
     let stack_base = stack_base_str.as_deref();
@@ -1164,7 +1262,11 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
     }
 
     let result = merge::execute::execute_merge_plan(
-        &stack.jj, stack.forge.as_ref(), &merge_plan, &stack.segments, dry_run,
+        &stack.jj,
+        stack.forge.as_ref(),
+        &merge_plan,
+        &stack.segments,
+        dry_run,
     )?;
 
     print_merge_summary(&result);
@@ -1210,7 +1312,8 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
     ctrlc::set_handler(move || {
         eprint!("\nInterrupting after current operation completes...");
         flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    }).expect("failed to set Ctrl+C handler");
+    })
+    .expect("failed to set Ctrl+C handler");
 
     // Single-watcher guard: two `jjpr watch` on one repo can't corrupt anything,
     // but they double the forge API load every poll (burning the user's rate
@@ -1237,14 +1340,25 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         // matching resolve_stack, which seeds the jj used for the watch loop.
         let cfg = config::load_config_with_repo(Some(&repo_path))?;
         let local_email = jj.get_user_email().unwrap_or_default();
-        jj.set_identity(&Identity::seed(&local_email, &cfg.identity.emails, &cfg.identity.logins));
+        jj.set_identity(&Identity::seed(
+            &local_email,
+            &cfg.identity.emails,
+            &cfg.identity.logins,
+        ));
         let graph = change_graph::build_change_graph(&jj)?;
         match analyze::infer_target_bookmark(&graph, &jj)? {
             Some(name) => Some(name),
             None => {
                 let timeout_dur = timeout.map(|m| std::time::Duration::from_secs(m * 60));
                 let poll = std::time::Duration::from_secs(5);
-                match jjpr::watch::wait_for_bookmark(&jj, timeout_dur, poll, &shutdown, is_tty, Some(&heartbeat))? {
+                match jjpr::watch::wait_for_bookmark(
+                    &jj,
+                    timeout_dur,
+                    poll,
+                    &shutdown,
+                    is_tty,
+                    Some(&heartbeat),
+                )? {
                     Some(name) => {
                         println!("Found bookmark '{name}'\n");
                         Some(name)
@@ -1262,7 +1376,14 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         }
     };
 
-    let Some(stack) = resolve_stack(resolved_bookmark.as_deref(), preferred_remote, no_fetch, "Watching", false)? else {
+    let Some(stack) = resolve_stack(
+        resolved_bookmark.as_deref(),
+        preferred_remote,
+        no_fetch,
+        "Watching",
+        false,
+    )?
+    else {
         return Ok(());
     };
 
@@ -1322,7 +1443,10 @@ fn print_watch_summary(result: &jjpr::watch::WatchResult) {
     }
     if !result.prs_promoted.is_empty() {
         let n = result.prs_promoted.len();
-        println!("  Promoted {n} PR{} to ready.", if n == 1 { "" } else { "s" });
+        println!(
+            "  Promoted {n} PR{} to ready.",
+            if n == 1 { "" } else { "s" }
+        );
     }
 
     if mr.merged.is_empty() && mr.skipped_merged.is_empty() && mr.blocked_at.is_none() {
@@ -1369,7 +1493,10 @@ fn watch_poll_interval() -> std::time::Duration {
 /// `from_watch` selects the two genuine differences: watch names itself in the
 /// fallback, and has no "run watch to wait" branch because it *is* the wait.
 fn blocked_follow_up(reasons: &[merge::plan::BlockReason], from_watch: bool) -> String {
-    if reasons.iter().any(|r| matches!(r, merge::plan::BlockReason::NoPr)) {
+    if reasons
+        .iter()
+        .any(|r| matches!(r, merge::plan::BlockReason::NoPr))
+    {
         return "\nRun `jjpr submit` to create PRs, then re-run `jjpr watch`.".to_string();
     }
     if let Some(advice) = native_stack_advice(reasons) {
@@ -1427,19 +1554,31 @@ fn print_local_warnings(
         return Ok(());
     }
 
-    let merged_names: std::collections::HashSet<&str> = result.merged.iter()
+    let merged_names: std::collections::HashSet<&str> = result
+        .merged
+        .iter()
         .map(|m| m.bookmark_name.as_str())
-        .chain(result.skipped_merged.iter().map(|s| s.bookmark_name.as_str()))
+        .chain(
+            result
+                .skipped_merged
+                .iter()
+                .map(|s| s.bookmark_name.as_str()),
+        )
         .collect();
-    let unmerged: Vec<_> = segments.iter()
+    let unmerged: Vec<_> = segments
+        .iter()
         .filter(|s| !merged_names.contains(s.bookmark.name.as_str()))
         .collect();
 
-    let local_msgs: Vec<&str> = result.local_warnings.iter()
+    let local_msgs: Vec<&str> = result
+        .local_warnings
+        .iter()
         .filter(|w| w.kind == DivergenceKind::Local)
         .map(|w| w.message.as_str())
         .collect();
-    let forge_msgs: Vec<&str> = result.local_warnings.iter()
+    let forge_msgs: Vec<&str> = result
+        .local_warnings
+        .iter()
         .filter(|w| w.kind == DivergenceKind::Forge)
         .map(|w| w.message.as_str())
         .collect();
@@ -1454,7 +1593,10 @@ fn print_local_warnings(
         println!("To accept the forge state (discard local divergence):");
         println!("  jj git fetch");
         for seg in &unmerged {
-            println!("  jj bookmark set {} -r {}@origin", seg.bookmark.name, seg.bookmark.name);
+            println!(
+                "  jj bookmark set {} -r {}@origin",
+                seg.bookmark.name, seg.bookmark.name
+            );
         }
         if let Some(first_unmerged) = unmerged.first() {
             println!();
@@ -1481,7 +1623,6 @@ fn print_local_warnings(
         println!("Retry with `jjpr merge` (or wait for `jjpr watch` to retry).");
         println!("Persistent failures may indicate a network or forge-permission issue.");
     }
-
 
     Ok(())
 }
@@ -1521,7 +1662,12 @@ fn resolve_forge(
     preferred_remote: Option<&str>,
 ) -> Result<ResolvedForge> {
     if let Some(kind) = cfg.forge {
-        resolve_forge_from_config(remotes, kind, cfg.forge_token_env.as_deref(), preferred_remote)
+        resolve_forge_from_config(
+            remotes,
+            kind,
+            cfg.forge_token_env.as_deref(),
+            preferred_remote,
+        )
     } else {
         resolve_forge_auto(remotes, preferred_remote)
     }
@@ -1538,11 +1684,13 @@ fn resolve_forge_from_config(
 
     let remote = pick_remote(remotes, preferred_remote)?;
     let host = remote::extract_host(&remote.url);
-    let repo_info = remote::parse_url_as(&remote.url, kind)
-        .ok_or_else(|| anyhow::anyhow!(
+    let repo_info = remote::parse_url_as(&remote.url, kind).ok_or_else(|| {
+        anyhow::anyhow!(
             "could not parse owner/repo from remote '{}' URL: {}",
-            remote.name, remote.url
-        ))?;
+            remote.name,
+            remote.url
+        )
+    })?;
 
     let forge = build_forge(kind, host, token, token_env)?;
     Ok(ResolvedForge {
@@ -1593,26 +1741,48 @@ fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -
         .and_then(|r| remote::extract_host(&r.url))
 }
 
-fn build_forge(kind: ForgeKind, host: Option<&str>, token: Option<String>, token_env: Option<&str>) -> Result<Box<dyn Forge>> {
+fn build_forge(
+    kind: ForgeKind,
+    host: Option<&str>,
+    token: Option<String>,
+    token_env: Option<&str>,
+) -> Result<Box<dyn Forge>> {
     let token = match token {
         Some(t) => t,
         None => forge_token::resolve_token(kind, token_env)?,
     };
     match kind {
         ForgeKind::GitHub => {
-            let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+            let client = ForgeClient::new(
+                "https://api.github.com",
+                token,
+                AuthScheme::Bearer,
+                PaginationStyle::LinkHeader,
+            );
             Ok(Box::new(GitHubForge::new(client)))
         }
         ForgeKind::GitLab => {
             let gitlab_host = host.unwrap_or("gitlab.com");
             let base_url = format!("https://{gitlab_host}/api/v4");
-            let client = ForgeClient::new(&base_url, token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+            let client = ForgeClient::new(
+                &base_url,
+                token,
+                AuthScheme::Bearer,
+                PaginationStyle::LinkHeader,
+            );
             Ok(Box::new(GitLabForge::new(client)))
         }
         ForgeKind::Forgejo => {
-            let host = host.ok_or_else(|| anyhow::anyhow!("could not determine Forgejo host from remote URL"))?;
+            let host = host.ok_or_else(|| {
+                anyhow::anyhow!("could not determine Forgejo host from remote URL")
+            })?;
             let base_url = format!("https://{host}/api/v1");
-            let client = ForgeClient::new(&base_url, token, AuthScheme::Token, PaginationStyle::PageNumber { limit: 50 });
+            let client = ForgeClient::new(
+                &base_url,
+                token,
+                AuthScheme::Token,
+                PaginationStyle::PageNumber { limit: 50 },
+            );
             Ok(Box::new(ForgejoForge::new(client)))
         }
     }
@@ -1652,7 +1822,10 @@ fn detect_forge_for_cwd() -> Option<DetectedForge> {
         let host = pick_remote(&remotes, None)
             .ok()
             .and_then(|r| remote::extract_host(&r.url).map(|s| s.to_string()));
-        let env_var = cfg.forge_token_env.as_deref().unwrap_or(kind.token_env_var());
+        let env_var = cfg
+            .forge_token_env
+            .as_deref()
+            .unwrap_or(kind.token_env_var());
         let token = std::env::var(env_var).ok();
         return Some(DetectedForge {
             kind,
@@ -1665,7 +1838,13 @@ fn detect_forge_for_cwd() -> Option<DetectedForge> {
 
     let (remote_name, kind, _) = remote::resolve_remote(&remotes, None).ok()?;
     let host = find_remote_host(&remotes, &remote_name).map(|s| s.to_string());
-    Some(DetectedForge { kind, host, token: None, token_env_var: None, source: ForgeSource::Remote(remote_name) })
+    Some(DetectedForge {
+        kind,
+        host,
+        token: None,
+        token_env_var: None,
+        source: ForgeSource::Remote(remote_name),
+    })
 }
 
 fn find_repo_root() -> Result<PathBuf> {
@@ -1723,10 +1902,16 @@ mod tests {
         let note = StatusRender::native_stack_note(&pr, true).expect("should flag it");
         assert!(note.contains("#223"), "names the stack: {note}");
         assert!(note.contains("2 of 3"), "says where in the stack: {note}");
-        assert!(note.contains("gh stack merge 15138"), "gives the way to land it: {note}");
+        assert!(
+            note.contains("gh stack merge 15138"),
+            "gives the way to land it: {note}"
+        );
         // Merging a stacked PR lands everything below it. The merge block reason
         // spells that out; status must not be vaguer about the same command.
-        assert!(note.contains("lands it and the 1 below"), "says what lands: {note}");
+        assert!(
+            note.contains("lands it and the 1 below"),
+            "says what lands: {note}"
+        );
     }
 
     // At the bottom there is nothing below, so the note must not imply otherwise
@@ -1735,11 +1920,18 @@ mod tests {
     fn status_note_does_not_overstate_at_the_bottom_of_a_stack() {
         let mut pr = pr_with("me", false, None);
         pr.stack = Some(jjpr::forge::types::PrStackRef {
-            number: 223, id: 1, position: 1, size: 2, base: None,
+            number: 223,
+            id: 1,
+            position: 1,
+            size: 2,
+            base: None,
         });
         let note = StatusRender::native_stack_note(&pr, true).expect("should flag it");
         assert!(note.contains("lands it"), "{note}");
-        assert!(!note.contains("below"), "nothing is below the bottom PR: {note}");
+        assert!(
+            !note.contains("below"),
+            "nothing is below the bottom PR: {note}"
+        );
     }
 
     // PrStackRef defaults every field so a shrinking payload still parses. The
@@ -1748,13 +1940,29 @@ mod tests {
     fn status_note_degrades_when_the_stack_payload_is_partial() {
         let mut pr = pr_with("me", false, None);
         pr.stack = Some(jjpr::forge::types::PrStackRef {
-            number: 0, id: 0, position: 0, size: 0, base: None,
+            number: 0,
+            id: 0,
+            position: 0,
+            size: 0,
+            base: None,
         });
         let note = StatusRender::native_stack_note(&pr, true).expect("membership still holds");
-        assert!(!note.contains("#0"), "must not invent a stack number: {note}");
-        assert!(!note.contains("0 of 0"), "must not print a bogus position: {note}");
-        assert!(note.contains("a native stack"), "still states the fact: {note}");
-        assert!(note.contains("gh stack merge"), "still gives the command: {note}");
+        assert!(
+            !note.contains("#0"),
+            "must not invent a stack number: {note}"
+        );
+        assert!(
+            !note.contains("0 of 0"),
+            "must not print a bogus position: {note}"
+        );
+        assert!(
+            note.contains("a native stack"),
+            "still states the fact: {note}"
+        );
+        assert!(
+            note.contains("gh stack merge"),
+            "still gives the command: {note}"
+        );
     }
 
     // A foreign segment already says jjpr won't merge it; repeating why is noise.
@@ -1762,7 +1970,11 @@ mod tests {
     fn status_does_not_repeat_the_native_stack_note_for_foreign_prs() {
         let mut pr = pr_with("someone-else", false, None);
         pr.stack = Some(jjpr::forge::types::PrStackRef {
-            number: 223, id: 1, position: 1, size: 2, base: None,
+            number: 223,
+            id: 1,
+            position: 1,
+            size: 2,
+            base: None,
         });
         assert!(StatusRender::native_stack_note(&pr, false).is_none());
     }
@@ -1789,7 +2001,10 @@ mod tests {
         }];
         for from_watch in [false, true] {
             let line = blocked_follow_up(&reasons, from_watch);
-            assert!(line.contains("gh stack unstack 301"), "from_watch={from_watch}: {line}");
+            assert!(
+                line.contains("gh stack unstack 301"),
+                "from_watch={from_watch}: {line}"
+            );
             assert!(
                 !line.contains("again once the issue is resolved"),
                 "from_watch={from_watch} must not suggest re-running: {line}"
@@ -1890,7 +2105,10 @@ mod tests {
                 mergeable_state: "clean".to_string(),
             }),
             checks: Some(ChecksStatus::Pass),
-            reviews: Some(ReviewSummary { approved_count: 1, changes_requested: false }),
+            reviews: Some(ReviewSummary {
+                approved_count: 1,
+                changes_requested: false,
+            }),
         };
         let line = format_status_line(&status);
         assert!(line.contains("mergeable"), "got: {line}");
@@ -1900,7 +2118,11 @@ mod tests {
 
     #[test]
     fn status_line_empty_when_no_signals() {
-        let status = SegmentDisplayStatus { mergeability: None, checks: None, reviews: None };
+        let status = SegmentDisplayStatus {
+            mergeability: None,
+            checks: None,
+            reviews: None,
+        };
         assert_eq!(format_status_line(&status), "");
     }
 
@@ -2012,7 +2234,16 @@ mod tests {
         fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
             unimplemented!()
         }
-        fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> {
+        fn create_pr(
+            &self,
+            _o: &str,
+            _r: &str,
+            _t: &str,
+            _b: &str,
+            _h: &str,
+            _ba: &str,
+            _d: bool,
+        ) -> Result<PullRequest> {
             unimplemented!()
         }
         fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
@@ -2021,10 +2252,21 @@ mod tests {
         fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _rev: &[String]) -> Result<()> {
             unimplemented!()
         }
-        fn list_comments(&self, _o: &str, _r: &str, _n: u64) -> Result<Vec<jjpr::forge::types::IssueComment>> {
+        fn list_comments(
+            &self,
+            _o: &str,
+            _r: &str,
+            _n: u64,
+        ) -> Result<Vec<jjpr::forge::types::IssueComment>> {
             unimplemented!()
         }
-        fn create_comment(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<jjpr::forge::types::IssueComment> {
+        fn create_comment(
+            &self,
+            _o: &str,
+            _r: &str,
+            _n: u64,
+            _b: &str,
+        ) -> Result<jjpr::forge::types::IssueComment> {
             unimplemented!()
         }
         fn update_comment(&self, _o: &str, _r: &str, _c: u64, _b: &str) -> Result<()> {
@@ -2075,7 +2317,10 @@ mod tests {
         let stub = BatchStub::new(Some(vec![1, 2, 3]));
         let out = fetch_all_segment_status(&stub, &repo(), &targets(&[1, 2, 3]));
         assert_eq!(out.len(), 3);
-        assert!(stub.calls().is_empty(), "batch should have avoided per-PR calls");
+        assert!(
+            stub.calls().is_empty(),
+            "batch should have avoided per-PR calls"
+        );
         // The batched values, not the per-PR stub's, must be what lands.
         assert_eq!(out["bm-1"].reviews.as_ref().unwrap().approved_count, 7);
         assert_eq!(out["bm-1"].checks, Some(ChecksStatus::Pass));
@@ -2089,7 +2334,10 @@ mod tests {
         assert_eq!(out.len(), 3, "fallback must still cover every PR");
         assert_eq!(stub.calls(), vec![1, 2, 3]);
         // The per-PR values must land, proving the fallback data is used.
-        assert_eq!(out["bm-2"].mergeability.as_ref().unwrap().mergeable, Some(false));
+        assert_eq!(
+            out["bm-2"].mergeability.as_ref().unwrap().mergeable,
+            Some(false)
+        );
         assert_eq!(out["bm-2"].checks, Some(ChecksStatus::Fail));
     }
 
@@ -2102,7 +2350,11 @@ mod tests {
         assert_eq!(out.len(), 3, "batched and fetched PRs must both appear");
         assert_eq!(stub.calls(), vec![2], "only the gap should be fetched");
         assert_eq!(out["bm-1"].checks, Some(ChecksStatus::Pass), "from batch");
-        assert_eq!(out["bm-2"].checks, Some(ChecksStatus::Fail), "from fallback");
+        assert_eq!(
+            out["bm-2"].checks,
+            Some(ChecksStatus::Fail),
+            "from fallback"
+        );
         assert_eq!(out["bm-3"].checks, Some(ChecksStatus::Pass), "from batch");
     }
 
@@ -2156,24 +2408,43 @@ mod tests {
     }
 
     fn segment_of(bookmarks: Vec<Bookmark>) -> BookmarkSegment {
-        BookmarkSegment { bookmarks, changes: vec![], merge_source_names: vec![] }
+        BookmarkSegment {
+            bookmarks,
+            changes: vec![],
+            merge_source_names: vec![],
+        }
     }
 
     fn status_all_pass() -> SegmentDisplayStatus {
         SegmentDisplayStatus {
-            mergeability: Some(PrMergeability { mergeable: Some(true), mergeable_state: String::new() }),
+            mergeability: Some(PrMergeability {
+                mergeable: Some(true),
+                mergeable_state: String::new(),
+            }),
             checks: Some(ChecksStatus::Pass),
-            reviews: Some(ReviewSummary { approved_count: 1, changes_requested: false }),
+            reviews: Some(ReviewSummary {
+                approved_count: 1,
+                changes_requested: false,
+            }),
         }
     }
 
     #[test]
     fn pr_label_covers_ownership_and_state() {
         // Yours: no author attribution.
-        assert_eq!(pr_label(&SegmentPr::Open(&pr_with("me", false, None)), true), ", PR open");
-        assert_eq!(pr_label(&SegmentPr::Open(&pr_with("me", true, None)), true), ", PR draft");
         assert_eq!(
-            pr_label(&SegmentPr::Merged(&pr_with("me", false, Some("2026-04-20T00:00:00Z"))), true),
+            pr_label(&SegmentPr::Open(&pr_with("me", false, None)), true),
+            ", PR open"
+        );
+        assert_eq!(
+            pr_label(&SegmentPr::Open(&pr_with("me", true, None)), true),
+            ", PR draft"
+        );
+        assert_eq!(
+            pr_label(
+                &SegmentPr::Merged(&pr_with("me", false, Some("2026-04-20T00:00:00Z"))),
+                true
+            ),
             ", PR merged"
         );
         // Someone else's: attributed.
@@ -2182,7 +2453,10 @@ mod tests {
             ", PR open by @dana"
         );
         assert_eq!(
-            pr_label(&SegmentPr::Merged(&pr_with("jasonziaja", false, Some("2026-04-20"))), false),
+            pr_label(
+                &SegmentPr::Merged(&pr_with("jasonziaja", false, Some("2026-04-20"))),
+                false
+            ),
             ", PR merged by @jasonziaja"
         );
         // Foreign PR with an unknown author still reads sensibly.
@@ -2195,7 +2469,10 @@ mod tests {
 
     #[test]
     fn merged_on_suffix_takes_the_date() {
-        assert_eq!(merged_on_suffix(&pr_with("x", false, Some("2026-04-20T14:43:59Z"))), " on 2026-04-20");
+        assert_eq!(
+            merged_on_suffix(&pr_with("x", false, Some("2026-04-20T14:43:59Z"))),
+            " on 2026-04-20"
+        );
         assert_eq!(merged_on_suffix(&pr_with("x", false, None)), "");
         assert_eq!(merged_on_suffix(&pr_with("x", false, Some("short"))), "");
     }
@@ -2203,12 +2480,21 @@ mod tests {
     #[test]
     fn mergeability_line_variants() {
         let with = |m| SegmentDisplayStatus {
-            mergeability: Some(PrMergeability { mergeable: m, mergeable_state: String::new() }),
+            mergeability: Some(PrMergeability {
+                mergeable: m,
+                mergeable_state: String::new(),
+            }),
             checks: None,
             reviews: None,
         };
-        assert_eq!(format_mergeability_line(&with(Some(true))), "    \u{2713} mergeable");
-        assert_eq!(format_mergeability_line(&with(Some(false))), "    \u{2717} conflicts");
+        assert_eq!(
+            format_mergeability_line(&with(Some(true))),
+            "    \u{2713} mergeable"
+        );
+        assert_eq!(
+            format_mergeability_line(&with(Some(false))),
+            "    \u{2717} conflicts"
+        );
         assert_eq!(format_mergeability_line(&with(None)), "");
     }
 
@@ -2246,16 +2532,25 @@ mod tests {
         );
         // Someone else's still-open PR → the leave-alone note.
         assert_eq!(
-            r.header_slot(&SegmentPr::Open(&pr_with("dana", false, None)), false, &bms).as_deref(),
+            r.header_slot(&SegmentPr::Open(&pr_with("dana", false, None)), false, &bms)
+                .as_deref(),
             Some("jjpr won't submit or merge it")
         );
         // A merged segment (yours or not) has no push/sync slot.
         assert_eq!(
-            r.header_slot(&SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))), false, &bms),
+            r.header_slot(
+                &SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))),
+                false,
+                &bms
+            ),
             None
         );
         assert_eq!(
-            r.header_slot(&SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))), true, &bms),
+            r.header_slot(
+                &SegmentPr::Merged(&pr_with("x", false, Some("2026-04-20"))),
+                true,
+                &bms
+            ),
             None
         );
         assert_eq!(r.header_slot(&SegmentPr::None, false, &bms), None);
@@ -2266,7 +2561,10 @@ mod tests {
         let mut pr_map = HashMap::new();
         pr_map.insert("open-one".to_string(), pr_with("a", false, None));
         let mut merged_map = HashMap::new();
-        merged_map.insert("merged-one".to_string(), pr_with("b", false, Some("2026-04-20")));
+        merged_map.insert(
+            "merged-one".to_string(),
+            pr_with("b", false, Some("2026-04-20")),
+        );
         let (my, status_map) = (HashSet::new(), HashMap::new());
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
 
@@ -2284,12 +2582,18 @@ mod tests {
         assert!(r.segment_is_mine(&seg(&["mine-feat"])));
         assert!(!r.segment_is_mine(&seg(&["coworker-feat"])));
 
-        let all_foreign = BranchStack { segments: vec![seg(&["coworker-feat"])], base_branch: None };
+        let all_foreign = BranchStack {
+            segments: vec![seg(&["coworker-feat"])],
+            base_branch: None,
+        };
         let has_mine = BranchStack {
             segments: vec![seg(&["mine-feat"]), seg(&["coworker-feat"])],
             base_branch: None,
         };
-        let empty = BranchStack { segments: vec![], base_branch: None };
+        let empty = BranchStack {
+            segments: vec![],
+            base_branch: None,
+        };
         assert!(r.stack_is_all_foreign(&all_foreign));
         assert!(!r.stack_is_all_foreign(&has_mine));
         assert!(!r.stack_is_all_foreign(&empty));
@@ -2306,7 +2610,10 @@ mod tests {
 
         let lines = r.render_segment(&seg(&["mine"]));
         assert!(lines[0].contains(", PR open,"), "{lines:?}");
-        assert!(!lines[0].contains("by @"), "yours is not attributed: {lines:?}");
+        assert!(
+            !lines[0].contains("by @"),
+            "yours is not attributed: {lines:?}"
+        );
         assert!(lines.iter().any(|l| l.contains("pull/15138")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
     }
@@ -2321,7 +2628,10 @@ mod tests {
         let unreviewed = |approved: u32| SegmentDisplayStatus {
             mergeability: None,
             checks: None,
-            reviews: Some(ReviewSummary { approved_count: approved, changes_requested: false }),
+            reviews: Some(ReviewSummary {
+                approved_count: approved,
+                changes_requested: false,
+            }),
         };
         let mut status_map = HashMap::new();
         status_map.insert("upper".to_string(), status_all_pass()); // approved_count 1
@@ -2358,14 +2668,30 @@ mod tests {
             Some("    \u{26a0} a squash-landing of !200 would dismiss 2 approvals"),
         );
         // Trunk does not dismiss (or is undetermined) → no note.
-        assert_eq!(note(mk(Some(false), Some(ForgeKind::GitHub)), "upper", true), None);
+        assert_eq!(
+            note(mk(Some(false), Some(ForgeKind::GitHub)), "upper", true),
+            None
+        );
         assert_eq!(note(mk(None, Some(ForgeKind::GitHub)), "upper", true), None);
         // Not yours → silent (the note is about *your* approvals being dropped).
-        assert_eq!(note(mk(Some(true), Some(ForgeKind::GitHub)), "upper", false), None);
+        assert_eq!(
+            note(mk(Some(true), Some(ForgeKind::GitHub)), "upper", false),
+            None
+        );
         // Nothing stacked below → no landing would rebase it.
-        assert_eq!(note(mk(Some(true), Some(ForgeKind::GitHub)), "upper-no-below", true), None);
+        assert_eq!(
+            note(
+                mk(Some(true), Some(ForgeKind::GitHub)),
+                "upper-no-below",
+                true
+            ),
+            None
+        );
         // Stacked, but this PR has no approvals to lose.
-        assert_eq!(note(mk(Some(true), Some(ForgeKind::GitHub)), "unapproved", true), None);
+        assert_eq!(
+            note(mk(Some(true), Some(ForgeKind::GitHub)), "unapproved", true),
+            None
+        );
     }
 
     #[test]
@@ -2393,7 +2719,9 @@ mod tests {
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
-            lines.iter().any(|l| l.contains("squash-landing of #123 would dismiss 1 approval")),
+            lines
+                .iter()
+                .any(|l| l.contains("squash-landing of #123 would dismiss 1 approval")),
             "note missing: {lines:?}"
         );
         // The ordinary status line still renders alongside the note.
@@ -2423,7 +2751,9 @@ mod tests {
 
         let lines = r.render_segment(&seg(&["mine"]));
         assert!(
-            lines.iter().any(|l| l.contains("in native stack #348 (2 of 3)")),
+            lines
+                .iter()
+                .any(|l| l.contains("in native stack #348 (2 of 3)")),
             "note missing from rendered output: {lines:?}"
         );
         // And it does not displace the ordinary status line.
@@ -2492,7 +2822,10 @@ mod tests {
         let mut loud = render_with(&pr_map, &merged_map, &my, &status_map);
         loud.divergent_change_ids = [its_change].into_iter().collect();
         let line = loud.render_segment(&segment)[0].clone();
-        assert!(line.contains("?? divergent"), "must mark the segment: {line}");
+        assert!(
+            line.contains("?? divergent"),
+            "must mark the segment: {line}"
+        );
     }
 
     #[test]
@@ -2545,9 +2878,15 @@ mod tests {
         status_map.insert(
             "dana-feat".to_string(),
             SegmentDisplayStatus {
-                mergeability: Some(PrMergeability { mergeable: Some(true), mergeable_state: String::new() }),
+                mergeability: Some(PrMergeability {
+                    mergeable: Some(true),
+                    mergeable_state: String::new(),
+                }),
                 checks: Some(ChecksStatus::Fail),
-                reviews: Some(ReviewSummary { approved_count: 0, changes_requested: false }),
+                reviews: Some(ReviewSummary {
+                    approved_count: 0,
+                    changes_requested: false,
+                }),
             },
         );
         let (merged_map, my) = (HashMap::new(), HashSet::new());
@@ -2555,36 +2894,63 @@ mod tests {
 
         let lines = r.render_segment(&seg(&["dana-feat"]));
         assert!(lines[0].contains("PR open by @dana"), "{lines:?}");
-        assert!(lines[0].contains("jjpr won't submit or merge it"), "{lines:?}");
+        assert!(
+            lines[0].contains("jjpr won't submit or merge it"),
+            "{lines:?}"
+        );
         assert!(lines.iter().any(|l| l.contains("mergeable")), "{lines:?}");
-        assert!(!lines.iter().any(|l| l.contains("CI")), "foreign shows mergeability only: {lines:?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("CI")),
+            "foreign shows mergeability only: {lines:?}"
+        );
     }
 
     #[test]
     fn renders_foreign_merged_stale_with_cleanup_hint() {
         let mut merged_map = HashMap::new();
-        merged_map.insert("gone".to_string(), pr_with("dana", false, Some("2026-04-20T00:00:00Z")));
+        merged_map.insert(
+            "gone".to_string(),
+            pr_with("dana", false, Some("2026-04-20T00:00:00Z")),
+        );
         let (pr_map, status_map, my) = (HashMap::new(), HashMap::new(), HashSet::new());
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
 
         // Remote branch deleted (has_remote = false) → stale, with cleanup.
         let lines = r.render_segment(&segment_of(vec![bm("gone", false)]));
         assert!(lines[0].contains("PR merged by @dana"), "{lines:?}");
-        assert!(!lines[0].contains("won't submit"), "merged carries no slot: {lines:?}");
-        assert!(lines.iter().any(|l| l.contains("merged on 2026-04-20")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("local bookmark is stale")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("jj bookmark forget gone")), "{lines:?}");
+        assert!(
+            !lines[0].contains("won't submit"),
+            "merged carries no slot: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("merged on 2026-04-20")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("local bookmark is stale")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("jj bookmark forget gone")),
+            "{lines:?}"
+        );
     }
 
     #[test]
     fn renders_foreign_merged_with_live_remote_omits_cleanup() {
         let mut merged_map = HashMap::new();
-        merged_map.insert("kept".to_string(), pr_with("dana", false, Some("2026-04-20")));
+        merged_map.insert(
+            "kept".to_string(),
+            pr_with("dana", false, Some("2026-04-20")),
+        );
         let (pr_map, status_map, my) = (HashMap::new(), HashMap::new(), HashSet::new());
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
 
         let lines = r.render_segment(&segment_of(vec![bm("kept", true)]));
-        assert!(lines.iter().any(|l| l.contains("merged on 2026-04-20")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("merged on 2026-04-20")),
+            "{lines:?}"
+        );
         assert!(!lines.iter().any(|l| l.contains("stale")), "{lines:?}");
         assert!(!lines.iter().any(|l| l.contains("forget")), "{lines:?}");
     }
@@ -2592,7 +2958,10 @@ mod tests {
     #[test]
     fn recognition_screen_for_an_all_foreign_stack() {
         let mut merged_map = HashMap::new();
-        merged_map.insert("cycle".to_string(), pr_with("dana", false, Some("2026-04-20")));
+        merged_map.insert(
+            "cycle".to_string(),
+            pr_with("dana", false, Some("2026-04-20")),
+        );
         let (pr_map, status_map, my) = (HashMap::new(), HashMap::new(), HashSet::new());
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
 
@@ -2603,7 +2972,10 @@ mod tests {
         let lines = r.render_foreign_only(&stack);
         assert_eq!(lines[0], "On cycle \u{2014} someone else's merged branch:");
         // The foreign base must not be dropped in the recognition path.
-        assert!(lines.iter().any(|l| l == "  (based on coworker-base)"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l == "  (based on coworker-base)"),
+            "{lines:?}"
+        );
         assert_eq!(lines.last().unwrap(), "Nothing of yours to submit here.");
     }
 
@@ -2622,21 +2994,34 @@ mod tests {
     #[test]
     fn render_base_attributes_a_merged_foreign_base() {
         let mut merged_map = HashMap::new();
-        merged_map.insert("platform".to_string(), pr_with("dana", false, Some("2026-04-20")));
+        merged_map.insert(
+            "platform".to_string(),
+            pr_with("dana", false, Some("2026-04-20")),
+        );
         let (pr_map, my, status_map) = (HashMap::new(), HashSet::new(), HashMap::new());
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
 
         let lines = r.render_base("platform");
-        assert_eq!(lines[0], "  (based on platform \u{2014} PR merged by @dana)");
+        assert_eq!(
+            lines[0],
+            "  (based on platform \u{2014} PR merged by @dana)"
+        );
         assert!(lines[1].contains("pull/15138"), "{lines:?}");
     }
 
     #[test]
     fn render_base_stays_bare_without_a_pr() {
-        let (pr_map, merged_map, my, status_map) =
-            (HashMap::new(), HashMap::new(), HashSet::new(), HashMap::new());
+        let (pr_map, merged_map, my, status_map) = (
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+        );
         let r = render_with(&pr_map, &merged_map, &my, &status_map);
-        assert_eq!(r.render_base("platform"), vec!["  (based on platform)".to_string()]);
+        assert_eq!(
+            r.render_base("platform"),
+            vec!["  (based on platform)".to_string()]
+        );
     }
 
     #[test]
@@ -2644,7 +3029,10 @@ mod tests {
         // Foreign by EMAIL (bookmark not in my_names), but the PR was authored
         // by your forge login — your own work from another machine's email.
         let mut merged_map = HashMap::new();
-        merged_map.insert("feat".to_string(), pr_with("michaeldhopkins", false, Some("2026-03-12")));
+        merged_map.insert(
+            "feat".to_string(),
+            pr_with("michaeldhopkins", false, Some("2026-03-12")),
+        );
         let (pr_map, my, status_map) = (HashMap::new(), HashSet::new(), HashMap::new());
         let mut identity = Identity::default();
         identity.add_login("michaeldhopkins");
@@ -2662,8 +3050,14 @@ mod tests {
             divergent_change_ids: HashSet::new(),
         };
         let seg = segment_of(vec![bm("feat", false)]);
-        assert!(r.segment_is_yours(&seg), "your own PR (by login) must count as yours");
-        let stack = BranchStack { segments: vec![seg], base_branch: None };
+        assert!(
+            r.segment_is_yours(&seg),
+            "your own PR (by login) must count as yours"
+        );
+        let stack = BranchStack {
+            segments: vec![seg],
+            base_branch: None,
+        };
         assert!(
             !r.stack_is_all_foreign(&stack),
             "an all-foreign-by-email stack that is yours by login must not trigger recognition"
@@ -2684,7 +3078,10 @@ mod tests {
         // must not trigger the "nothing of yours" recognition screen.
         let segment = segment_of(vec![bm("coworker-feat", true), bm("my-feat", true)]);
         assert!(r.segment_is_mine(&segment));
-        let stack = BranchStack { segments: vec![segment], base_branch: None };
+        let stack = BranchStack {
+            segments: vec![segment],
+            base_branch: None,
+        };
         assert!(!r.stack_is_all_foreign(&stack));
     }
 }

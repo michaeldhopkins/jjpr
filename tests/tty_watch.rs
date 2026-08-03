@@ -121,9 +121,11 @@ fn spinner_shows_on_a_tty() {
 
     // Read until the spinner has advanced through at least two distinct frames,
     // proving it animates in place.
-    let captured = read_until(&mut master_file, Instant::now() + Duration::from_secs(20), |s| {
-        s.contains('⠋') && s.contains('⠙')
-    });
+    let captured = read_until(
+        &mut master_file,
+        Instant::now() + Duration::from_secs(20),
+        |s| s.contains('⠋') && s.contains('⠙'),
+    );
 
     let _ = child.kill();
     let _ = child.wait();

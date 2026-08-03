@@ -1,5 +1,18 @@
 # jjpr TODO
 
+## Open: `run_watch_loop` is long enough to want decomposing
+
+Carries `#[allow(clippy::too_many_lines)]` as of the 2026-08-03 reformat. The
+allow was added because rustfmt's 2024 style edition pushed it from under the
+limit to 284/275 by splitting argument lists — no statement or branch was added,
+so failing the build on that alone would have been noise.
+
+The lint is still telling the truth: at ~284 lines it is the longest function in
+the crate and the second-densest source of mutants (`watch.rs` 105, behind
+`main.rs` 190). Splitting it is a genuine refactor of watch behaviour, which is
+why it was not done inside a pure-formatting commit. Worth doing on its own
+terms, with the mutation numbers re-measured afterwards.
+
 ## Open: `auth test` misdiagnoses ambiguous remotes
 
 Found 2026-08-02 while reviewing the empty-path-components fix. With two

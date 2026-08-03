@@ -97,9 +97,12 @@ pub fn config_path() -> Option<PathBuf> {
     {
         return Some(PathBuf::from(xdg).join("jjpr").join("config.toml"));
     }
-    std::env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".config").join("jjpr").join("config.toml"))
+    std::env::var("HOME").ok().map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("jjpr")
+            .join("config.toml")
+    })
 }
 
 /// Returns the repo-local config file path: `{repo_root}/.jj/jjpr.toml`.
@@ -118,8 +121,9 @@ pub fn load_config() -> Result<Config> {
 /// Load config from a specific path, falling back to defaults if the file doesn't exist.
 pub fn load_config_from(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(contents) => toml::from_str(&contents)
-            .with_context(|| format!("failed to parse {}", path.display())),
+        Ok(contents) => {
+            toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
     }
@@ -195,8 +199,7 @@ pub fn write_config_to(path: &Path, content: &str) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    std::fs::write(path, content)
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
 }
 
 const DEFAULT_GLOBAL_CONFIG: &str = r#"# jjpr configuration
@@ -366,18 +369,26 @@ merge_method = "merge"
         let dir = tempfile::TempDir::new().unwrap();
 
         let global_path = dir.path().join("global.toml");
-        std::fs::write(&global_path, r#"
+        std::fs::write(
+            &global_path,
+            r#"
 merge_method = "rebase"
 required_approvals = 2
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let repo_root = dir.path().join("repo");
         std::fs::create_dir_all(repo_root.join(".jj")).unwrap();
         let repo_path = repo_root.join(".jj").join("jjpr.toml");
-        std::fs::write(&repo_path, r#"
+        std::fs::write(
+            &repo_path,
+            r#"
 forge = "forgejo"
 merge_method = "squash"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let global_table = load_toml_table(Some(&global_path)).unwrap();
         let repo_table = load_toml_table(Some(&repo_path)).unwrap();

@@ -11,7 +11,7 @@
 mod forge_e2e_harness;
 
 use forge_e2e_harness::{
-    configured_drivers, ForgeE2eContext, ForgeTestDriver, MergeMethod, OWNER, REPO,
+    ForgeE2eContext, ForgeTestDriver, MergeMethod, OWNER, REPO, configured_drivers,
 };
 
 /// Poll jjpr's detection until it reports `want` (forge config propagates
@@ -19,7 +19,10 @@ use forge_e2e_harness::{
 fn detect(forge: &dyn jjpr::forge::Forge, branch: &str, want: Option<bool>) -> Option<bool> {
     let mut got = None;
     for _ in 0..6 {
-        got = forge.base_dismisses_stale_approvals(OWNER, REPO, branch).ok().flatten();
+        got = forge
+            .base_dismisses_stale_approvals(OWNER, REPO, branch)
+            .ok()
+            .flatten();
         if got == want {
             return got;
         }
@@ -49,10 +52,25 @@ fn forge_harness_smoke_all_forges() {
         let head = ctx.prefixed("smoke");
 
         let num = ctx.driver.open_request(&head, "main", "e2e harness smoke");
-        assert_eq!(ctx.driver.request_state(num), "open", "{name}: PR should be open");
-        assert_eq!(ctx.driver.request_base(num), "main", "{name}: base should be main");
-        assert!(!ctx.driver.request_head_sha(num).is_empty(), "{name}: head sha present");
-        assert_eq!(ctx.driver.find_request_by_head(&head), Some(num), "{name}: find by head");
+        assert_eq!(
+            ctx.driver.request_state(num),
+            "open",
+            "{name}: PR should be open"
+        );
+        assert_eq!(
+            ctx.driver.request_base(num),
+            "main",
+            "{name}: base should be main"
+        );
+        assert!(
+            !ctx.driver.request_head_sha(num).is_empty(),
+            "{name}: head sha present"
+        );
+        assert_eq!(
+            ctx.driver.find_request_by_head(&head),
+            Some(num),
+            "{name}: find by head"
+        );
 
         // Scoped dismiss-stale protection round-trip (never touches main).
         ctx.driver.set_dismiss_stale(&head);
@@ -60,7 +78,11 @@ fn forge_harness_smoke_all_forges() {
 
         // Land it, then confirm it reads as merged.
         ctx.driver.admin_merge(num, MergeMethod::MergeCommit);
-        assert_eq!(ctx.driver.request_state(num), "merged", "{name}: should be merged");
+        assert_eq!(
+            ctx.driver.request_state(num),
+            "merged",
+            "{name}: should be merged"
+        );
 
         eprintln!("=== {name}: OK ===");
         // ForgeE2eContext::drop cleans up everything under this run's prefix.
@@ -97,21 +119,35 @@ fn feature2_dismiss_stale_detection_all_forges() {
 
         // Every forge: the real detection READ works against the live API and
         // reports "off" for an unprotected branch.
-        assert_eq!(detect(&*forge, &branch, Some(false)), Some(false), "{name}: baseline off");
+        assert_eq!(
+            detect(&*forge, &branch, Some(false)),
+            Some(false),
+            "{name}: baseline off"
+        );
 
         if !toggleable {
             // Paywalled precondition (e.g. GitLab reset-on-push is Premium):
             // the "on" state can't be created on this account. jjpr still
             // handles it — the on-parse is unit-tested — and the read path above
             // is exercised e2e here. See the forge-e2e-testing skill.
-            eprintln!("=== {name}: toggle unavailable (Premium); on-state unit-tested, read path e2e-verified ===");
+            eprintln!(
+                "=== {name}: toggle unavailable (Premium); on-state unit-tested, read path e2e-verified ==="
+            );
             continue;
         }
 
         ctx.driver.set_dismiss_stale(&branch);
-        assert_eq!(detect(&*forge, &branch, Some(true)), Some(true), "{name}: detect ON");
+        assert_eq!(
+            detect(&*forge, &branch, Some(true)),
+            Some(true),
+            "{name}: detect ON"
+        );
         ctx.driver.remove_protection(&branch);
-        assert_eq!(detect(&*forge, &branch, Some(false)), Some(false), "{name}: detect OFF");
+        assert_eq!(
+            detect(&*forge, &branch, Some(false)),
+            Some(false),
+            "{name}: detect OFF"
+        );
 
         eprintln!("=== {name}: detection round-trip OK ===");
     }
@@ -220,7 +256,10 @@ fn feature1_scenario(
     let bottom = find_pr(&ctx, "f1bot");
     let top = find_pr(&ctx, "f1top");
     let sha_before = ctx.driver.request_head_sha(top);
-    assert!(!sha_before.is_empty(), "{name}: descendant head sha present before merge");
+    assert!(
+        !sha_before.is_empty(),
+        "{name}: descendant head sha present before merge"
+    );
 
     // Mark only the top draft (blocked) so jjpr merges the bottom and reconciles
     // the top without merging it.
@@ -324,20 +363,33 @@ fn divergent_change_refuses_before_pushing_all_forges() {
         // a new description, so its diff is a strict subset of ours.
         std::fs::write(ctx.repo_path.join(&extra_file), "extra\n").expect("write");
         ctx.run_jj(&["status"]);
-        ctx.run_jj(&["--at-operation", &good_op, "describe", "-m", &format!("dv leaf alt {}", ctx.prefix)]);
+        ctx.run_jj(&[
+            "--at-operation",
+            &good_op,
+            "describe",
+            "-m",
+            &format!("dv leaf alt {}", ctx.prefix),
+        ]);
         ctx.run_jj(&["status"]);
 
         // Identify the copies by description: "ours" kept the original message and
         // carries the extra file; "theirs" was re-described at the older operation.
         let listing = ctx.run_jj(&[
-            "--ignore-working-copy", "log", "-r", "divergent()", "--no-graph",
-            "-T", "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "divergent()",
+            "--no-graph",
+            "-T",
+            "commit_id.short() ++ \" \" ++ description.first_line() ++ \"\\n\"",
         ]);
         let pick = |marker: &str| -> String {
             listing
                 .lines()
                 .find(|l| l.contains(marker))
-                .unwrap_or_else(|| panic!("{name}: no divergent copy matching {marker:?}:\n{listing}"))
+                .unwrap_or_else(|| {
+                    panic!("{name}: no divergent copy matching {marker:?}:\n{listing}")
+                })
                 .split_whitespace()
                 .next()
                 .expect("a commit id")
@@ -348,9 +400,17 @@ fn divergent_change_refuses_before_pushing_all_forges() {
             .lines()
             .filter(|l| !l.contains("dv leaf alt"))
             .find(|l| l.contains("dv leaf"))
-            .map(|l| l.split_whitespace().next().expect("a commit id").to_string())
+            .map(|l| {
+                l.split_whitespace()
+                    .next()
+                    .expect("a commit id")
+                    .to_string()
+            })
             .unwrap_or_else(|| panic!("{name}: no 'ours' copy:\n{listing}"));
-        assert_ne!(ours, theirs, "{name}: two distinct copies expected:\n{listing}");
+        assert_ne!(
+            ours, theirs,
+            "{name}: two distinct copies expected:\n{listing}"
+        );
 
         // Stack OURS on THEIRS: ours' diff is a superset, so this is clean and
         // non-empty, leaving both copies in the range submit would push.
@@ -358,9 +418,15 @@ fn divergent_change_refuses_before_pushing_all_forges() {
         // The rebase gave "ours" a new commit id, so find it as the divergent
         // descendant of "theirs" — which did not move.
         let upper = ctx
-            .run_jj(&["--ignore-working-copy", "log", "-r",
-                      &format!("divergent() & (descendants({t}) ~ {t})", t = theirs),
-                      "--no-graph", "-T", "commit_id.short() ++ \"\\n\""])
+            .run_jj(&[
+                "--ignore-working-copy",
+                "log",
+                "-r",
+                &format!("divergent() & (descendants({t}) ~ {t})", t = theirs),
+                "--no-graph",
+                "-T",
+                "commit_id.short() ++ \"\\n\"",
+            ])
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
@@ -378,9 +444,18 @@ fn divergent_change_refuses_before_pushing_all_forges() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
 
-        assert!(!out.status.success(), "{name}: submit must fail\nstdout:{stdout}\nstderr:{stderr}");
-        assert!(stderr.contains("divergent"), "{name}: must say why: {stderr}");
-        assert!(stderr.contains("jj abandon"), "{name}: must give the remedy: {stderr}");
+        assert!(
+            !out.status.success(),
+            "{name}: submit must fail\nstdout:{stdout}\nstderr:{stderr}"
+        );
+        assert!(
+            stderr.contains("divergent"),
+            "{name}: must say why: {stderr}"
+        );
+        assert!(
+            stderr.contains("jj abandon"),
+            "{name}: must give the remedy: {stderr}"
+        );
         assert!(
             stderr.contains(&theirs) && stderr.contains(&upper),
             "{name}: must name BOTH commits ({theirs}, {upper}): {stderr}"
@@ -393,7 +468,13 @@ fn divergent_change_refuses_before_pushing_all_forges() {
                 "{name}: no pull request may exist for {bm}"
             );
         }
-        let remotes = ctx.run_jj(&["bookmark", "list", "--all-remotes", "-T", "name ++ \"@\" ++ remote ++ \"\\n\""]);
+        let remotes = ctx.run_jj(&[
+            "bookmark",
+            "list",
+            "--all-remotes",
+            "-T",
+            "name ++ \"@\" ++ remote ++ \"\\n\"",
+        ]);
         for bm in [&lower_bm, &upper_bm] {
             assert!(
                 !remotes.contains(&format!("{bm}@origin")),

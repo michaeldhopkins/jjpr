@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 
+use super::Forge;
 use super::http::ForgeClient;
 use super::types::{
     ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest, ReviewSummary,
 };
-use super::Forge;
 
 /// Forgejo/Codeberg implementation using direct HTTP via `ForgeClient`.
 pub struct ForgejoForge {
@@ -52,17 +52,11 @@ fn parse_combined_status(combined: &serde_json::Value) -> ChecksStatus {
 
 /// Parse Forgejo review objects into a `ReviewSummary`.
 fn parse_reviews(items: &[serde_json::Value]) -> ReviewSummary {
-    let mut latest: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut latest: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for review in items {
         let user = review["user"]["login"].as_str().unwrap_or_default();
         let state = review["state"].as_str().unwrap_or_default();
-        if !user.is_empty()
-            && matches!(
-                state,
-                "APPROVED" | "REQUEST_CHANGES" | "REJECTED"
-            )
-        {
+        if !user.is_empty() && matches!(state, "APPROVED" | "REQUEST_CHANGES" | "REJECTED") {
             latest.insert(user.to_string(), state.to_string());
         }
     }
@@ -124,13 +118,7 @@ impl Forge for ForgejoForge {
         serde_json::from_value(output).context("failed to parse created PR response")
     }
 
-    fn update_pr_base(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        base: &str,
-    ) -> Result<()> {
+    fn update_pr_base(&self, owner: &str, repo: &str, number: u64, base: &str) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "base": base });
         self.client.patch(&path, &json_body)?;
@@ -153,12 +141,7 @@ impl Forge for ForgejoForge {
         Ok(())
     }
 
-    fn list_comments(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Vec<IssueComment>> {
+    fn list_comments(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<IssueComment>> {
         let path = format!("repos/{owner}/{repo}/issues/{number}/comments");
         let items = self.client.get_paginated(&path)?;
         serde_json::from_value(serde_json::Value::Array(items))
@@ -178,38 +161,21 @@ impl Forge for ForgejoForge {
         serde_json::from_value(output).context("failed to parse created comment response")
     }
 
-    fn update_comment(
-        &self,
-        owner: &str,
-        repo: &str,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<()> {
+    fn update_comment(&self, owner: &str, repo: &str, comment_id: u64, body: &str) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/issues/comments/{comment_id}");
         let json_body = serde_json::json!({ "body": body });
         self.client.patch(&path, &json_body)?;
         Ok(())
     }
 
-    fn update_pr_body(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        body: &str,
-    ) -> Result<()> {
+    fn update_pr_body(&self, owner: &str, repo: &str, number: u64, body: &str) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "body": body });
         self.client.patch(&path, &json_body)?;
         Ok(())
     }
 
-    fn mark_pr_ready(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<()> {
+    fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "draft": false });
         self.client.patch(&path, &json_body)?;
@@ -225,7 +191,9 @@ impl Forge for ForgejoForge {
     }
 
     fn get_authenticated_emails(&self) -> Result<Vec<String>> {
-        Ok(crate::forge::parse_verified_emails(&self.client.get("user/emails")?))
+        Ok(crate::forge::parse_verified_emails(
+            &self.client.get("user/emails")?,
+        ))
     }
 
     fn base_dismisses_stale_approvals(
@@ -250,12 +218,7 @@ impl Forge for ForgejoForge {
         }
     }
 
-    fn find_merged_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        head: &str,
-    ) -> Result<Option<PullRequest>> {
+    fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>> {
         // Forgejo doesn't support filtering closed PRs by head branch, so we
         // paginate and scan. Cap at 5 pages (250 PRs) to avoid runaway requests
         // on repos with many closed PRs.
@@ -289,13 +252,7 @@ impl Forge for ForgejoForge {
         Ok(None)
     }
 
-    fn merge_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        method: MergeMethod,
-    ) -> Result<()> {
+    fn merge_pr(&self, owner: &str, repo: &str, number: u64, method: MergeMethod) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}/merge");
         let do_value = match method {
             MergeMethod::Squash => "squash",
@@ -319,23 +276,13 @@ impl Forge for ForgejoForge {
         Ok(parse_combined_status(&output))
     }
 
-    fn get_pr_reviews(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<ReviewSummary> {
+    fn get_pr_reviews(&self, owner: &str, repo: &str, number: u64) -> Result<ReviewSummary> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}/reviews");
         let items = self.client.get_paginated(&path)?;
         Ok(parse_reviews(&items))
     }
 
-    fn get_pr_state(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PrState> {
+    fn get_pr_state(&self, owner: &str, repo: &str, number: u64) -> Result<PrState> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let pr = self.client.get(&path)?;
         Ok(PrState {
@@ -344,12 +291,7 @@ impl Forge for ForgejoForge {
         })
     }
 
-    fn get_pr_mergeability(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PrMergeability> {
+    fn get_pr_mergeability(&self, owner: &str, repo: &str, number: u64) -> Result<PrMergeability> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let output = self.client.get(&path)?;
         Ok(parse_mergeability(&output))
@@ -527,11 +469,13 @@ mod tests {
         let json = r#"{"id": 500, "body": "<!-- jjpr:stack-info -->\nStack content"}"#;
         let comment: IssueComment = serde_json::from_str(json).unwrap();
         assert_eq!(comment.id, 500);
-        assert!(comment
-            .body
-            .as_deref()
-            .unwrap()
-            .contains("<!-- jjpr:stack-info -->"));
+        assert!(
+            comment
+                .body
+                .as_deref()
+                .unwrap()
+                .contains("<!-- jjpr:stack-info -->")
+        );
     }
 
     #[test]
@@ -553,7 +497,10 @@ mod tests {
                 .collect();
             let combined = serde_json::json!({"statuses": items});
             let result = parse_combined_status(&combined);
-            assert_eq!(result, expected, "statuses {statuses:?} should map correctly");
+            assert_eq!(
+                result, expected,
+                "statuses {statuses:?} should map correctly"
+            );
         }
     }
 

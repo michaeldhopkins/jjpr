@@ -202,7 +202,10 @@ fn body_fingerprint(managed: &str) -> String {
 
 /// Render a fingerprint marker line for a managed body.
 fn fingerprint_marker(managed: &str) -> String {
-    format!("{FINGERPRINT_PREFIX}{}{FINGERPRINT_SUFFIX}", body_fingerprint(managed))
+    format!(
+        "{FINGERPRINT_PREFIX}{}{FINGERPRINT_SUFFIX}",
+        body_fingerprint(managed)
+    )
 }
 
 /// Extract the fingerprint jjpr last recorded for this PR's managed body,
@@ -261,13 +264,7 @@ fn strip_trailers(body: &str) -> String {
 fn derive_pr_title_body(segment: &NarrowedSegment) -> (String, String) {
     if let Some(change) = segment.changes.first() {
         let title = change.description_first_line.clone();
-        let mut body = strip_trailers(
-            change
-                .description
-                .strip_prefix(&title)
-                .unwrap_or("")
-                .trim(),
-        );
+        let mut body = strip_trailers(change.description.strip_prefix(&title).unwrap_or("").trim());
 
         if !segment.merge_source_names.is_empty() {
             let note = generate_merge_note(&segment.merge_source_names);
@@ -449,10 +446,12 @@ pub fn divergent_changes_in_stack(segments: &[NarrowedSegment]) -> Vec<Divergent
 
     for segment in segments {
         for change in &segment.changes {
-            let commits = by_change.entry(change.change_id.clone()).or_insert_with(|| {
-                order.push(change.change_id.clone());
-                Vec::new()
-            });
+            let commits = by_change
+                .entry(change.change_id.clone())
+                .or_insert_with(|| {
+                    order.push(change.change_id.clone());
+                    Vec::new()
+                });
             // A commit can appear once per segment it belongs to; only distinct
             // commits count as divergence.
             if !commits.contains(&change.commit_id) {
@@ -473,7 +472,11 @@ pub fn divergent_changes_in_stack(segments: &[NarrowedSegment]) -> Vec<Divergent
                 .filter(|seg| commit_ids.contains(&seg.bookmark.commit_id))
                 .map(|seg| seg.bookmark.name.clone())
                 .collect();
-            Some(DivergentChange { change_id, commit_ids, bookmarks })
+            Some(DivergentChange {
+                change_id,
+                commit_ids,
+                bookmarks,
+            })
         })
         .collect()
 }
@@ -683,12 +686,16 @@ pub fn create_submission_plan(
         std::collections::HashSet::new()
     } else {
         match reviewer_scope {
-            crate::forge::types::ReviewerScope::Bottom => {
-                live_bookmarks_in_order.first().cloned().into_iter().collect()
-            }
-            crate::forge::types::ReviewerScope::Leaf => {
-                live_bookmarks_in_order.last().cloned().into_iter().collect()
-            }
+            crate::forge::types::ReviewerScope::Bottom => live_bookmarks_in_order
+                .first()
+                .cloned()
+                .into_iter()
+                .collect(),
+            crate::forge::types::ReviewerScope::Leaf => live_bookmarks_in_order
+                .last()
+                .cloned()
+                .into_iter()
+                .collect(),
             crate::forge::types::ReviewerScope::All => {
                 live_bookmarks_in_order.iter().cloned().collect()
             }
@@ -729,7 +736,10 @@ pub fn create_submission_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::types::{ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef, ReviewSummary, ReviewerScope};
+    use crate::forge::types::{
+        ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef,
+        ReviewSummary, ReviewerScope,
+    };
     use crate::jj::types::LogEntry;
 
     struct StubGitHub {
@@ -737,33 +747,31 @@ mod tests {
     }
 
     impl Forge for StubGitHub {
-        fn list_open_prs(
-            &self,
-            _owner: &str,
-            _repo: &str,
-        ) -> Result<Vec<PullRequest>> {
+        fn list_open_prs(&self, _owner: &str, _repo: &str) -> Result<Vec<PullRequest>> {
             Ok(self.prs.values().cloned().collect())
         }
         fn create_pr(
-            &self, _o: &str, _r: &str, _t: &str, _b: &str,
-            _h: &str, _ba: &str, _draft: bool,
+            &self,
+            _o: &str,
+            _r: &str,
+            _t: &str,
+            _b: &str,
+            _h: &str,
+            _ba: &str,
+            _draft: bool,
         ) -> Result<PullRequest> {
             unimplemented!()
         }
         fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
             unimplemented!()
         }
-        fn request_reviewers(
-            &self, _o: &str, _r: &str, _n: u64, _revs: &[String],
-        ) -> Result<()> {
+        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> {
             unimplemented!()
         }
         fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
             unimplemented!()
         }
-        fn create_comment(
-            &self, _o: &str, _r: &str, _i: u64, _b: &str,
-        ) -> Result<IssueComment> {
+        fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> {
             unimplemented!()
         }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
@@ -778,17 +786,26 @@ mod tests {
         fn get_authenticated_user(&self) -> Result<String> {
             Ok("testuser".to_string())
         }
-        fn find_merged_pr(
-            &self, _o: &str, _r: &str, _h: &str,
-        ) -> Result<Option<PullRequest>> {
+        fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
             Ok(None)
         }
-        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-        fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-        fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-        fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+            unimplemented!()
+        }
+        fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+            unimplemented!()
+        }
+        fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+            unimplemented!()
+        }
         fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-            Ok(PrState { merged: false, state: "open".to_string() })
+            Ok(PrState {
+                merged: false,
+                state: "open".to_string(),
+            })
         }
     }
 
@@ -863,7 +880,10 @@ mod tests {
         assert_eq!(d.change_id, upper.bookmark.change_id);
         assert_eq!(
             d.commit_ids,
-            vec![upper.bookmark.commit_id.clone(), lower.bookmark.commit_id.clone()],
+            vec![
+                upper.bookmark.commit_id.clone(),
+                lower.bookmark.commit_id.clone()
+            ],
             "both commits named, in stack order"
         );
         let mut names = d.bookmarks.clone();
@@ -877,8 +897,16 @@ mod tests {
             html_url: "https://github.com/o/r/pull/1".to_string(),
             title: format!("Add {name}"),
             body: Some("Detailed description".to_string()),
-            base: PullRequestRef { ref_name: base.to_string(), label: String::new(), sha: String::new() },
-            head: PullRequestRef { ref_name: name.to_string(), label: String::new(), sha: String::new() },
+            base: PullRequestRef {
+                ref_name: base.to_string(),
+                label: String::new(),
+                sha: String::new(),
+            },
+            head: PullRequestRef {
+                ref_name: name.to_string(),
+                label: String::new(),
+                sha: String::new(),
+            },
             draft: false,
             node_id: String::new(),
             merged_at: None,
@@ -899,7 +927,23 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_push.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
@@ -921,7 +965,23 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_push.is_empty());
         assert!(plan.bookmarks_needing_pr.is_empty());
         assert!(plan.bookmarks_needing_base_update.is_empty());
@@ -934,21 +994,31 @@ mod tests {
             prs: HashMap::from([("profile".to_string(), make_pr("profile", "main"))]),
         };
         // Stack: auth -> profile. Profile's base should be "auth", not "main"
-        let segments = vec![
-            make_segment("auth", true),
-            make_segment("profile", true),
-        ];
+        let segments = vec![make_segment("auth", true), make_segment("profile", true)];
         let repo = RepoInfo {
             owner: "o".to_string(),
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_base_update.len(), 1);
-        assert_eq!(
-            plan.bookmarks_needing_base_update[0].expected_base,
-            "auth"
-        );
+        assert_eq!(plan.bookmarks_needing_base_update[0].expected_base, "auth");
         assert!(plan.native_stack_base_conflicts.is_empty());
     }
 
@@ -970,9 +1040,28 @@ mod tests {
             prs: HashMap::from([("profile".to_string(), pr)]),
         };
         let segments = vec![make_segment("auth", true), make_segment("profile", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         assert!(
             plan.bookmarks_needing_base_update.is_empty(),
@@ -1003,9 +1092,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         assert!(plan.native_stack_base_conflicts.is_empty());
         assert!(plan.bookmarks_needing_base_update.is_empty());
@@ -1026,7 +1134,23 @@ mod tests {
             repo: "r".to_string(),
         };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
         assert_eq!(plan.bookmarks_needing_pr[2].base_branch, "profile");
@@ -1043,9 +1167,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -1058,12 +1201,37 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_with_title_drift.len(), 1);
-        assert_eq!(plan.bookmarks_with_title_drift[0].current_title, "Old title");
-        assert_eq!(plan.bookmarks_with_title_drift[0].expected_title, "Add feature");
+        assert_eq!(
+            plan.bookmarks_with_title_drift[0].current_title,
+            "Old title"
+        );
+        assert_eq!(
+            plan.bookmarks_with_title_drift[0].expected_title,
+            "Add feature"
+        );
     }
 
     #[test]
@@ -1072,10 +1240,29 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), make_pr("feature", "main"))]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
         let reviewers = ["alice".to_string()];
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &reviewers, reviewer_scope: ReviewerScope::All, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
+                reviewer_scope: ReviewerScope::All,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
         assert_eq!(plan.bookmarks_needing_reviewers[0].1, 1); // pr number
     }
@@ -1103,21 +1290,35 @@ mod tests {
             ]),
         };
         let segments = three_segment_stack();
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
         let reviewers = ["alice".to_string()];
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
                 reviewer_scope: ReviewerScope::Bottom,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
+        )
+        .unwrap();
 
-        assert_eq!(plan.bookmarks_needing_reviewers.len(), 1, "scope=bottom must pick one existing PR");
+        assert_eq!(
+            plan.bookmarks_needing_reviewers.len(),
+            1,
+            "scope=bottom must pick one existing PR"
+        );
         assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "auth");
     }
 
@@ -1131,19 +1332,29 @@ mod tests {
             ]),
         };
         let segments = three_segment_stack();
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
         let reviewers = ["alice".to_string()];
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
                 reviewer_scope: ReviewerScope::Leaf,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
         assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "settings");
@@ -1159,23 +1370,36 @@ mod tests {
             ]),
         };
         let segments = three_segment_stack();
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
         let reviewers = ["alice".to_string()];
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
                 reviewer_scope: ReviewerScope::All,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 3);
-        let names: Vec<&str> = plan.bookmarks_needing_reviewers
-            .iter().map(|(b, _)| b.name.as_str()).collect();
+        let names: Vec<&str> = plan
+            .bookmarks_needing_reviewers
+            .iter()
+            .map(|(b, _)| b.name.as_str())
+            .collect();
         assert_eq!(names, vec!["auth", "profile", "settings"]);
     }
 
@@ -1185,49 +1409,73 @@ mod tests {
         let gh = StubGitHub {
             prs: HashMap::from([("auth".to_string(), make_pr("auth", "main"))]),
         };
-        let segments = vec![
-            make_segment("auth", false),
-            make_segment("profile", false),
-        ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let segments = vec![make_segment("auth", false), make_segment("profile", false)];
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
         let reviewers = ["alice".to_string()];
 
         // Bottom: only auth (existing) gets request.
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
                 reviewer_scope: ReviewerScope::Bottom,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
         assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "auth");
         // The new PR for profile must NOT be flagged for reviewer request.
-        let profile = plan.bookmarks_needing_pr.iter()
-            .find(|p| p.bookmark.name == "profile").unwrap();
+        let profile = plan
+            .bookmarks_needing_pr
+            .iter()
+            .find(|p| p.bookmark.name == "profile")
+            .unwrap();
         assert!(!profile.request_reviewers_on_create);
 
         // Leaf: only profile (the new one) gets the flag, no existing-PR
         // requests since auth isn't the leaf.
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
                 reviewer_scope: ReviewerScope::Leaf,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
-        assert!(plan.bookmarks_needing_reviewers.is_empty(),
-            "leaf scope shouldn't request on auth (it's the bottom)");
-        let profile = plan.bookmarks_needing_pr.iter()
-            .find(|p| p.bookmark.name == "profile").unwrap();
-        assert!(profile.request_reviewers_on_create,
-            "leaf scope must flag the new top PR for reviewer request");
+        )
+        .unwrap();
+        assert!(
+            plan.bookmarks_needing_reviewers.is_empty(),
+            "leaf scope shouldn't request on auth (it's the bottom)"
+        );
+        let profile = plan
+            .bookmarks_needing_pr
+            .iter()
+            .find(|p| p.bookmark.name == "profile")
+            .unwrap();
+        assert!(
+            profile.request_reviewers_on_create,
+            "leaf scope must flag the new top PR for reviewer request"
+        );
     }
 
     #[test]
@@ -1245,21 +1493,59 @@ mod tests {
             fn find_merged_pr(&self, _: &str, _: &str, head: &str) -> Result<Option<PullRequest>> {
                 Ok(self.merged_prs.get(head).cloned())
             }
-            fn create_pr(&self, _: &str, _: &str, _: &str, _: &str, _: &str, _: &str, _: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".into()) }
-            fn merge_pr(&self, _: &str, _: &str, _: u64, _: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".into())
+            }
+            fn merge_pr(&self, _: &str, _: &str, _: u64, _: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".into() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".into(),
+                })
             }
         }
 
@@ -1272,25 +1558,40 @@ mod tests {
             pr.merged_at = Some("2026-05-01T00:00:00Z".to_string());
             pr
         });
-        let gh = StubWithMerged { open_prs, merged_prs };
+        let gh = StubWithMerged {
+            open_prs,
+            merged_prs,
+        };
         let segments = three_segment_stack();
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
         let reviewers = ["alice".to_string()];
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &reviewers,
+                draft_mode: DraftMode::Default,
+                reviewers: &reviewers,
                 reviewer_scope: ReviewerScope::Bottom,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(plan.bookmarks_needing_reviewers.len(), 1);
-        assert_eq!(plan.bookmarks_needing_reviewers[0].0.name, "profile",
-            "bottom skips already-merged auth");
+        assert_eq!(
+            plan.bookmarks_needing_reviewers[0].0.name, "profile",
+            "bottom skips already-merged auth"
+        );
     }
 
     #[test]
@@ -1301,23 +1602,30 @@ mod tests {
                 ("profile".to_string(), make_pr("profile", "auth")),
             ]),
         };
-        let segments = vec![
-            make_segment("auth", false),
-            make_segment("profile", false),
-        ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let segments = vec![make_segment("auth", false), make_segment("profile", false)];
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         // Even with scope=All, no reviewers means no requests.
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
             &SubmitOptions {
-                draft_mode: DraftMode::Default, reviewers: &[],
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
                 reviewer_scope: ReviewerScope::All,
                 stack_base: None,
                 stack_nav: crate::config::StackNavMode::Comment,
                 dry_run: false,
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_reviewers.is_empty());
     }
 
@@ -1330,13 +1638,34 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         // The new body should contain the updated managed section
-        assert!(extract_managed_body(&plan.bookmarks_needing_body_update[0].new_body)
-            .is_some_and(|m| m == "Detailed description"));
+        assert!(
+            extract_managed_body(&plan.bookmarks_needing_body_update[0].new_body)
+                .is_some_and(|m| m == "Detailed description")
+        );
     }
 
     #[test]
@@ -1348,9 +1677,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -1367,9 +1715,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         let new_body = &plan.bookmarks_needing_body_update[0].new_body;
         assert!(new_body.starts_with("User notes above"));
@@ -1387,9 +1754,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -1426,7 +1812,10 @@ mod tests {
 
     #[test]
     fn test_strip_trailers_body_that_is_only_a_trailer_becomes_empty() {
-        assert_eq!(strip_trailers("Co-authored-by: Claude <noreply@anthropic.com>"), "");
+        assert_eq!(
+            strip_trailers("Co-authored-by: Claude <noreply@anthropic.com>"),
+            ""
+        );
     }
 
     #[test]
@@ -1479,7 +1868,10 @@ mod tests {
         // Pinned so a future refactor can't silently change the algorithm
         // (the value is persisted in PR bodies and read by old/new binaries).
         assert_eq!(body_fingerprint(""), "cbf29ce484222325");
-        assert_eq!(body_fingerprint("hello world"), body_fingerprint("hello world"));
+        assert_eq!(
+            body_fingerprint("hello world"),
+            body_fingerprint("hello world")
+        );
         assert_ne!(body_fingerprint("a"), body_fingerprint("b"));
     }
 
@@ -1559,9 +1951,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -1571,16 +1982,36 @@ mod tests {
         // fingerprint (a seed update) without changing the prose.
         let mut pr = make_pr("feature", "main");
         pr.body = Some(
-            "<!-- jjpr:description -->\nDetailed description\n<!-- /jjpr:description -->".to_string(),
+            "<!-- jjpr:description -->\nDetailed description\n<!-- /jjpr:description -->"
+                .to_string(),
         );
 
         let gh = StubGitHub {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_body_update.len(), 1);
         assert!(plan.bookmarks_needing_body_update[0].seed);
         let new_body = &plan.bookmarks_needing_body_update[0].new_body;
@@ -1593,16 +2024,36 @@ mod tests {
         // Legacy hand-edited body: left untouched AND surfaced as a conflict.
         let mut pr = make_pr("feature", "main");
         pr.body = Some(
-            "<!-- jjpr:description -->\nHand-written context.\n<!-- /jjpr:description -->".to_string(),
+            "<!-- jjpr:description -->\nHand-written context.\n<!-- /jjpr:description -->"
+                .to_string(),
         );
 
         let gh = StubGitHub {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
         assert_eq!(plan.bookmarks_with_body_conflict.len(), 1);
         assert!(plan.bookmarks_with_body_conflict[0].unfingerprinted);
@@ -1623,9 +2074,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
         assert_eq!(plan.bookmarks_with_body_conflict.len(), 1);
         assert!(!plan.bookmarks_with_body_conflict[0].unfingerprinted);
@@ -1647,9 +2117,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_body_update.is_empty());
     }
 
@@ -1723,15 +2212,28 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
-            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+            fn find_merged_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                head: &str,
+            ) -> Result<Option<PullRequest>> {
                 if head == "auth" {
                     Ok(Some(PullRequest {
                         number: 99,
                         html_url: "https://github.com/o/r/pull/99".to_string(),
                         title: "Add auth".to_string(),
                         body: None,
-                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
-                        head: PullRequestRef { ref_name: "auth".to_string(), label: String::new(), sha: String::new() },
+                        base: PullRequestRef {
+                            ref_name: "main".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
+                        head: PullRequestRef {
+                            ref_name: "auth".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
@@ -1743,33 +2245,91 @@ mod tests {
                     Ok(None)
                 }
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
-        let segments = vec![
-            make_segment("auth", true),
-            make_segment("profile", false),
-        ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let segments = vec![make_segment("auth", true), make_segment("profile", false)];
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &GitHubWithMergedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &GitHubWithMergedPr,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
         assert_eq!(plan.bookmarks_already_merged[0].bookmark.name, "auth");
@@ -1791,15 +2351,31 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
-            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+            fn find_merged_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                head: &str,
+            ) -> Result<Option<PullRequest>> {
                 if head == "auth" || head == "profile" {
                     Ok(Some(PullRequest {
                         number: if head == "auth" { 1 } else { 2 },
-                        html_url: format!("https://github.com/o/r/pull/{}", if head == "auth" { 1 } else { 2 }),
+                        html_url: format!(
+                            "https://github.com/o/r/pull/{}",
+                            if head == "auth" { 1 } else { 2 }
+                        ),
                         title: head.to_string(),
                         body: None,
-                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
-                        head: PullRequestRef { ref_name: head.to_string(), label: String::new(), sha: String::new() },
+                        base: PullRequestRef {
+                            ref_name: "main".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
+                        head: PullRequestRef {
+                            ref_name: head.to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
@@ -1811,21 +2387,65 @@ mod tests {
                     Ok(None)
                 }
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
@@ -1834,12 +2454,28 @@ mod tests {
             make_segment("profile", true),
             make_segment("settings", false),
         ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &GitHubTwoMerged, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &GitHubTwoMerged,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 2);
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
@@ -1862,8 +2498,16 @@ mod tests {
                     html_url: "https://github.com/o/r/pull/2".to_string(),
                     title: "profile".to_string(),
                     body: None,
-                    base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
-                    head: PullRequestRef { ref_name: "profile".to_string(), label: "o:profile".to_string(), sha: "sha_profile".to_string() },
+                    base: PullRequestRef {
+                        ref_name: "main".to_string(),
+                        label: String::new(),
+                        sha: String::new(),
+                    },
+                    head: PullRequestRef {
+                        ref_name: "profile".to_string(),
+                        label: "o:profile".to_string(),
+                        sha: "sha_profile".to_string(),
+                    },
                     draft: false,
                     node_id: String::new(),
                     merged_at: None,
@@ -1872,15 +2516,28 @@ mod tests {
                     stack: None,
                 }])
             }
-            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+            fn find_merged_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                head: &str,
+            ) -> Result<Option<PullRequest>> {
                 if head == "auth" {
                     Ok(Some(PullRequest {
                         number: 1,
                         html_url: "https://github.com/o/r/pull/1".to_string(),
                         title: "auth".to_string(),
                         body: None,
-                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
-                        head: PullRequestRef { ref_name: "auth".to_string(), label: String::new(), sha: String::new() },
+                        base: PullRequestRef {
+                            ref_name: "main".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
+                        head: PullRequestRef {
+                            ref_name: "auth".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
@@ -1892,21 +2549,65 @@ mod tests {
                     Ok(None)
                 }
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
@@ -1915,14 +2616,34 @@ mod tests {
             make_segment("profile", true),
             make_segment("settings", false),
         ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &GitHubOneMergedOneLive, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &GitHubOneMergedOneLive,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
-        assert_eq!(plan.bookmarks_already_merged.len(), 1, "auth should be merged");
+        assert_eq!(
+            plan.bookmarks_already_merged.len(),
+            1,
+            "auth should be merged"
+        );
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert_eq!(plan.bookmarks_needing_pr[0].bookmark.name, "settings");
         assert_eq!(
@@ -1939,34 +2660,100 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
-            fn find_merged_pr(&self, _o: &str, _r: &str, _head: &str) -> Result<Option<PullRequest>> {
+            fn find_merged_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _head: &str,
+            ) -> Result<Option<PullRequest>> {
                 // Closed but not merged — merged_at is None, so find_merged_pr returns None
                 Ok(None)
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
         let segments = vec![make_segment("feature", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &GitHubWithClosedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &GitHubWithClosedPr,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         // A closed-but-not-merged PR should NOT be treated as merged
         assert!(plan.bookmarks_already_merged.is_empty());
@@ -1981,15 +2768,28 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
-            fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
+            fn find_merged_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                head: &str,
+            ) -> Result<Option<PullRequest>> {
                 if head == "auth" {
                     Ok(Some(PullRequest {
                         number: 99,
                         html_url: "https://github.com/o/r/pull/99".to_string(),
                         title: "Add auth".to_string(),
                         body: None,
-                        base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
-                        head: PullRequestRef { ref_name: "auth".to_string(), label: String::new(), sha: String::new() },
+                        base: PullRequestRef {
+                            ref_name: "main".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
+                        head: PullRequestRef {
+                            ref_name: "auth".to_string(),
+                            label: String::new(),
+                            sha: String::new(),
+                        },
                         draft: false,
                         node_id: String::new(),
                         merged_at: Some("2024-01-01T00:00:00Z".to_string()),
@@ -2001,37 +2801,101 @@ mod tests {
                     Ok(None)
                 }
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
         // auth is not synced but already merged — should NOT be pushed
         let segments = vec![make_segment("auth", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &GitHubWithMergedPr, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &GitHubWithMergedPr,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         assert_eq!(plan.bookmarks_already_merged.len(), 1);
         assert!(
             plan.bookmarks_needing_push.is_empty(),
             "merged bookmarks should not be pushed: {:?}",
-            plan.bookmarks_needing_push.iter().map(|b| &b.name).collect::<Vec<_>>()
+            plan.bookmarks_needing_push
+                .iter()
+                .map(|b| &b.name)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -2041,9 +2905,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), make_pr("feature", "main"))]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_with_title_drift.is_empty());
     }
 
@@ -2071,9 +2954,28 @@ mod tests {
             empty: false,
         });
         let segments = vec![segment];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(
             plan.bookmarks_with_title_drift.is_empty(),
             "multi-commit segments should not report title drift"
@@ -2086,9 +2988,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), make_pr("feature", "main"))]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_reviewers.is_empty());
     }
 
@@ -2102,14 +3023,49 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         // With ready=false, no bookmarks_needing_ready
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert!(plan.bookmarks_needing_ready.is_empty());
 
         // With ready=true, draft PR is identified
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::MarkExistingReady, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::MarkExistingReady,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_ready.len(), 1);
         assert_eq!(plan.bookmarks_needing_ready[0].pr_number, 1);
     }
@@ -2123,9 +3079,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), fork_pr)]),
         };
         let segments = vec![make_segment("feature", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         // Fork PR should be filtered out — treated as if no PR exists
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
@@ -2141,9 +3116,28 @@ mod tests {
             prs: HashMap::from([("feature".to_string(), pr)]),
         };
         let segments = vec![make_segment("feature", true)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         // Empty label (e.g. from test stubs) should pass through the filter
         assert!(plan.bookmarks_needing_pr.is_empty());
@@ -2157,32 +3151,99 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 anyhow::bail!("HTTP 401 Unauthorized")
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
-            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { unimplemented!() }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                unimplemented!()
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                unimplemented!()
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
         let segments = vec![make_segment("feature", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let err = create_submission_plan(&FailingGitHub, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false })
-            .unwrap_err();
+        let err = create_submission_plan(
+            &FailingGitHub,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("jjpr auth test"), "error should hint at auth: {msg}");
+        assert!(
+            msg.contains("jjpr auth test"),
+            "error should hint at auth: {msg}"
+        );
     }
 
     #[test]
@@ -2192,34 +3253,95 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![])
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _r2: &[String]) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                unimplemented!()
+            }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
                 anyhow::bail!("network timeout")
             }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
         let segments = vec![make_segment("feature", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         // Should succeed (not abort) and plan a PR despite merged check failing
         let plan = create_submission_plan(
-            &MergedCheckFailsGitHub, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &MergedCheckFailsGitHub,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);
         assert!(plan.bookmarks_already_merged.is_empty());
     }
@@ -2229,15 +3351,29 @@ mod tests {
         let gh = StubGitHub {
             prs: HashMap::new(),
         };
-        let segments = vec![
-            make_segment("auth", false),
-            make_segment("profile", false),
-        ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let segments = vec![make_segment("auth", false), make_segment("profile", false)];
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: Some("coworker-feat"), stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: Some("coworker-feat"),
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "coworker-feat");
         assert_eq!(plan.bookmarks_needing_pr[1].base_branch, "auth");
     }
@@ -2250,12 +3386,37 @@ mod tests {
         let mut segment = make_segment("merge-feat", false);
         segment.merge_source_names = vec!["feat-d".to_string()];
         let segments = vec![segment];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         let body = &plan.bookmarks_needing_pr[0].body;
-        assert!(body.contains("**Merge note:**"), "body should contain merge note: {body}");
-        assert!(body.contains("`feat-d`"), "body should reference the merge source: {body}");
+        assert!(
+            body.contains("**Merge note:**"),
+            "body should contain merge note: {body}"
+        );
+        assert!(
+            body.contains("`feat-d`"),
+            "body should reference the merge source: {body}"
+        );
     }
 
     #[test]
@@ -2264,11 +3425,33 @@ mod tests {
             prs: HashMap::new(),
         };
         let segments = vec![make_segment("feature", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
-        let plan = create_submission_plan(&gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false }).unwrap();
+        let plan = create_submission_plan(
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         let body = &plan.bookmarks_needing_pr[0].body;
-        assert!(!body.contains("Merge note"), "linear segment should have no merge note: {body}");
+        assert!(
+            !body.contains("Merge note"),
+            "linear segment should have no merge note: {body}"
+        );
     }
 
     #[test]
@@ -2278,7 +3461,10 @@ mod tests {
             "feat-c".to_string(),
             "feat-d".to_string(),
         ]);
-        assert!(note.contains("`feat-b`, `feat-c`, and `feat-d`"), "should format 3 sources: {note}");
+        assert!(
+            note.contains("`feat-b`, `feat-c`, and `feat-d`"),
+            "should format 3 sources: {note}"
+        );
         assert!(note.contains("those PRs are"), "should use plural: {note}");
     }
 
@@ -2302,11 +3488,28 @@ mod tests {
             prs: HashMap::new(),
         };
         let segments = vec![make_segment("feature", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main", &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
         assert_eq!(plan.bookmarks_needing_pr[0].base_branch, "main");
     }
 
@@ -2369,29 +3572,72 @@ mod tests {
             )]),
         };
         let segments = vec![make_empty_segment("auth", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
-        assert!(plan.bookmarks_needing_push.is_empty(), "should not push empty bookmark");
-        assert!(plan.bookmarks_needing_pr.is_empty(), "should not create PR for empty bookmark");
-        assert!(plan.bookmarks_needing_base_update.is_empty(), "should not update base of empty bookmark");
+        assert!(
+            plan.bookmarks_needing_push.is_empty(),
+            "should not push empty bookmark"
+        );
+        assert!(
+            plan.bookmarks_needing_pr.is_empty(),
+            "should not create PR for empty bookmark"
+        );
+        assert!(
+            plan.bookmarks_needing_base_update.is_empty(),
+            "should not update base of empty bookmark"
+        );
     }
 
     #[test]
     fn test_plan_skips_empty_segment_without_pr() {
         // An empty bookmark without a PR should be silently skipped
-        let gh = StubGitHub { prs: HashMap::new() };
+        let gh = StubGitHub {
+            prs: HashMap::new(),
+        };
         let segments = vec![make_empty_segment("auth", false)];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         assert!(plan.bookmarks_needing_push.is_empty());
         assert!(plan.bookmarks_needing_pr.is_empty());
@@ -2401,17 +3647,35 @@ mod tests {
     fn test_plan_empty_segment_advances_effective_base() {
         // Even though an empty segment is skipped, it should still advance the
         // effective base for subsequent segments.
-        let gh = StubGitHub { prs: HashMap::new() };
+        let gh = StubGitHub {
+            prs: HashMap::new(),
+        };
         let segments = vec![
             make_empty_segment("auth", true),
             make_segment("profile", false),
         ];
-        let repo = RepoInfo { owner: "o".to_string(), repo: "r".to_string() };
+        let repo = RepoInfo {
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+        };
 
         let plan = create_submission_plan(
-            &gh, &segments, "origin", &repo, ForgeKind::GitHub, "main",
-            &SubmitOptions { draft_mode: DraftMode::Default, reviewers: &[], reviewer_scope: ReviewerScope::Bottom, stack_base: None, stack_nav: crate::config::StackNavMode::Comment, dry_run: false },
-        ).unwrap();
+            &gh,
+            &segments,
+            "origin",
+            &repo,
+            ForgeKind::GitHub,
+            "main",
+            &SubmitOptions {
+                draft_mode: DraftMode::Default,
+                reviewers: &[],
+                reviewer_scope: ReviewerScope::Bottom,
+                stack_base: None,
+                stack_nav: crate::config::StackNavMode::Comment,
+                dry_run: false,
+            },
+        )
+        .unwrap();
 
         // profile should base on "auth" (the empty segment), not "main"
         assert_eq!(plan.bookmarks_needing_pr.len(), 1);

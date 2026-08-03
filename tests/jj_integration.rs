@@ -50,7 +50,11 @@ fn test_real_jj_log_parsing() {
     assert_eq!(entry.author_email, "test@jjpr.dev");
     assert!(entry.description.starts_with("Add authentication"));
     assert_eq!(entry.description_first_line, "Add authentication");
-    assert_eq!(entry.parents.len(), 1, "should have one parent (the initial commit)");
+    assert_eq!(
+        entry.parents.len(),
+        1,
+        "should have one parent (the initial commit)"
+    );
 }
 
 #[test]
@@ -145,9 +149,17 @@ fn is_conflicted_detects_a_conflict_anywhere_in_a_range() {
     }
     let repo = common::JjTestRepo::new();
     let short = |r: &str| {
-        repo.run_jj(&["--ignore-working-copy", "log", "-r", r, "--no-graph", "-T", "change_id.short(8)"])
-            .trim()
-            .to_string()
+        repo.run_jj(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            r,
+            "--no-graph",
+            "-T",
+            "change_id.short(8)",
+        ])
+        .trim()
+        .to_string()
     };
 
     repo.write_file("f.txt", "l1\nl2\n");
@@ -203,9 +215,17 @@ fn a_divergent_rebase_root_is_only_screenable_via_change_id() {
     }
     let repo = common::JjTestRepo::new();
     let short = |r: &str| {
-        repo.run_jj(&["--ignore-working-copy", "log", "-r", r, "--no-graph", "-T", "change_id.short(8)"])
-            .trim()
-            .to_string()
+        repo.run_jj(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            r,
+            "--no-graph",
+            "-T",
+            "change_id.short(8)",
+        ])
+        .trim()
+        .to_string()
     };
 
     repo.write_file("f.txt", "l1\n");
@@ -256,9 +276,17 @@ fn real_divergent_change_in_one_chain_stays_two_segments() {
     }
     let repo = common::JjTestRepo::new();
     let one = |r: &str, t: &str| {
-        repo.run_jj(&["--ignore-working-copy", "log", "-r", r, "--no-graph", "-T", t])
-            .trim()
-            .to_string()
+        repo.run_jj(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            r,
+            "--no-graph",
+            "-T",
+            t,
+        ])
+        .trim()
+        .to_string()
     };
 
     repo.write_file("base.txt", "base\n");
@@ -282,15 +310,34 @@ fn real_divergent_change_in_one_chain_stays_two_segments() {
         .to_string();
     repo.write_file("one.txt", "ours\n");
     repo.run_jj(&["status"]);
-    repo.run_jj(&["--at-operation", &good_op, "describe", "-m", "layer (theirs)"]);
+    repo.run_jj(&[
+        "--at-operation",
+        &good_op,
+        "describe",
+        "-m",
+        "layer (theirs)",
+    ]);
     repo.run_jj(&["status"]);
 
     let divergent = repo.run_jj(&[
-        "--ignore-working-copy", "log", "-r", "divergent()", "--no-graph",
-        "-T", "commit_id.short() ++ \"\\n\"",
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        "divergent()",
+        "--no-graph",
+        "-T",
+        "commit_id.short() ++ \"\\n\"",
     ]);
-    let copies: Vec<&str> = divergent.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    assert_eq!(copies.len(), 2, "expected one divergent change on two commits: {copies:?}");
+    let copies: Vec<&str> = divergent
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        copies.len(),
+        2,
+        "expected one divergent change on two commits: {copies:?}"
+    );
 
     // Put one copy ON TOP of the other, so both sit in a single chain.
     repo.run_jj(&["rebase", "-r", copies[0], "-d", copies[1]]);
@@ -314,13 +361,21 @@ fn real_divergent_change_in_one_chain_stays_two_segments() {
     let graph = jjpr::graph::change_graph::build_change_graph(&repo.runner()).unwrap();
 
     let seg_of = |name: &str| {
-        graph.stacks.iter().flat_map(|s| s.segments.iter()).position(|seg| {
-            seg.bookmarks.iter().any(|b| b.name == name)
-        })
+        graph
+            .stacks
+            .iter()
+            .flat_map(|s| s.segments.iter())
+            .position(|seg| seg.bookmarks.iter().any(|b| b.name == name))
     };
     let (lo, up) = (seg_of("lower"), seg_of("upper"));
-    assert!(lo.is_some() && up.is_some(), "both bookmarks must be segments: {lo:?} {up:?}");
-    assert_ne!(lo, up, "the two copies are distinct commits and must be distinct segments");
+    assert!(
+        lo.is_some() && up.is_some(),
+        "both bookmarks must be segments: {lo:?} {up:?}"
+    );
+    assert_ne!(
+        lo, up,
+        "the two copies are distinct commits and must be distinct segments"
+    );
 
     // And submit's detector must fire on the real segments, not just on stubs.
     let narrowed: Vec<jjpr::jj::types::NarrowedSegment> = graph
@@ -336,6 +391,15 @@ fn real_divergent_change_in_one_chain_stays_two_segments() {
         })
         .collect();
     let found = jjpr::submit::plan::divergent_changes_in_stack(&narrowed);
-    assert_eq!(found.len(), 1, "submit must see exactly one divergent change: {found:?}");
-    assert_eq!(found[0].commit_ids.len(), 2, "naming both commits: {:?}", found[0]);
+    assert_eq!(
+        found.len(),
+        1,
+        "submit must see exactly one divergent change: {found:?}"
+    );
+    assert_eq!(
+        found[0].commit_ids.len(),
+        2,
+        "naming both commits: {:?}",
+        found[0]
+    );
 }

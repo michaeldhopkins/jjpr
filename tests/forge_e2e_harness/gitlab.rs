@@ -15,7 +15,10 @@ pub struct GitLabDriver;
 
 pub fn available() -> bool {
     super::tool_available("glab")
-        && Command::new("glab").args(["auth", "status"]).output().is_ok_and(|o| o.status.success())
+        && Command::new("glab")
+            .args(["auth", "status"])
+            .output()
+            .is_ok_and(|o| o.status.success())
 }
 
 fn enc() -> String {
@@ -26,12 +29,24 @@ fn enc() -> String {
 // (we run inside the jjpr checkout, whose remote is github.com). All calls use
 // `glab api` with an explicit project path, so only the authed host + token matter.
 fn glab(args: &[&str]) -> String {
-    let out = Command::new("glab").current_dir(std::env::temp_dir()).args(args).output().expect("run glab");
-    assert!(out.status.success(), "glab {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+    let out = Command::new("glab")
+        .current_dir(std::env::temp_dir())
+        .args(args)
+        .output()
+        .expect("run glab");
+    assert!(
+        out.status.success(),
+        "glab {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 fn glab_quiet(args: &[&str]) {
-    let _ = Command::new("glab").current_dir(std::env::temp_dir()).args(args).output();
+    let _ = Command::new("glab")
+        .current_dir(std::env::temp_dir())
+        .args(args)
+        .output();
 }
 fn api(path: &str) -> Value {
     serde_json::from_str(&glab(&["api", path])).unwrap_or(Value::Null)
@@ -48,26 +63,45 @@ impl ForgeTestDriver for GitLabDriver {
 
     fn open_request(&self, head: &str, base: &str, title: &str) -> u64 {
         let v: Value = serde_json::from_str(&glab(&[
-            "api", "-X", "POST", &format!("projects/{}/merge_requests", enc()),
-            "-f", &format!("source_branch={head}"),
-            "-f", &format!("target_branch={base}"),
-            "-f", &format!("title={title}"),
-            "-f", "description=e2e fixture",
-        ])).unwrap_or(Value::Null);
-        v["iid"].as_u64().unwrap_or_else(|| panic!("create MR failed: {v}"))
+            "api",
+            "-X",
+            "POST",
+            &format!("projects/{}/merge_requests", enc()),
+            "-f",
+            &format!("source_branch={head}"),
+            "-f",
+            &format!("target_branch={base}"),
+            "-f",
+            &format!("title={title}"),
+            "-f",
+            "description=e2e fixture",
+        ]))
+        .unwrap_or(Value::Null);
+        v["iid"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("create MR failed: {v}"))
     }
 
     fn find_request_by_head(&self, head: &str) -> Option<u64> {
-        let mrs = api(&format!("projects/{}/merge_requests?source_branch={head}&state=all", enc()));
+        let mrs = api(&format!(
+            "projects/{}/merge_requests?source_branch={head}&state=all",
+            enc()
+        ));
         mrs.as_array()?.first()?.get("iid")?.as_u64()
     }
 
     fn request_head_sha(&self, number: u64) -> String {
-        api(&format!("projects/{}/merge_requests/{number}", enc()))["sha"].as_str().unwrap_or("").to_string()
+        api(&format!("projects/{}/merge_requests/{number}", enc()))["sha"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
     }
 
     fn request_base(&self, number: u64) -> String {
-        api(&format!("projects/{}/merge_requests/{number}", enc()))["target_branch"].as_str().unwrap_or("").to_string()
+        api(&format!("projects/{}/merge_requests/{number}", enc()))["target_branch"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
     }
 
     fn boxed(&self) -> Box<dyn ForgeTestDriver> {
@@ -78,11 +112,21 @@ impl ForgeTestDriver for GitLabDriver {
         // GitLab's `draft` is derived from the title, not a settable field.
         let path = format!("projects/{}/merge_requests/{number}", enc());
         let title = api(&path)["title"].as_str().unwrap_or("").to_string();
-        glab(&["api", "-X", "PUT", &path, "-f", &format!("title=Draft: {title}")]);
+        glab(&[
+            "api",
+            "-X",
+            "PUT",
+            &path,
+            "-f",
+            &format!("title=Draft: {title}"),
+        ]);
     }
 
     fn request_state(&self, number: u64) -> String {
-        match api(&format!("projects/{}/merge_requests/{number}", enc()))["state"].as_str().unwrap_or("") {
+        match api(&format!("projects/{}/merge_requests/{number}", enc()))["state"]
+            .as_str()
+            .unwrap_or("")
+        {
             "opened" => "open".to_string(),
             other => other.to_string(),
         }
@@ -112,41 +156,80 @@ impl ForgeTestDriver for GitLabDriver {
 
     fn set_dismiss_stale(&self, _branch: &str) {
         // Project-level; branch is irrelevant.
-        glab_quiet(&["api", "-X", "POST", &format!("projects/{}/approvals", enc()), "-f", "reset_approvals_on_push=true"]);
+        glab_quiet(&[
+            "api",
+            "-X",
+            "POST",
+            &format!("projects/{}/approvals", enc()),
+            "-f",
+            "reset_approvals_on_push=true",
+        ]);
     }
 
     fn remove_protection(&self, _branch: &str) {
-        glab_quiet(&["api", "-X", "POST", &format!("projects/{}/approvals", enc()), "-f", "reset_approvals_on_push=false"]);
+        glab_quiet(&[
+            "api",
+            "-X",
+            "POST",
+            &format!("projects/{}/approvals", enc()),
+            "-f",
+            "reset_approvals_on_push=false",
+        ]);
     }
 
     fn jjpr_forge(&self) -> Box<dyn jjpr::forge::Forge> {
         use jjpr::forge::{AuthScheme, ForgeClient, ForgeKind, GitLabForge, PaginationStyle};
-        let token = jjpr::forge::token::resolve_token(ForgeKind::GitLab, None).expect("gitlab token");
-        let client = ForgeClient::new("https://gitlab.com/api/v4", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+        let token =
+            jjpr::forge::token::resolve_token(ForgeKind::GitLab, None).expect("gitlab token");
+        let client = ForgeClient::new(
+            "https://gitlab.com/api/v4",
+            token,
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
         Box::new(GitLabForge::new(client))
     }
 
     fn cleanup_prefix(&self, prefix: &str) {
         // Close prefixed open MRs.
-        let mrs = api(&format!("projects/{}/merge_requests?state=opened&per_page=100", enc()));
+        let mrs = api(&format!(
+            "projects/{}/merge_requests?state=opened&per_page=100",
+            enc()
+        ));
         if let Some(arr) = mrs.as_array() {
             for mr in arr {
-                if mr["source_branch"].as_str().unwrap_or("").starts_with(prefix)
+                if mr["source_branch"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with(prefix)
                     && let Some(iid) = mr["iid"].as_u64()
                 {
-                    glab_quiet(&["api", "-X", "PUT", &format!("projects/{}/merge_requests/{iid}?state_event=close", enc())]);
+                    glab_quiet(&[
+                        "api",
+                        "-X",
+                        "PUT",
+                        &format!("projects/{}/merge_requests/{iid}?state_event=close", enc()),
+                    ]);
                 }
             }
         }
         // Delete prefixed branches.
-        let branches = api(&format!("projects/{}/repository/branches?per_page=100&search={prefix}", enc()));
+        let branches = api(&format!(
+            "projects/{}/repository/branches?per_page=100&search={prefix}",
+            enc()
+        ));
         if let Some(arr) = branches.as_array() {
             for b in arr {
                 if let Some(name) = b["name"].as_str()
                     && name.starts_with(prefix)
                 {
                     // Prefixed branch names are alphanumeric + hyphens — no encoding needed.
-                    glab_quiet(&["api", "-X", "DELETE", &format!("projects/{}/repository/branches/{name}", enc())]);
+                    glab_quiet(&[
+                        "api",
+                        "-X",
+                        "DELETE",
+                        &format!("projects/{}/repository/branches/{name}", enc()),
+                    ]);
                 }
             }
         }

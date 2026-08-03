@@ -107,16 +107,21 @@ impl ForgeClient {
                 ))
             }
         } else {
-            Ok(format!("{}/{}", self.base_url, path.trim_start_matches('/')))
+            Ok(format!(
+                "{}/{}",
+                self.base_url,
+                path.trim_start_matches('/')
+            ))
         }
     }
 
     /// GET a single JSON response.
     pub fn get(&self, path: &str) -> Result<serde_json::Value> {
-        let url = self.full_url(path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
-        let mut resp = self.agent.get(&url)
+        let mut resp = self
+            .agent
+            .get(&url)
             .header(header, &value)
             .header("Accept", "application/json")
             .call()
@@ -124,17 +129,21 @@ impl ForgeClient {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let body = resp.body_mut().read_to_string()
+            let body = resp
+                .body_mut()
+                .read_to_string()
                 .unwrap_or_else(|_| String::from("<unreadable>"));
             return Err(HttpError {
                 status,
                 method: "GET".to_string(),
                 path: path.to_string(),
                 body,
-            }.into());
+            }
+            .into());
         }
 
-        resp.body_mut().read_json()
+        resp.body_mut()
+            .read_json()
             .with_context(|| format!("failed to parse JSON from GET {path}"))
     }
 
@@ -159,8 +168,7 @@ impl ForgeClient {
         path: &str,
         body: &impl Serialize,
     ) -> Result<serde_json::Value> {
-        let url = self.full_url(path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
 
         let request = match method {
@@ -178,14 +186,17 @@ impl ForgeClient {
 
         let status = resp.status().as_u16();
         if status >= 400 {
-            let resp_body = resp.body_mut().read_to_string()
+            let resp_body = resp
+                .body_mut()
+                .read_to_string()
                 .unwrap_or_else(|_| String::from("<unreadable>"));
             return Err(HttpError {
                 status,
                 method: method.to_string(),
                 path: path.to_string(),
                 body: resp_body,
-            }.into());
+            }
+            .into());
         }
 
         // Some endpoints return 204 No Content or empty body on success
@@ -193,7 +204,9 @@ impl ForgeClient {
             return Ok(serde_json::Value::Null);
         }
 
-        let text = resp.body_mut().read_to_string()
+        let text = resp
+            .body_mut()
+            .read_to_string()
             .with_context(|| format!("failed to read response from {method} {path}"))?;
         if text.is_empty() {
             return Ok(serde_json::Value::Null);
@@ -213,13 +226,14 @@ impl ForgeClient {
     fn get_paginated_link(&self, path: &str) -> Result<Vec<serde_json::Value>> {
         const MAX_PAGES: usize = 100;
 
-        let mut url = self.full_url(path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
         let mut all_items = Vec::new();
 
         for _ in 0..MAX_PAGES {
-            let mut resp = self.agent.get(&url)
+            let mut resp = self
+                .agent
+                .get(&url)
                 .header(header, &value)
                 .header("Accept", "application/json")
                 .call()
@@ -227,25 +241,31 @@ impl ForgeClient {
 
             let status = resp.status().as_u16();
             if status >= 400 {
-                let body = resp.body_mut().read_to_string()
+                let body = resp
+                    .body_mut()
+                    .read_to_string()
                     .unwrap_or_else(|_| String::from("<unreadable>"));
                 return Err(HttpError {
                     status,
                     method: "GET".to_string(),
                     path: path.to_string(),
                     body,
-                }.into());
+                }
+                .into());
             }
 
             let next = extract_next_link(&resp);
 
-            let items: Vec<serde_json::Value> = resp.body_mut().read_json()
+            let items: Vec<serde_json::Value> = resp
+                .body_mut()
+                .read_json()
                 .with_context(|| format!("failed to parse paginated JSON from GET {path}"))?;
             all_items.extend(items);
 
             match next {
                 Some(next_url) => {
-                    url = self.full_url(&next_url)
+                    url = self
+                        .full_url(&next_url)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                 }
                 None => return Ok(all_items),
@@ -264,16 +284,10 @@ impl ForgeClient {
     /// [`Self::get_paginated`] cannot read them. Without this, only the first
     /// page is ever seen and a repo with more checks than fit on one page
     /// reports a status derived from an arbitrary subset.
-    pub fn get_paginated_envelope(
-        &self,
-        path: &str,
-        key: &str,
-    ) -> Result<Vec<serde_json::Value>> {
+    pub fn get_paginated_envelope(&self, path: &str, key: &str) -> Result<Vec<serde_json::Value>> {
         const MAX_PAGES: usize = 100;
 
-        let mut url = self
-            .full_url(path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
         let mut all_items = Vec::new();
 
@@ -330,9 +344,9 @@ impl ForgeClient {
 
         loop {
             let paged_path = format!("{path}{separator}page={page}&limit={limit}");
-            let items: Vec<serde_json::Value> = self.get(&paged_path)
-                .and_then(|v| serde_json::from_value(v)
-                    .context("failed to parse paginated response"))?;
+            let items: Vec<serde_json::Value> = self.get(&paged_path).and_then(|v| {
+                serde_json::from_value(v).context("failed to parse paginated response")
+            })?;
 
             let count = items.len();
             if count == 0 {
@@ -419,7 +433,6 @@ impl GraphQlError {
             },
         }
     }
-
 }
 
 impl fmt::Display for GraphQlError {
@@ -490,8 +503,7 @@ fn extract_next_link(resp: &http::Response<ureq::Body>) -> Option<String> {
     for part in link.split(',') {
         let part: &str = part.trim();
         if part.contains("rel=\"next\"") {
-            let url = part.split('<').nth(1)?
-                .split('>').next()?;
+            let url = part.split('<').nth(1)?.split('>').next()?;
             return Some(url.to_string());
         }
     }
@@ -602,7 +614,9 @@ mod tests {
         // rather than a failed command.
         assert!(envelope_items(&serde_json::json!({"total_count": 0}), "check_runs").is_empty());
         assert!(envelope_items(&serde_json::json!({"check_runs": null}), "check_runs").is_empty());
-        assert!(envelope_items(&serde_json::json!({"check_runs": "nope"}), "check_runs").is_empty());
+        assert!(
+            envelope_items(&serde_json::json!({"check_runs": "nope"}), "check_runs").is_empty()
+        );
         assert!(envelope_items(&serde_json::json!([]), "check_runs").is_empty());
     }
 
@@ -620,7 +634,10 @@ mod tests {
     #[test]
     fn test_extract_next_link_absent() {
         let resp = http::Response::builder()
-            .header("link", r#"<https://api.github.com/repos?page=5>; rel="last""#)
+            .header(
+                "link",
+                r#"<https://api.github.com/repos?page=5>; rel="last""#,
+            )
             .body(ureq::Body::builder().data(""))
             .expect("build response");
 
@@ -646,8 +663,14 @@ mod tests {
             AuthScheme::Bearer,
             PaginationStyle::LinkHeader,
         );
-        assert_eq!(client.full_url("repos/o/r").unwrap(), "https://api.github.com/repos/o/r");
-        assert_eq!(client.full_url("/repos/o/r").unwrap(), "https://api.github.com/repos/o/r");
+        assert_eq!(
+            client.full_url("repos/o/r").unwrap(),
+            "https://api.github.com/repos/o/r"
+        );
+        assert_eq!(
+            client.full_url("/repos/o/r").unwrap(),
+            "https://api.github.com/repos/o/r"
+        );
     }
 
     #[test]
@@ -659,7 +682,9 @@ mod tests {
             PaginationStyle::LinkHeader,
         );
         assert_eq!(
-            client.full_url("https://api.github.com/repos?page=2").unwrap(),
+            client
+                .full_url("https://api.github.com/repos?page=2")
+                .unwrap(),
             "https://api.github.com/repos?page=2"
         );
     }
@@ -679,24 +704,42 @@ mod tests {
 
     #[test]
     fn test_same_origin_matching() {
-        assert!(same_origin("https://api.github.com/v3", "https://api.github.com/repos?page=2"));
-        assert!(same_origin("https://gitlab.com/api/v4", "https://gitlab.com/other"));
+        assert!(same_origin(
+            "https://api.github.com/v3",
+            "https://api.github.com/repos?page=2"
+        ));
+        assert!(same_origin(
+            "https://gitlab.com/api/v4",
+            "https://gitlab.com/other"
+        ));
     }
 
     #[test]
     fn test_same_origin_different_host() {
-        assert!(!same_origin("https://api.github.com", "https://evil.com/steal"));
+        assert!(!same_origin(
+            "https://api.github.com",
+            "https://evil.com/steal"
+        ));
     }
 
     #[test]
     fn test_same_origin_different_scheme() {
-        assert!(!same_origin("https://api.github.com", "http://api.github.com/repos"));
+        assert!(!same_origin(
+            "https://api.github.com",
+            "http://api.github.com/repos"
+        ));
     }
 
     #[test]
     fn test_same_origin_with_port() {
-        assert!(same_origin("https://gitlab.local:8443/api", "https://gitlab.local:8443/v2"));
-        assert!(!same_origin("https://gitlab.local:8443/api", "https://gitlab.local:9999/v2"));
+        assert!(same_origin(
+            "https://gitlab.local:8443/api",
+            "https://gitlab.local:8443/v2"
+        ));
+        assert!(!same_origin(
+            "https://gitlab.local:8443/api",
+            "https://gitlab.local:9999/v2"
+        ));
     }
 
     #[test]

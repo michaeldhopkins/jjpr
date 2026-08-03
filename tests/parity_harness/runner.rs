@@ -1,6 +1,6 @@
 use std::process::{Command, Output};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::context::ParityContext;
 use super::scenario::{JjprCommand, RunSpec, Scenario, SetupStep};
@@ -53,7 +53,8 @@ pub fn run_setup(ctx: &ParityContext, scenario: &Scenario) -> Result<()> {
                 if !out.status.success() {
                     return Err(anyhow!(
                         "setup step #{i} (submit) failed:\nstdout: {}\nstderr: {}",
-                        out.stdout, out.stderr
+                        out.stdout,
+                        out.stderr
                     ));
                 }
             }
@@ -88,7 +89,10 @@ pub fn run_setup(ctx: &ParityContext, scenario: &Scenario) -> Result<()> {
                     ));
                 }
             }
-            SetupStep::WaitForMergeable { bookmark, timeout_secs } => {
+            SetupStep::WaitForMergeable {
+                bookmark,
+                timeout_secs,
+            } => {
                 let prefixed = resolve_bookmark(ctx, bookmark);
                 let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(60));
                 wait_for_mergeable(&prefixed, timeout)
@@ -145,7 +149,7 @@ fn invoke_jjpr(ctx: &ParityContext, args: &[String]) -> RunOutput {
 /// after operations like base retargeting, so without this poll an
 /// evaluate_segment call can transiently report MergeabilityUnknown.
 fn wait_for_mergeable(prefixed_head: &str, timeout: std::time::Duration) -> Result<()> {
-    use super::context::{find_pr_by_head, OWNER, REPO};
+    use super::context::{OWNER, REPO, find_pr_by_head};
 
     let pr = find_pr_by_head(prefixed_head)
         .ok_or_else(|| anyhow!("no PR for head '{prefixed_head}'"))?;
@@ -158,10 +162,15 @@ fn wait_for_mergeable(prefixed_head: &str, timeout: std::time::Duration) -> Resu
     while std::time::Instant::now() < deadline {
         let out = Command::new("gh")
             .args([
-                "pr", "view", &number.to_string(),
-                "--repo", &full_repo,
-                "--json", "mergeable",
-                "-q", ".mergeable",
+                "pr",
+                "view",
+                &number.to_string(),
+                "--repo",
+                &full_repo,
+                "--json",
+                "mergeable",
+                "-q",
+                ".mergeable",
             ])
             .output()
             .expect("gh pr view");
@@ -174,5 +183,7 @@ fn wait_for_mergeable(prefixed_head: &str, timeout: std::time::Duration) -> Resu
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
-    Err(anyhow!("PR #{number} mergeable stayed UNKNOWN beyond {timeout:?}"))
+    Err(anyhow!(
+        "PR #{number} mergeable stayed UNKNOWN beyond {timeout:?}"
+    ))
 }

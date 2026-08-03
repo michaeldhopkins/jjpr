@@ -18,7 +18,7 @@ mod parity_harness;
 use std::path::PathBuf;
 
 use parity_harness::assertions;
-use parity_harness::context::{gh_available, jj_available, scenarios_dir, ParityContext};
+use parity_harness::context::{ParityContext, gh_available, jj_available, scenarios_dir};
 use parity_harness::runner::{run_command, run_setup};
 use parity_harness::scenario::Scenario;
 
@@ -70,7 +70,10 @@ fn run_parity_scenarios() {
         }
     }
 
-    assert!(ran > 0, "no scenarios ran (PARITY_SCENARIO filter matched nothing?)");
+    assert!(
+        ran > 0,
+        "no scenarios ran (PARITY_SCENARIO filter matched nothing?)"
+    );
     if !failures.is_empty() {
         let summary: String = failures
             .iter()

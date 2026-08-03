@@ -74,10 +74,7 @@ fn cli_fallback(kind: ForgeKind) -> Option<String> {
 
 /// Run `gh auth token` to get the GitHub token from gh's credential store.
 fn gh_auth_token() -> Option<String> {
-    let output = Command::new("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()?;
+    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
 
     if !output.status.success() {
         return None;

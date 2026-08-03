@@ -13,7 +13,10 @@ pub enum BlockReason {
     Draft,
     ChecksFailing,
     ChecksPending,
-    InsufficientApprovals { have: u32, need: u32 },
+    InsufficientApprovals {
+        have: u32,
+        need: u32,
+    },
     ChangesRequested,
     Conflicted,
     MergeabilityUnknown,
@@ -308,7 +311,12 @@ pub fn create_merge_plan(
             .get(&segment.bookmark.name)
             .and_then(|pr| prefetched.get(&pr.number));
         let status = evaluate_segment(
-            github, &segment.bookmark.name, repo_info, &pr_map, options, bundle,
+            github,
+            &segment.bookmark.name,
+            repo_info,
+            &pr_map,
+            options,
+            bundle,
         )?;
         let is_blocked = matches!(&status, PrMergeStatus::Blocked { .. });
         actions.push(status);
@@ -332,7 +340,9 @@ pub fn create_merge_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::forge::types::{IssueComment, PrMergeability, PrState, PullRequestRef, ReviewSummary};
+    use crate::forge::types::{
+        IssueComment, PrMergeability, PrState, PullRequestRef, ReviewSummary,
+    };
     use crate::jj::types::{Bookmark, LogEntry};
     use std::collections::HashMap;
 
@@ -450,7 +460,16 @@ mod tests {
         fn mark_pr_ready(&self, o: &str, r: &str, n: u64) -> Result<()> {
             self.inner.mark_pr_ready(o, r, n)
         }
-        fn create_pr(&self, o: &str, r: &str, t: &str, b: &str, h: &str, ba: &str, d: bool) -> Result<PullRequest> {
+        fn create_pr(
+            &self,
+            o: &str,
+            r: &str,
+            t: &str,
+            b: &str,
+            h: &str,
+            ba: &str,
+            d: bool,
+        ) -> Result<PullRequest> {
             self.inner.create_pr(o, r, t, b, h, ba, d)
         }
         fn update_pr_base(&self, o: &str, r: &str, n: u64, b: &str) -> Result<()> {
@@ -502,21 +521,37 @@ mod tests {
         let batch = HashMap::from([(1, green_bundle())]);
         let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), Some(batch));
         let plan = create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &default_options(), None,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
             crate::config::StackNavMode::Comment,
         )
         .unwrap();
         assert!(matches!(plan.actions[0], PrMergeStatus::Mergeable { .. }));
-        assert_eq!(forge.per_pr_reads(), 0, "the batch should have answered everything");
+        assert_eq!(
+            forge.per_pr_reads(),
+            0,
+            "the batch should have answered everything"
+        );
     }
 
     #[test]
     fn without_a_batch_path_the_per_pr_reads_still_happen() {
         let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), None);
         let plan = create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &default_options(), None,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
             crate::config::StackNavMode::Comment,
         )
         .unwrap();
@@ -534,8 +569,14 @@ mod tests {
             None,
         );
         let plan = create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &default_options(), None,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
             crate::config::StackNavMode::Comment,
         )
         .unwrap();
@@ -566,10 +607,19 @@ mod tests {
     #[test]
     fn a_stacked_draft_pr_is_never_marked_ready() {
         let forge = StubGitHub::new().with_stacked_pr("auth", 1, 223, 1, 2);
-        let options = MergeOptions { ready: true, ..default_options() };
+        let options = MergeOptions {
+            ready: true,
+            ..default_options()
+        };
         let plan = create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &options, None,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &options,
+            None,
             crate::config::StackNavMode::Comment,
         )
         .unwrap();
@@ -585,8 +635,14 @@ mod tests {
     fn an_unstacked_pr_is_still_mergeable() {
         let forge = StubGitHub::new().with_mergeable_pr("auth", 1);
         let plan = create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &default_options(), None,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
             crate::config::StackNavMode::Comment,
         )
         .unwrap();
@@ -608,25 +664,48 @@ mod tests {
         };
         let stub = || {
             let mut s = StubGitHub::new().with_mergeable_pr("auth", 1);
-            s.mergeability.insert(1, PrMergeability {
-                mergeable: Some(false),
-                mergeable_state: "dirty".to_string(),
-            });
+            s.mergeability.insert(
+                1,
+                PrMergeability {
+                    mergeable: Some(false),
+                    mergeable_state: "dirty".to_string(),
+                },
+            );
             s.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
-            s.reviews.insert(1, ReviewSummary { approved_count: 0, changes_requested: true });
+            s.reviews.insert(
+                1,
+                ReviewSummary {
+                    approved_count: 0,
+                    changes_requested: true,
+                },
+            );
             s
         };
         let opts = default_options();
         let plan_batched = create_merge_plan(
             &CountingForge::new(stub(), Some(HashMap::from([(1, blocked)]))),
-            &[make_segment("auth")], &repo_info(), ForgeKind::GitHub, "main", "origin",
-            &opts, None, crate::config::StackNavMode::Comment,
-        ).unwrap();
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &opts,
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
         let plan_direct = create_merge_plan(
             &CountingForge::new(stub(), None),
-            &[make_segment("auth")], &repo_info(), ForgeKind::GitHub, "main", "origin",
-            &opts, None, crate::config::StackNavMode::Comment,
-        ).unwrap();
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &opts,
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
         assert_eq!(
             format!("{:?}", plan_batched.actions),
             format!("{:?}", plan_direct.actions),
@@ -641,8 +720,14 @@ mod tests {
         let batch = HashMap::from([(1, PrStatusBundle::default())]);
         let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), Some(batch));
         let plan = create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &default_options(), None,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
             crate::config::StackNavMode::Comment,
         )
         .unwrap();
@@ -650,7 +735,11 @@ mod tests {
             PrMergeStatus::Blocked { reasons, .. } => {
                 assert!(reasons.contains(&BlockReason::MergeabilityUnknown));
                 assert!(reasons.contains(&BlockReason::ChecksPending));
-                assert!(reasons.iter().any(|r| matches!(r, BlockReason::InsufficientApprovals { .. })));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, BlockReason::InsufficientApprovals { .. }))
+                );
             }
             other => panic!("an unanswered PR must block, got {other:?}"),
         }
@@ -664,8 +753,15 @@ mod tests {
         opts.require_ci_pass = false;
         let forge = CountingForge::new(StubGitHub::new().with_mergeable_pr("auth", 1), None);
         create_merge_plan(
-            &forge, &[make_segment("auth")], &repo_info(), ForgeKind::GitHub,
-            "main", "origin", &opts, None, crate::config::StackNavMode::Comment,
+            &forge,
+            &[make_segment("auth")],
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &opts,
+            None,
+            crate::config::StackNavMode::Comment,
         )
         .unwrap();
         assert!(
@@ -712,21 +808,35 @@ mod tests {
 
         fn with_mergeable_pr(mut self, name: &str, number: u64) -> Self {
             self.open_prs.push(make_pr(name, number));
-            self.mergeability.insert(number, PrMergeability {
-                mergeable: Some(true),
-                mergeable_state: "clean".to_string(),
-            });
-            self.checks.insert(format!("sha_{name}"), ChecksStatus::Pass);
-            self.reviews.insert(number, ReviewSummary {
-                approved_count: 1,
-                changes_requested: false,
-            });
+            self.mergeability.insert(
+                number,
+                PrMergeability {
+                    mergeable: Some(true),
+                    mergeable_state: "clean".to_string(),
+                },
+            );
+            self.checks
+                .insert(format!("sha_{name}"), ChecksStatus::Pass);
+            self.reviews.insert(
+                number,
+                ReviewSummary {
+                    approved_count: 1,
+                    changes_requested: false,
+                },
+            );
             self
         }
 
         /// A PR that is green on every axis but belongs to a native stack —
         /// isolating stack membership as the only thing that can block it.
-        fn with_stacked_pr(mut self, name: &str, number: u64, stack: u64, pos: u32, size: u32) -> Self {
+        fn with_stacked_pr(
+            mut self,
+            name: &str,
+            number: u64,
+            stack: u64,
+            pos: u32,
+            size: u32,
+        ) -> Self {
             self = self.with_mergeable_pr(name, number);
             let pr = self.open_prs.last_mut().expect("just pushed");
             pr.draft = true; // also proves the stack check runs before mark_pr_ready
@@ -770,18 +880,50 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no reviews stub for PR #{n}"))
         }
-        fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-        fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-        fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-        fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-        fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-        fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
+        fn create_pr(
+            &self,
+            _o: &str,
+            _r: &str,
+            _t: &str,
+            _b: &str,
+            _h: &str,
+            _ba: &str,
+            _d: bool,
+        ) -> Result<PullRequest> {
+            unimplemented!()
+        }
+        fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> {
+            unimplemented!()
+        }
+        fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+            unimplemented!()
+        }
+        fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> {
+            unimplemented!()
+        }
+        fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
+        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+            unimplemented!()
+        }
         fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-            Ok(PrState { merged: false, state: "open".to_string() })
+            Ok(PrState {
+                merged: false,
+                state: "open".to_string(),
+            })
         }
     }
 
@@ -792,11 +934,26 @@ mod tests {
             .with_mergeable_pr("profile", 2);
 
         let segments = vec![make_segment("auth"), make_segment("profile")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert_eq!(plan.actions.len(), 2);
-        assert!(matches!(&plan.actions[0], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "auth"));
-        assert!(matches!(&plan.actions[1], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "profile"));
+        assert!(
+            matches!(&plan.actions[0], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "auth")
+        );
+        assert!(
+            matches!(&plan.actions[1], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "profile")
+        );
     }
 
     #[test]
@@ -805,7 +962,18 @@ mod tests {
         gh.open_prs[0].draft = true;
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert_eq!(plan.actions.len(), 1);
         match &plan.actions[0] {
@@ -822,7 +990,18 @@ mod tests {
         gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -835,10 +1014,22 @@ mod tests {
     #[test]
     fn test_blocked_by_pending_ci() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.checks.insert("sha_auth".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_auth".to_string(), ChecksStatus::Pending);
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -851,13 +1042,27 @@ mod tests {
     #[test]
     fn test_blocked_by_insufficient_approvals() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.reviews.insert(1, ReviewSummary {
-            approved_count: 0,
-            changes_requested: false,
-        });
+        gh.reviews.insert(
+            1,
+            ReviewSummary {
+                approved_count: 0,
+                changes_requested: false,
+            },
+        );
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -873,13 +1078,27 @@ mod tests {
     #[test]
     fn test_blocked_by_changes_requested() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.reviews.insert(1, ReviewSummary {
-            approved_count: 1,
-            changes_requested: true,
-        });
+        gh.reviews.insert(
+            1,
+            ReviewSummary {
+                approved_count: 1,
+                changes_requested: true,
+            },
+        );
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -892,13 +1111,27 @@ mod tests {
     #[test]
     fn test_blocked_by_conflict() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.mergeability.insert(1, PrMergeability {
-            mergeable: Some(false),
-            mergeable_state: "dirty".to_string(),
-        });
+        gh.mergeability.insert(
+            1,
+            PrMergeability {
+                mergeable: Some(false),
+                mergeable_state: "dirty".to_string(),
+            },
+        );
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -911,13 +1144,27 @@ mod tests {
     #[test]
     fn test_blocked_by_unknown_mergeability() {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
-        gh.mergeability.insert(1, PrMergeability {
-            mergeable: None,
-            mergeable_state: "unknown".to_string(),
-        });
+        gh.mergeability.insert(
+            1,
+            PrMergeability {
+                mergeable: None,
+                mergeable_state: "unknown".to_string(),
+            },
+        );
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -932,7 +1179,18 @@ mod tests {
         let gh = StubGitHub::new();
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert_eq!(plan.actions.len(), 1);
         match &plan.actions[0] {
@@ -946,17 +1204,34 @@ mod tests {
     #[test]
     fn test_already_merged_then_mergeable() {
         let mut gh = StubGitHub::new().with_mergeable_pr("profile", 2);
-        gh.merged_prs.insert("auth".to_string(), PullRequest {
-            number: 1,
-            merged_at: Some("2024-01-01T00:00:00Z".to_string()),
-            ..make_pr("auth", 1)
-        });
+        gh.merged_prs.insert(
+            "auth".to_string(),
+            PullRequest {
+                number: 1,
+                merged_at: Some("2024-01-01T00:00:00Z".to_string()),
+                ..make_pr("auth", 1)
+            },
+        );
 
         let segments = vec![make_segment("auth"), make_segment("profile")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert_eq!(plan.actions.len(), 2);
-        assert!(matches!(&plan.actions[0], PrMergeStatus::AlreadyMerged { pr_number: 1, .. }));
+        assert!(matches!(
+            &plan.actions[0],
+            PrMergeStatus::AlreadyMerged { pr_number: 1, .. }
+        ));
         assert!(matches!(&plan.actions[1], PrMergeStatus::Mergeable { .. }));
     }
 
@@ -973,11 +1248,24 @@ mod tests {
             make_segment("profile"),
             make_segment("settings"),
         ];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         // Only auth should appear — the rest are not evaluated
         assert_eq!(plan.actions.len(), 1);
-        assert!(matches!(&plan.actions[0], PrMergeStatus::Blocked { bookmark_name, .. } if bookmark_name == "auth"));
+        assert!(
+            matches!(&plan.actions[0], PrMergeStatus::Blocked { bookmark_name, .. } if bookmark_name == "auth")
+        );
     }
 
     #[test]
@@ -989,7 +1277,18 @@ mod tests {
         options.require_ci_pass = false;
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &options, None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &options,
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert!(matches!(&plan.actions[0], PrMergeStatus::Mergeable { .. }));
     }
@@ -1000,7 +1299,18 @@ mod tests {
         gh.checks.insert("sha_auth".to_string(), ChecksStatus::None);
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert!(matches!(&plan.actions[0], PrMergeStatus::Blocked { .. }));
     }
@@ -1013,7 +1323,18 @@ mod tests {
         let mut options = default_options();
         options.require_ci_pass = false;
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &options, None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &options,
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert!(matches!(&plan.actions[0], PrMergeStatus::Mergeable { .. }));
     }
@@ -1023,20 +1344,38 @@ mod tests {
         let mut gh = StubGitHub::new().with_mergeable_pr("auth", 1);
         gh.open_prs[0].draft = true;
         gh.checks.insert("sha_auth".to_string(), ChecksStatus::Fail);
-        gh.reviews.insert(1, ReviewSummary {
-            approved_count: 0,
-            changes_requested: true,
-        });
+        gh.reviews.insert(
+            1,
+            ReviewSummary {
+                approved_count: 0,
+                changes_requested: true,
+            },
+        );
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
                 assert!(reasons.contains(&BlockReason::Draft));
                 assert!(reasons.contains(&BlockReason::ChecksFailing));
                 assert!(reasons.contains(&BlockReason::ChangesRequested));
-                assert!(reasons.iter().any(|r| matches!(r, BlockReason::InsufficientApprovals { .. })));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, BlockReason::InsufficientApprovals { .. }))
+                );
                 assert_eq!(reasons.len(), 4);
             }
             other => panic!("expected Blocked, got {other:?}"),
@@ -1050,7 +1389,18 @@ mod tests {
         gh.mergeability.remove(&1); // remove stub so it returns Err
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -1067,7 +1417,18 @@ mod tests {
         gh.checks.remove("sha_auth"); // remove stub so it returns Err
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
@@ -1084,11 +1445,26 @@ mod tests {
         gh.reviews.remove(&1); // remove stub so it returns Err
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         match &plan.actions[0] {
             PrMergeStatus::Blocked { reasons, .. } => {
-                assert!(reasons.iter().any(|r| matches!(r, BlockReason::InsufficientApprovals { .. })));
+                assert!(
+                    reasons
+                        .iter()
+                        .any(|r| matches!(r, BlockReason::InsufficientApprovals { .. }))
+                );
             }
             other => panic!("expected Blocked due to reviews API error, got {other:?}"),
         }
@@ -1103,7 +1479,18 @@ mod tests {
         options.required_approvals = 0;
 
         let segments = vec![make_segment("auth")];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &options, None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &options,
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert!(
             matches!(&plan.actions[0], PrMergeStatus::Mergeable { .. }),
@@ -1116,33 +1503,102 @@ mod tests {
     fn test_find_merged_pr_error_propagates() {
         struct ErrorGitHub;
         impl Forge for ErrorGitHub {
-            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
             fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
                 anyhow::bail!("network timeout")
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { unimplemented!() }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> { unimplemented!() }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(
+                &self,
+                _o: &str,
+                _r: &str,
+                _n: u64,
+                _revs: &[String],
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                unimplemented!()
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
         let segments = vec![make_segment("auth")];
-        let err = create_merge_plan(&ErrorGitHub, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap_err();
+        let err = create_merge_plan(
+            &ErrorGitHub,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("network timeout"), "should propagate the underlying error: {msg}");
-        assert!(msg.contains("auth"), "should mention the bookmark name: {msg}");
+        assert!(
+            msg.contains("network timeout"),
+            "should propagate the underlying error: {msg}"
+        );
+        assert!(
+            msg.contains("auth"),
+            "should mention the bookmark name: {msg}"
+        );
     }
 
     #[test]
@@ -1157,11 +1613,28 @@ mod tests {
             make_segment("profile"),
             make_segment("settings"),
         ];
-        let plan = create_merge_plan(&gh, &segments, &repo_info(), ForgeKind::GitHub, "main", "origin", &default_options(), None, crate::config::StackNavMode::Comment).unwrap();
+        let plan = create_merge_plan(
+            &gh,
+            &segments,
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            "origin",
+            &default_options(),
+            None,
+            crate::config::StackNavMode::Comment,
+        )
+        .unwrap();
 
         assert_eq!(plan.actions.len(), 3);
-        assert!(matches!(&plan.actions[0], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "auth"));
-        assert!(matches!(&plan.actions[1], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "profile"));
-        assert!(matches!(&plan.actions[2], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "settings"));
+        assert!(
+            matches!(&plan.actions[0], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "auth")
+        );
+        assert!(
+            matches!(&plan.actions[1], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "profile")
+        );
+        assert!(
+            matches!(&plan.actions[2], PrMergeStatus::Mergeable { bookmark_name, .. } if bookmark_name == "settings")
+        );
     }
 }

@@ -2,15 +2,14 @@
 
 use std::process::Command;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::{ForgeTestDriver, MergeMethod, OWNER, REPO};
 
 pub struct ForgejoDriver;
 
 pub fn available() -> bool {
-    std::env::var("FORGEJO_TOKEN").is_ok_and(|t| !t.is_empty())
-        && super::tool_available("curl")
+    std::env::var("FORGEJO_TOKEN").is_ok_and(|t| !t.is_empty()) && super::tool_available("curl")
 }
 
 const HOST: &str = "https://codeberg.org/api/v1";
@@ -19,9 +18,13 @@ const HOST: &str = "https://codeberg.org/api/v1";
 fn req(method: &str, path: &str, body: Option<Value>) -> Value {
     let token = std::env::var("FORGEJO_TOKEN").expect("FORGEJO_TOKEN");
     let mut args: Vec<String> = vec![
-        "-s".into(), "-X".into(), method.into(),
-        "-H".into(), format!("Authorization: token {token}"),
-        "-H".into(), "Content-Type: application/json".into(),
+        "-s".into(),
+        "-X".into(),
+        method.into(),
+        "-H".into(),
+        format!("Authorization: token {token}"),
+        "-H".into(),
+        "Content-Type: application/json".into(),
         format!("{HOST}/{path}"),
     ];
     if let Some(b) = body {
@@ -49,10 +52,16 @@ impl ForgeTestDriver for ForgejoDriver {
     }
 
     fn open_request(&self, head: &str, base: &str, title: &str) -> u64 {
-        let v = req("POST", &repo_path("pulls"), Some(json!({
-            "head": head, "base": base, "title": title, "body": "e2e fixture",
-        })));
-        v["number"].as_u64().unwrap_or_else(|| panic!("create PR failed: {v}"))
+        let v = req(
+            "POST",
+            &repo_path("pulls"),
+            Some(json!({
+                "head": head, "base": base, "title": title, "body": "e2e fixture",
+            })),
+        );
+        v["number"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("create PR failed: {v}"))
     }
 
     fn find_request_by_head(&self, head: &str) -> Option<u64> {
@@ -65,11 +74,17 @@ impl ForgeTestDriver for ForgejoDriver {
     }
 
     fn request_head_sha(&self, number: u64) -> String {
-        req("GET", &repo_path(&format!("pulls/{number}")), None)["head"]["sha"].as_str().unwrap_or("").to_string()
+        req("GET", &repo_path(&format!("pulls/{number}")), None)["head"]["sha"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
     }
 
     fn request_base(&self, number: u64) -> String {
-        req("GET", &repo_path(&format!("pulls/{number}")), None)["base"]["ref"].as_str().unwrap_or("").to_string()
+        req("GET", &repo_path(&format!("pulls/{number}")), None)["base"]["ref"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
     }
 
     fn boxed(&self) -> Box<dyn ForgeTestDriver> {
@@ -109,26 +124,43 @@ impl ForgeTestDriver for ForgejoDriver {
             MergeMethod::Squash => "squash",
             MergeMethod::Rebase => "rebase",
         };
-        req("POST", &repo_path(&format!("pulls/{number}/merge")), Some(json!({ "Do": do_ })));
+        req(
+            "POST",
+            &repo_path(&format!("pulls/{number}/merge")),
+            Some(json!({ "Do": do_ })),
+        );
     }
 
     fn set_dismiss_stale(&self, branch: &str) {
-        req("POST", &repo_path("branch_protections"), Some(json!({
-            "branch_name": branch,
-            "dismiss_stale_approvals": true,
-            "enable_approvals_whitelist": false,
-            "required_approvals": 1,
-        })));
+        req(
+            "POST",
+            &repo_path("branch_protections"),
+            Some(json!({
+                "branch_name": branch,
+                "dismiss_stale_approvals": true,
+                "enable_approvals_whitelist": false,
+                "required_approvals": 1,
+            })),
+        );
     }
 
     fn remove_protection(&self, branch: &str) {
-        req("DELETE", &repo_path(&format!("branch_protections/{branch}")), None);
+        req(
+            "DELETE",
+            &repo_path(&format!("branch_protections/{branch}")),
+            None,
+        );
     }
 
     fn jjpr_forge(&self) -> Box<dyn jjpr::forge::Forge> {
         use jjpr::forge::{AuthScheme, ForgeClient, ForgejoForge, PaginationStyle};
         let token = std::env::var("FORGEJO_TOKEN").expect("FORGEJO_TOKEN");
-        let client = ForgeClient::new("https://codeberg.org/api/v1", token, AuthScheme::Token, PaginationStyle::PageNumber { limit: 50 });
+        let client = ForgeClient::new(
+            "https://codeberg.org/api/v1",
+            token,
+            AuthScheme::Token,
+            PaginationStyle::PageNumber { limit: 50 },
+        );
         Box::new(ForgejoForge::new(client))
     }
 
@@ -139,7 +171,11 @@ impl ForgeTestDriver for ForgejoDriver {
                 if pr["head"]["ref"].as_str().unwrap_or("").starts_with(prefix)
                     && let Some(n) = pr["number"].as_u64()
                 {
-                    req("PATCH", &repo_path(&format!("pulls/{n}")), Some(json!({"state": "closed"})));
+                    req(
+                        "PATCH",
+                        &repo_path(&format!("pulls/{n}")),
+                        Some(json!({"state": "closed"})),
+                    );
                 }
             }
         }
@@ -149,7 +185,11 @@ impl ForgeTestDriver for ForgejoDriver {
                 if let Some(name) = bp["branch_name"].as_str()
                     && name.starts_with(prefix)
                 {
-                    req("DELETE", &repo_path(&format!("branch_protections/{name}")), None);
+                    req(
+                        "DELETE",
+                        &repo_path(&format!("branch_protections/{name}")),
+                        None,
+                    );
                 }
             }
         }

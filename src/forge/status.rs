@@ -14,8 +14,8 @@
 
 use std::collections::HashMap;
 
-use super::types::{PrStatusBundle, PullRequest, RepoInfo};
 use super::Forge;
+use super::types::{PrStatusBundle, PullRequest, RepoInfo};
 
 /// Ask the forge for as much of `prs` as it can answer in one go.
 ///
@@ -61,11 +61,10 @@ pub fn fetch_all(
         .filter(|pr| !bundles.contains_key(&pr.number))
         .copied()
         .collect();
-    let fetched = crate::parallel::map_bounded(
-        &missing,
-        crate::parallel::MAX_CONCURRENT_REQUESTS,
-        |pr| fetch_one(forge, repo_info, pr),
-    );
+    let fetched =
+        crate::parallel::map_bounded(&missing, crate::parallel::MAX_CONCURRENT_REQUESTS, |pr| {
+            fetch_one(forge, repo_info, pr)
+        });
     for (pr, bundle) in missing.iter().zip(fetched) {
         bundles.insert(pr.number, bundle);
     }
@@ -76,11 +75,7 @@ pub fn fetch_all(
 ///
 /// An error on any field becomes `None`, which every caller already treats as
 /// "unknown": `status` omits it, `merge` blocks on it.
-pub fn fetch_one(
-    forge: &dyn Forge,
-    repo_info: &RepoInfo,
-    pr: &PullRequest,
-) -> PrStatusBundle {
+pub fn fetch_one(forge: &dyn Forge, repo_info: &RepoInfo, pr: &PullRequest) -> PrStatusBundle {
     let mergeability = forge
         .get_pr_mergeability(&repo_info.owner, &repo_info.repo, pr.number)
         .ok();
@@ -124,15 +119,12 @@ pub fn fetch_checks(
         .filter(|pr| !out.contains_key(&pr.number))
         .copied()
         .collect();
-    let fetched = crate::parallel::map_bounded(
-        &missing,
-        crate::parallel::MAX_CONCURRENT_REQUESTS,
-        |pr| {
+    let fetched =
+        crate::parallel::map_bounded(&missing, crate::parallel::MAX_CONCURRENT_REQUESTS, |pr| {
             forge
                 .get_pr_checks_status(&repo_info.owner, &repo_info.repo, pr.checks_ref())
                 .ok()
-        },
-    );
+        });
     for (pr, checks) in missing.iter().zip(fetched) {
         if let Some(checks) = checks {
             out.insert(pr.number, checks);
@@ -143,11 +135,11 @@ pub fn fetch_checks(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::{
         ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequestRef,
         ReviewSummary,
     };
+    use super::*;
     use anyhow::Result;
     use std::sync::Mutex;
 
@@ -227,7 +219,16 @@ mod tests {
         fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
             unimplemented!()
         }
-        fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> {
+        fn create_pr(
+            &self,
+            _o: &str,
+            _r: &str,
+            _t: &str,
+            _b: &str,
+            _h: &str,
+            _ba: &str,
+            _d: bool,
+        ) -> Result<PullRequest> {
             unimplemented!()
         }
         fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
@@ -328,7 +329,10 @@ mod tests {
         let refs: Vec<&PullRequest> = prs.iter().collect();
         let out = fetch_all(&forge, &repo(), &refs);
         assert_eq!(out.len(), 3);
-        assert_eq!(RecordingForge::sorted(&forge.mergeability_calls), vec![1, 2, 3]);
+        assert_eq!(
+            RecordingForge::sorted(&forge.mergeability_calls),
+            vec![1, 2, 3]
+        );
         assert_eq!(RecordingForge::sorted(&forge.reviews_calls), vec![1, 2, 3]);
     }
 

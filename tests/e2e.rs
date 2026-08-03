@@ -3,8 +3,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
 use jjpr::forge::types::RepoInfo;
+use jjpr::forge::{AuthScheme, Forge, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
 use jjpr::graph::change_graph;
 use jjpr::identity::Identity;
 use jjpr::submit::{analyze, execute, plan, resolve};
@@ -89,7 +89,9 @@ impl E2eContext {
     }
 
     fn local_email(&self) -> String {
-        run_jj(&self.repo_path, &["config", "get", "user.email"]).trim().to_string()
+        run_jj(&self.repo_path, &["config", "get", "user.email"])
+            .trim()
+            .to_string()
     }
 }
 
@@ -100,13 +102,19 @@ impl Drop for E2eContext {
         // Close PRs with our prefix
         if let Ok(output) = Command::new("gh")
             .args([
-                "pr", "list", "--repo", &full_repo,
-                "--json", "number,headRefName",
-                "--state", "open", "--limit", "50",
+                "pr",
+                "list",
+                "--repo",
+                &full_repo,
+                "--json",
+                "number,headRefName",
+                "--state",
+                "open",
+                "--limit",
+                "50",
             ])
             .output()
-            && let Ok(prs) =
-                serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            && let Ok(prs) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
         {
             for pr in &prs {
                 let head = pr["headRefName"].as_str().unwrap_or("");
@@ -114,10 +122,7 @@ impl Drop for E2eContext {
                     let number = pr["number"].as_u64().unwrap_or(0);
                     if number > 0 {
                         let _ = Command::new("gh")
-                            .args([
-                                "pr", "close", &number.to_string(),
-                                "--repo", &full_repo,
-                            ])
+                            .args(["pr", "close", &number.to_string(), "--repo", &full_repo])
                             .output();
                     }
                 }
@@ -128,14 +133,10 @@ impl Drop for E2eContext {
         if let Ok(output) = Command::new("gh")
             .args([
                 "api",
-                &format!(
-                    "repos/{full_repo}/git/matching-refs/heads/{}",
-                    self.prefix
-                ),
+                &format!("repos/{full_repo}/git/matching-refs/heads/{}", self.prefix),
             ])
             .output()
-            && let Ok(refs) =
-                serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            && let Ok(refs) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
         {
             for r in &refs {
                 if let Some(ref_name) = r["ref"].as_str() {
@@ -143,7 +144,8 @@ impl Drop for E2eContext {
                         .args([
                             "api",
                             &format!("repos/{full_repo}/git/{ref_name}"),
-                            "-X", "DELETE",
+                            "-X",
+                            "DELETE",
                         ])
                         .output();
                 }
@@ -185,8 +187,7 @@ fn find_pr(head: &str) -> Option<serde_json::Value> {
         .output()
         .expect("gh pr list");
 
-    let prs: Vec<serde_json::Value> =
-        serde_json::from_slice(&output.stdout).ok()?;
+    let prs: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
     prs.into_iter().next()
 }
 
@@ -194,9 +195,15 @@ fn fetch_pr_body(pr_number: u64) -> String {
     let full_repo = format!("{OWNER}/{REPO}");
     let output = Command::new("gh")
         .args([
-            "pr", "view", &pr_number.to_string(),
-            "--repo", &full_repo,
-            "--json", "body", "--jq", ".body",
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--json",
+            "body",
+            "--jq",
+            ".body",
         ])
         .output()
         .expect("gh pr view body");
@@ -207,9 +214,13 @@ fn set_pr_body(pr_number: u64, body: &str) {
     let full_repo = format!("{OWNER}/{REPO}");
     let status = Command::new("gh")
         .args([
-            "pr", "edit", &pr_number.to_string(),
-            "--repo", &full_repo,
-            "--body", body,
+            "pr",
+            "edit",
+            &pr_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--body",
+            body,
         ])
         .status()
         .expect("gh pr edit body");
@@ -251,8 +262,12 @@ fn test_batch_refills_checks_beyond_the_graphql_page_cap() {
 
     let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
         .expect("GitHub token required for E2E tests");
-    let client =
-        ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+    let client = ForgeClient::new(
+        "https://api.github.com",
+        token,
+        AuthScheme::Bearer,
+        PaginationStyle::LinkHeader,
+    );
     let github = GitHubForge::new(client);
 
     // The head sha the batch keys checks off. Skip cleanly if the PR is gone.
@@ -271,8 +286,12 @@ fn test_batch_refills_checks_beyond_the_graphql_page_cap() {
     // PR no longer exceeds the cap.
     let count_token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
         .expect("GitHub token required for E2E tests");
-    let counter =
-        ForgeClient::new("https://api.github.com", count_token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+    let counter = ForgeClient::new(
+        "https://api.github.com",
+        count_token,
+        AuthScheme::Bearer,
+        PaginationStyle::LinkHeader,
+    );
     let encoded = jjpr::forge::http::url_encode(pr.checks_ref());
     let runs = counter
         .get_paginated_envelope(
@@ -281,7 +300,10 @@ fn test_batch_refills_checks_beyond_the_graphql_page_cap() {
         )
         .expect("counting check-runs must succeed");
     if runs.len() <= 100 {
-        eprintln!("PR #{pr_number} now has {} check-runs (<=100); refill not exercised — pick another PR", runs.len());
+        eprintln!(
+            "PR #{pr_number} now has {} check-runs (<=100); refill not exercised — pick another PR",
+            runs.len()
+        );
         return;
     }
 
@@ -337,30 +359,36 @@ fn test_submit_creates_stacked_prs() {
     let jj = ctx.runner();
     let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
         .expect("GitHub token required for E2E tests");
-    let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+    let client = ForgeClient::new(
+        "https://api.github.com",
+        token,
+        AuthScheme::Bearer,
+        PaginationStyle::LinkHeader,
+    );
     let github = GitHubForge::new(client);
 
     let graph = change_graph::build_change_graph(&jj).unwrap();
-    let analysis =
-        analyze::analyze_submission_graph(&graph, &profile_name).unwrap();
+    let analysis = analyze::analyze_submission_graph(&graph, &profile_name).unwrap();
     assert_eq!(
         analysis.relevant_segments.len(),
         2,
         "should have 2 segments in stack"
     );
 
-    let segments = resolve::resolve_bookmark_selections(
-        &analysis.relevant_segments,
-        false,
-    )
-    .unwrap();
+    let segments =
+        resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
 
     let repo_info = RepoInfo {
         owner: OWNER.to_string(),
         repo: REPO.to_string(),
     };
     let submission_plan = plan::create_submission_plan(
-        &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main",
+        &github,
+        &segments,
+        "origin",
+        &repo_info,
+        ForgeKind::GitHub,
+        "main",
         &plan::SubmitOptions {
             draft_mode: plan::DraftMode::Default,
             reviewers: &[],
@@ -387,45 +415,30 @@ fn test_submit_creates_stacked_prs() {
     assert!(auth_pr.is_some(), "auth PR should exist");
     let auth_pr = auth_pr.unwrap();
     assert_eq!(auth_pr["baseRefName"].as_str().unwrap(), "main");
-    assert_eq!(
-        auth_pr["title"].as_str().unwrap(),
-        "Add authentication"
-    );
+    assert_eq!(auth_pr["title"].as_str().unwrap(), "Add authentication");
 
     let profile_pr = find_pr(&profile_name);
     assert!(profile_pr.is_some(), "profile PR should exist");
     let profile_pr = profile_pr.unwrap();
-    assert_eq!(
-        profile_pr["baseRefName"].as_str().unwrap(),
-        auth_name
-    );
-    assert_eq!(
-        profile_pr["title"].as_str().unwrap(),
-        "Add user profile"
-    );
+    assert_eq!(profile_pr["baseRefName"].as_str().unwrap(), auth_name);
+    assert_eq!(profile_pr["title"].as_str().unwrap(), "Add user profile");
 
     // Verify stack comments exist on both PRs
-    let auth_comments =
-        list_comments(auth_pr["number"].as_u64().unwrap());
+    let auth_comments = list_comments(auth_pr["number"].as_u64().unwrap());
     assert!(
-        auth_comments
-            .iter()
-            .any(|c| c["body"]
-                .as_str()
-                .unwrap_or("")
-                .contains("<!-- jjpr:stack-info -->")),
+        auth_comments.iter().any(|c| c["body"]
+            .as_str()
+            .unwrap_or("")
+            .contains("<!-- jjpr:stack-info -->")),
         "auth PR should have stack comment"
     );
 
-    let profile_comments =
-        list_comments(profile_pr["number"].as_u64().unwrap());
+    let profile_comments = list_comments(profile_pr["number"].as_u64().unwrap());
     assert!(
-        profile_comments
-            .iter()
-            .any(|c| c["body"]
-                .as_str()
-                .unwrap_or("")
-                .contains("<!-- jjpr:stack-info -->")),
+        profile_comments.iter().any(|c| c["body"]
+            .as_str()
+            .unwrap_or("")
+            .contains("<!-- jjpr:stack-info -->")),
         "profile PR should have stack comment"
     );
 }
@@ -474,15 +487,15 @@ fn test_submit_preserves_hand_edited_description() {
     };
     let submit = || {
         let graph = change_graph::build_change_graph(&jj).unwrap();
-        let analysis =
-            analyze::analyze_submission_graph(&graph, &name).unwrap();
-        let segments = resolve::resolve_bookmark_selections(
-            &analysis.relevant_segments,
-            false,
-        )
-        .unwrap();
+        let analysis = analyze::analyze_submission_graph(&graph, &name).unwrap();
+        let segments =
+            resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
         let p = plan::create_submission_plan(
-            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub,
+            &github(),
+            &segments,
+            "origin",
+            &repo_info,
+            ForgeKind::GitHub,
             "main",
             &plan::SubmitOptions {
                 draft_mode: plan::DraftMode::Default,
@@ -599,20 +612,20 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
     // First submit: both PRs created, both should have stack comments.
     {
         let graph = change_graph::build_change_graph(&jj).unwrap();
-        let analysis =
-            analyze::analyze_submission_graph(&graph, &top_name).unwrap();
-        let segments = resolve::resolve_bookmark_selections(
-            &analysis.relevant_segments,
-            false,
-        )
-        .unwrap();
+        let analysis = analyze::analyze_submission_graph(&graph, &top_name).unwrap();
+        let segments =
+            resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
         let plan = plan::create_submission_plan(
-            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub,
-            "main", &opts(),
+            &github(),
+            &segments,
+            "origin",
+            &repo_info,
+            ForgeKind::GitHub,
+            "main",
+            &opts(),
         )
         .unwrap();
-        execute::execute_submission_plan(&jj, &github(), &plan)
-            .unwrap();
+        execute::execute_submission_plan(&jj, &github(), &plan).unwrap();
     }
 
     let bottom_pr = find_pr(&bottom_name).expect("bottom PR exists");
@@ -626,9 +639,13 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
     // a user lands in before re-running submit.
     let merge_status = Command::new("gh")
         .args([
-            "pr", "merge", &bottom_number.to_string(),
-            "--repo", &full_repo,
-            "--squash", "--admin",
+            "pr",
+            "merge",
+            &bottom_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--squash",
+            "--admin",
         ])
         .status()
         .expect("gh pr merge");
@@ -643,20 +660,20 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
     // render it in the <details> block.
     {
         let graph = change_graph::build_change_graph(&jj).unwrap();
-        let analysis =
-            analyze::analyze_submission_graph(&graph, &top_name).unwrap();
-        let segments = resolve::resolve_bookmark_selections(
-            &analysis.relevant_segments,
-            false,
-        )
-        .unwrap();
+        let analysis = analyze::analyze_submission_graph(&graph, &top_name).unwrap();
+        let segments =
+            resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
         let plan = plan::create_submission_plan(
-            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub,
-            "main", &opts(),
+            &github(),
+            &segments,
+            "origin",
+            &repo_info,
+            ForgeKind::GitHub,
+            "main",
+            &opts(),
         )
         .unwrap();
-        execute::execute_submission_plan(&jj, &github(), &plan)
-            .unwrap();
+        execute::execute_submission_plan(&jj, &github(), &plan).unwrap();
     }
 
     // Inspect top's stack comment.
@@ -758,7 +775,13 @@ fn test_watch_target_findable_through_bottom_squash_merge() {
         let segments =
             resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
         let plan = plan::create_submission_plan(
-            &github(), &segments, "origin", &repo_info, ForgeKind::GitHub, "main", &opts,
+            &github(),
+            &segments,
+            "origin",
+            &repo_info,
+            ForgeKind::GitHub,
+            "main",
+            &opts,
         )
         .unwrap();
         execute::execute_submission_plan(&jj, &github(), &plan).unwrap();
@@ -778,8 +801,13 @@ fn test_watch_target_findable_through_bottom_squash_merge() {
     // Squash-merge the bottom PR (--admin bypasses required-review on the test repo).
     let merge_status = Command::new("gh")
         .args([
-            "pr", "merge", &bottom_number.to_string(),
-            "--repo", &full_repo, "--squash", "--admin",
+            "pr",
+            "merge",
+            &bottom_number.to_string(),
+            "--repo",
+            &full_repo,
+            "--squash",
+            "--admin",
         ])
         .status()
         .expect("gh pr merge");
@@ -831,19 +859,37 @@ fn test_status_recognizes_your_pr_committed_under_another_email() {
     let ctx = E2eContext::new();
     let name = ctx.bookmark_name("othermachine");
     let other_email = "e2e-other-machine@invalid.example";
-    ctx.commit_as(other_email, &format!("{name}.rs"), "// other machine\n", "Work from another machine", &name);
+    ctx.commit_as(
+        other_email,
+        &format!("{name}.rs"),
+        "// other machine\n",
+        "Work from another machine",
+        &name,
+    );
 
     // Create the PR (opened by the authenticated user) using an identity that
     // includes the foreign email, so setup discovery finds the branch.
     let mut jj = ctx.runner();
-    jj.set_identity(&Identity { emails: vec![other_email.to_string()], logins: vec![] });
+    jj.set_identity(&Identity {
+        emails: vec![other_email.to_string()],
+        logins: vec![],
+    });
     let github = github_forge();
-    let repo_info = RepoInfo { owner: OWNER.to_string(), repo: REPO.to_string() };
+    let repo_info = RepoInfo {
+        owner: OWNER.to_string(),
+        repo: REPO.to_string(),
+    };
     let graph = change_graph::build_change_graph(&jj).unwrap();
     let analysis = analyze::analyze_submission_graph(&graph, &name).unwrap();
-    let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
+    let segments =
+        resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap();
     let submission_plan = plan::create_submission_plan(
-        &github, &segments, "origin", &repo_info, ForgeKind::GitHub, "main",
+        &github,
+        &segments,
+        "origin",
+        &repo_info,
+        ForgeKind::GitHub,
+        "main",
         &plan::SubmitOptions {
             draft_mode: plan::DraftMode::Default,
             reviewers: &[],
@@ -871,10 +917,22 @@ fn test_status_recognizes_your_pr_committed_under_another_email() {
         "status failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains(&name), "status should show the branch: {stdout}");
-    assert!(!stdout.contains("someone else's"), "must not read as someone else's: {stdout}");
-    assert!(!stdout.contains("won't submit or merge"), "must be actionable as yours: {stdout}");
-    assert!(!stdout.contains(" by @"), "yours must not be attributed to another: {stdout}");
+    assert!(
+        stdout.contains(&name),
+        "status should show the branch: {stdout}"
+    );
+    assert!(
+        !stdout.contains("someone else's"),
+        "must not read as someone else's: {stdout}"
+    );
+    assert!(
+        !stdout.contains("won't submit or merge"),
+        "must be actionable as yours: {stdout}"
+    );
+    assert!(
+        !stdout.contains(" by @"),
+        "yours must not be attributed to another: {stdout}"
+    );
 }
 
 /// Tier 2 (auto-augmentation): `submit` recognizes a branch authored under a
@@ -896,7 +954,9 @@ fn test_submit_auto_fetches_verified_emails_for_other_machine_work() {
     // Precondition, via the SAME token jjpr uses: a fetchable verified email
     // distinct from the local one. No such thing (missing `user` scope, or only
     // one verified email) → Tier 2 can't auto-recover here; skip.
-    let verified = github_forge().get_authenticated_emails().unwrap_or_default();
+    let verified = github_forge()
+        .get_authenticated_emails()
+        .unwrap_or_default();
     let local = ctx.local_email();
     let Some(other_email) = verified.into_iter().find(|e| *e != local) else {
         println!(
@@ -907,7 +967,13 @@ fn test_submit_auto_fetches_verified_emails_for_other_machine_work() {
     };
 
     let name = ctx.bookmark_name("tier2");
-    ctx.commit_as(&other_email, &format!("{name}.rs"), "// tier2\n", "Other-machine work", &name);
+    ctx.commit_as(
+        &other_email,
+        &format!("{name}.rs"),
+        "// tier2\n",
+        "Other-machine work",
+        &name,
+    );
 
     // `submit --dry-run` with no bookmark: the seed (local email) can't see this
     // branch, but Tier 2 fetches the verified emails, recognizes it, and infers.
@@ -946,7 +1012,13 @@ fn test_submit_recognizes_other_email_branch_via_identity_config() {
     let ctx = E2eContext::new();
     let other_email = "e2e-config-backstop@invalid.example";
     let name = ctx.bookmark_name("configid");
-    ctx.commit_as(other_email, &format!("{name}.rs"), "// config backstop\n", "Other-machine work", &name);
+    ctx.commit_as(
+        other_email,
+        &format!("{name}.rs"),
+        "// config backstop\n",
+        "Other-machine work",
+        &name,
+    );
 
     // Declare the email as one of yours — no forge fetch involved.
     std::fs::write(

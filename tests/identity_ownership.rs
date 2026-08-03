@@ -27,7 +27,13 @@ impl Repo {
         let repo = Self { dir };
         repo.run(&["git", "init"]);
         repo.run(&["config", "set", "--repo", "user.name", "Me"]);
-        repo.run(&["config", "set", "--repo", "user.email", "me@example.invalid"]);
+        repo.run(&[
+            "config",
+            "set",
+            "--repo",
+            "user.email",
+            "me@example.invalid",
+        ]);
         repo
     }
     fn path(&self) -> &Path {
@@ -50,7 +56,10 @@ fn names(bookmarks: Vec<Bookmark>) -> HashSet<String> {
 }
 
 fn id(emails: &[&str]) -> Identity {
-    Identity { emails: emails.iter().map(|s| s.to_string()).collect(), logins: vec![] }
+    Identity {
+        emails: emails.iter().map(|s| s.to_string()).collect(),
+        logins: vec![],
+    }
 }
 
 /// Two sibling bookmarks authored under two different emails.
@@ -75,12 +84,18 @@ fn owned_revset_scopes_get_my_bookmarks() {
     jj.set_identity(&id(&["a@x.com"]));
     let a_only = names(jj.get_my_bookmarks().expect("get_my_bookmarks"));
     assert!(a_only.contains("bmA"), "{a_only:?}");
-    assert!(!a_only.contains("bmB"), "one-email discovery must exclude the other: {a_only:?}");
+    assert!(
+        !a_only.contains("bmB"),
+        "one-email discovery must exclude the other: {a_only:?}"
+    );
 
     // Both emails → both bookmarks: your second-machine work is now yours.
     jj.set_identity(&id(&["a@x.com", "b@x.com"]));
     let both = names(jj.get_my_bookmarks().expect("get_my_bookmarks"));
-    assert!(both.contains("bmA") && both.contains("bmB"), "union must include both: {both:?}");
+    assert!(
+        both.contains("bmA") && both.contains("bmB"),
+        "union must include both: {both:?}"
+    );
 }
 
 #[test]
@@ -96,11 +111,17 @@ fn owned_revset_scopes_broad_status_discovery() {
 
     jj.set_identity(&id(&["a@x.com", "b@x.com"]));
     let both = names(jj.get_status_bookmarks(true).expect("get_status_bookmarks"));
-    assert!(both.contains("bmA") && both.contains("bmB"), "broad status union: {both:?}");
+    assert!(
+        both.contains("bmA") && both.contains("bmB"),
+        "broad status union: {both:?}"
+    );
 
     jj.set_identity(&id(&["a@x.com"]));
     let a_only = names(jj.get_status_bookmarks(true).expect("get_status_bookmarks"));
-    assert!(a_only.contains("bmA") && !a_only.contains("bmB"), "broad status scoped: {a_only:?}");
+    assert!(
+        a_only.contains("bmA") && !a_only.contains("bmB"),
+        "broad status scoped: {a_only:?}"
+    );
 }
 
 /// Regression: the default identity (never calling `set_identity`) behaves like
@@ -114,13 +135,25 @@ fn default_identity_matches_local_email_only() {
     // Authored under the repo's own user.email (the resolved local identity).
     repo.run(&["new", "root()", "-m", "mine"]);
     repo.run(&["bookmark", "set", "local", "-r", "@"]);
-    repo.run(&["new", "root()", "--config=user.email=other@x.com", "-m", "other"]);
+    repo.run(&[
+        "new",
+        "root()",
+        "--config=user.email=other@x.com",
+        "-m",
+        "other",
+    ]);
     repo.run(&["bookmark", "set", "foreign", "-r", "@"]);
 
     let jj = JjRunner::new(repo.path().to_path_buf()).expect("runner");
     // No set_identity → owned_revset stays `mine()`: the local-email bookmark is
     // yours, the other-email one is not — byte-for-byte the prior behavior.
     let mine = names(jj.get_my_bookmarks().expect("get_my_bookmarks"));
-    assert!(mine.contains("local"), "default mine() must include local-email work: {mine:?}");
-    assert!(!mine.contains("foreign"), "default mine() must exclude other-email work: {mine:?}");
+    assert!(
+        mine.contains("local"),
+        "default mine() must include local-email work: {mine:?}"
+    );
+    assert!(
+        !mine.contains("foreign"),
+        "default mine() must exclude other-email work: {mine:?}"
+    );
 }
