@@ -37,13 +37,27 @@ fn setup_forgejo_config_repo(forge_token_env: &str) -> (TempDir, TempDir) {
     run_cmd("jj", &["git", "init", "--colocate"], repo_dir.path());
 
     let repo = repo_dir.path();
-    run_cmd("jj", &["config", "set", "--repo", "user.name", "Test"], repo);
-    run_cmd("jj", &["config", "set", "--repo", "user.email", "t@t.dev"], repo);
+    run_cmd(
+        "jj",
+        &["config", "set", "--repo", "user.name", "Test"],
+        repo,
+    );
+    run_cmd(
+        "jj",
+        &["config", "set", "--repo", "user.email", "t@t.dev"],
+        repo,
+    );
 
     // Self-hosted Forgejo URL that won't be auto-detected
     run_cmd(
         "jj",
-        &["git", "remote", "add", "origin", "https://forgejo.mycompany.com/team/project.git"],
+        &[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://forgejo.mycompany.com/team/project.git",
+        ],
         repo,
     );
 
@@ -53,9 +67,7 @@ fn setup_forgejo_config_repo(forge_token_env: &str) -> (TempDir, TempDir) {
     run_cmd("jj", &["bookmark", "set", "test-branch"], repo);
 
     // Write repo-local config
-    let config = format!(
-        "forge = \"forgejo\"\nforge_token_env = \"{forge_token_env}\"\n"
-    );
+    let config = format!("forge = \"forgejo\"\nforge_token_env = \"{forge_token_env}\"\n");
     std::fs::write(repo.join(".jj").join("jjpr.toml"), config).expect("write config");
 
     (origin_dir, repo_dir)
@@ -93,7 +105,9 @@ fn test_submit_help() {
         .args(["submit", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Push bookmarks and create/update pull requests"))
+        .stdout(predicate::str::contains(
+            "Push bookmarks and create/update pull requests",
+        ))
         .stdout(predicate::str::contains("--reviewer"))
         .stdout(predicate::str::contains("--remote"))
         .stdout(predicate::str::contains("--draft"))
@@ -127,7 +141,9 @@ fn test_auth_setup_help() {
         .args(["auth", "setup", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Show authentication setup instructions"));
+        .stdout(predicate::str::contains(
+            "Show authentication setup instructions",
+        ));
 }
 
 #[test]
@@ -181,7 +197,9 @@ fn test_merge_help() {
         .args(["merge", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Merge a stack of PRs from the bottom up"))
+        .stdout(predicate::str::contains(
+            "Merge a stack of PRs from the bottom up",
+        ))
         .stdout(predicate::str::contains("--merge-method"))
         .stdout(predicate::str::contains("--required-approvals"))
         .stdout(predicate::str::contains("--no-ci-check"))

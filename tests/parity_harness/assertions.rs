@@ -1,6 +1,6 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
-use super::context::{fetch_pr_detail, find_pr_by_head, list_comments, ParityContext};
+use super::context::{ParityContext, fetch_pr_detail, find_pr_by_head, list_comments};
 use super::runner::RunOutput;
 use super::scenario::{
     CommentExpectation, ExitStatus, Expectations, PrExpectation, PrStateExpect, Scenario,
@@ -8,11 +8,7 @@ use super::scenario::{
 
 /// Run every assertion against the captured output and live forge state.
 /// Returns Ok(()) if all pass, Err with the first failing assertion otherwise.
-pub fn check(
-    ctx: &ParityContext,
-    scenario: &Scenario,
-    output: &RunOutput,
-) -> Result<()> {
+pub fn check(ctx: &ParityContext, scenario: &Scenario, output: &RunOutput) -> Result<()> {
     check_exit(&scenario.expect, output)?;
     check_stderr(ctx, &scenario.expect, output)?;
     for pr_expect in &scenario.expect.prs {
@@ -29,11 +25,14 @@ fn check_exit(expect: &Expectations, output: &RunOutput) -> Result<()> {
     match expect.exit_status {
         ExitStatus::Success if !succeeded => bail!(
             "expected success, got exit {:?}\nstdout: {}\nstderr: {}",
-            output.status.code(), output.stdout, output.stderr
+            output.status.code(),
+            output.stdout,
+            output.stderr
         ),
         ExitStatus::Failure if succeeded => bail!(
             "expected failure, got success\nstdout: {}\nstderr: {}",
-            output.stdout, output.stderr
+            output.stdout,
+            output.stderr
         ),
         _ => Ok(()),
     }
@@ -96,7 +95,8 @@ fn check_pr(ctx: &ParityContext, expect: &PrExpectation) -> Result<()> {
             ),
             (_, None) => bail!(
                 "expected PR for bookmark '{}' with state {:?}, found nothing",
-                expect.bookmark, state_expect
+                expect.bookmark,
+                state_expect
             ),
             (want, Some(pr)) => {
                 let actual = pr["state"].as_str().unwrap_or("");
@@ -113,7 +113,9 @@ fn check_pr(ctx: &ParityContext, expect: &PrExpectation) -> Result<()> {
                 if !matches {
                     bail!(
                         "PR for '{}' had state '{}', expected {:?}",
-                        expect.bookmark, actual, want
+                        expect.bookmark,
+                        actual,
+                        want
                     );
                 }
             }

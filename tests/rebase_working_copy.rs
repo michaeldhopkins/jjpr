@@ -26,14 +26,24 @@ impl Repo {
     fn new() -> Self {
         let dir = TempDir::new().expect("tempdir");
         assert!(
-            Command::new("jj").args(["git", "init"]).current_dir(dir.path()).output().unwrap().status.success(),
+            Command::new("jj")
+                .args(["git", "init"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .status
+                .success(),
             "jj git init failed"
         );
         // Set the user at the repo level so JjRunner (which doesn't pass a
         // per-command --config) sees the same author as our commits — otherwise
         // `mine()` in get_my_bookmarks matches nothing.
         for (k, v) in [("user.name", "T"), ("user.email", "t@e.com")] {
-            Command::new("jj").args(["config", "set", "--repo", k, v]).current_dir(dir.path()).output().unwrap();
+            Command::new("jj")
+                .args(["config", "set", "--repo", k, v])
+                .current_dir(dir.path())
+                .output()
+                .unwrap();
         }
         Self { dir }
     }
@@ -49,7 +59,9 @@ impl Repo {
             .expect("jj command")
     }
     fn out(&self, args: &[&str]) -> String {
-        String::from_utf8_lossy(&self.jj(args).stdout).trim().to_string()
+        String::from_utf8_lossy(&self.jj(args).stdout)
+            .trim()
+            .to_string()
     }
     fn write(&self, name: &str, content: &str) {
         std::fs::write(self.path().join(name), content).unwrap();
@@ -58,7 +70,15 @@ impl Repo {
         JjRunner::new(self.path().to_path_buf()).unwrap()
     }
     fn at_commit(&self) -> String {
-        self.out(&["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"])
+        self.out(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
     }
     /// True if a plain `jj status` succeeds (i.e. the working copy is NOT stale).
     fn status_ok(&self) -> bool {
@@ -74,7 +94,14 @@ impl Repo {
         self.write("bot.txt", "bot\n");
         self.jj(&["status"]);
         self.jj(&["bookmark", "create", "botB", "-r", "@"]);
-        let bot_change = self.out(&["log", "-r", "botB", "--no-graph", "-T", "change_id.short(8)"]);
+        let bot_change = self.out(&[
+            "log",
+            "-r",
+            "botB",
+            "--no-graph",
+            "-T",
+            "change_id.short(8)",
+        ]);
         self.jj(&["new", "-m", "TOP"]);
         self.write("top.txt", "top1\n");
         self.jj(&["status"]);
@@ -113,8 +140,19 @@ fn rebase_leaves_unrelated_working_copy_untouched() {
         "the user's uncommitted edit must survive"
     );
     // And the stack actually rebased onto the merged trunk.
-    let parent = r.out(&["--ignore-working-copy", "log", "-r", "botB", "--no-graph", "-T", "parents.map(|p| p.description().first_line()).join(\",\")"]);
-    assert_eq!(parent, "MERGED", "stack should be rebased onto the merged trunk");
+    let parent = r.out(&[
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        "botB",
+        "--no-graph",
+        "-T",
+        "parents.map(|p| p.description().first_line()).join(\",\")",
+    ]);
+    assert_eq!(
+        parent, "MERGED",
+        "stack should be rebased onto the merged trunk"
+    );
 }
 
 /// `@` is ON the stack (the user is editing topB) when the bottom merges: the
@@ -133,16 +171,38 @@ fn rebase_updates_working_copy_when_user_is_on_the_stack() {
 
     r.runner().rebase_onto(&bot_change, "master").unwrap();
 
-    assert!(r.status_ok(), "working copy must be updated, not left stale");
+    assert!(
+        r.status_ok(),
+        "working copy must be updated, not left stale"
+    );
     // @ followed the rebase: it is (still) topB, now rebased so botB sits on the
     // merged trunk.
-    let at_desc = r.out(&["log", "-r", "@", "--no-graph", "-T", "description.first_line()"]);
+    let at_desc = r.out(&[
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "description.first_line()",
+    ]);
     assert_eq!(at_desc, "TOP", "@ should still be the user's TOP commit");
-    let bot_parent = r.out(&["log", "-r", "botB", "--no-graph", "-T", "parents.map(|p| p.description().first_line()).join(\",\")"]);
-    assert_eq!(bot_parent, "MERGED", "the stack rebased onto the merged trunk");
+    let bot_parent = r.out(&[
+        "log",
+        "-r",
+        "botB",
+        "--no-graph",
+        "-T",
+        "parents.map(|p| p.description().first_line()).join(\",\")",
+    ]);
+    assert_eq!(
+        bot_parent, "MERGED",
+        "the stack rebased onto the merged trunk"
+    );
     // The edit is preserved (in the working copy / commit, not lost).
     assert!(
-        std::fs::read_to_string(r.path().join("top.txt")).unwrap().contains("my-precious-wip"),
+        std::fs::read_to_string(r.path().join("top.txt"))
+            .unwrap()
+            .contains("my-precious-wip"),
         "the user's edit must be carried along the rebase"
     );
 }
@@ -163,7 +223,11 @@ fn merge_leaves_unrelated_working_copy_untouched() {
 
     r.runner().merge_into("topB", "master").unwrap();
 
-    assert_eq!(r.at_commit(), at_before, "unrelated @ must not move/snapshot for a merge");
+    assert_eq!(
+        r.at_commit(),
+        at_before,
+        "unrelated @ must not move/snapshot for a merge"
+    );
     assert!(r.status_ok(), "working copy must not be left stale");
     assert_eq!(
         std::fs::read_to_string(r.path().join("wip.txt")).unwrap(),
@@ -190,9 +254,15 @@ fn reads_do_not_snapshot_the_working_copy() {
     let _ = runner.get_git_remotes().unwrap();
     let _ = runner.is_conflicted("@").unwrap();
 
-    assert_eq!(r.at_commit(), at_before, "reads must not snapshot the user's WIP");
+    assert_eq!(
+        r.at_commit(),
+        at_before,
+        "reads must not snapshot the user's WIP"
+    );
     assert!(
-        std::fs::read_to_string(r.path().join("scratch.txt")).unwrap().contains("wip"),
+        std::fs::read_to_string(r.path().join("scratch.txt"))
+            .unwrap()
+            .contains("wip"),
         "the edit stays uncommitted on disk"
     );
 }
@@ -225,16 +295,40 @@ fn unbookmarked_work_above_stack_is_never_a_push_target() {
     r.write("ongoing.txt", "work\n");
     r.jj(&["status"]);
     r.write("ongoing.txt", "work\nwip\n");
-    let ongoing_change = r.out(&["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "change_id"]);
+    let ongoing_change = r.out(&[
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "change_id",
+    ]);
     // The segment map is keyed by COMMIT id (a change id is not unique under
     // divergence), so the "is it a segment" assertion below needs the commit.
-    let ongoing_commit = r.out(&["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    let ongoing_commit = r.out(&[
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "commit_id",
+    ]);
 
     let graph = jjpr::graph::change_graph::build_change_graph(&r.runner()).unwrap();
 
     // The ongoing work carries no bookmark, so it is not a push target...
     assert_eq!(
-        r.out(&["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "bookmarks"]),
+        r.out(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "bookmarks"
+        ]),
         "",
         "the ongoing work must be unbookmarked"
     );
@@ -247,7 +341,10 @@ fn unbookmarked_work_above_stack_is_never_a_push_target() {
     );
     // ...and the ongoing change is neither a bookmarked change nor a segment.
     assert!(
-        !graph.bookmark_to_change_id.values().any(|c| c == &ongoing_change),
+        !graph
+            .bookmark_to_change_id
+            .values()
+            .any(|c| c == &ongoing_change),
         "ongoing work must not be a bookmarked change"
     );
     assert!(
@@ -271,5 +368,9 @@ fn explicit_snapshot_captures_wip() {
 
     r.runner().snapshot().unwrap();
 
-    assert_ne!(r.at_commit(), before, "explicit snapshot should fold WIP into @");
+    assert_ne!(
+        r.at_commit(),
+        before,
+        "explicit snapshot should fold WIP into @"
+    );
 }

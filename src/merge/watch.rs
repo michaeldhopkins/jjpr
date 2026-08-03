@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -84,7 +84,10 @@ pub(crate) fn report_status_changes(
 
     // Report resolved reasons
     for old in prev {
-        if !current.iter().any(|c| std::mem::discriminant(c) == std::mem::discriminant(old)) {
+        if !current
+            .iter()
+            .any(|c| std::mem::discriminant(c) == std::mem::discriminant(old))
+        {
             println!("  {bookmark}: {}", format_resolved_reason(old));
             printed = true;
         }
@@ -92,7 +95,10 @@ pub(crate) fn report_status_changes(
 
     // Report new reasons
     for new in current {
-        if !prev.iter().any(|p| std::mem::discriminant(p) == std::mem::discriminant(new)) {
+        if !prev
+            .iter()
+            .any(|p| std::mem::discriminant(p) == std::mem::discriminant(new))
+        {
             println!("  {bookmark}: {}", format_block_reason(new, fk));
             printed = true;
         }
@@ -100,7 +106,11 @@ pub(crate) fn report_status_changes(
 
     // Report approval count changes within InsufficientApprovals
     for new in current {
-        if let BlockReason::InsufficientApprovals { have: new_have, need } = new {
+        if let BlockReason::InsufficientApprovals {
+            have: new_have,
+            need,
+        } = new
+        {
             for old in prev {
                 if let BlockReason::InsufficientApprovals { have: old_have, .. } = old
                     && new_have != old_have
@@ -124,8 +134,7 @@ pub(crate) fn report_status_changes(
 }
 
 /// Braille spinner frames — the same cycle `indicatif` and most CLIs use.
-const SPINNER_FRAMES: [&str; 10] =
-    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// How long each spinner frame is shown. ~80ms reads as a smooth spin.
 const SPINNER_TICK: Duration = Duration::from_millis(80);
@@ -213,9 +222,13 @@ pub(crate) fn local_time_hhmm() -> String {
 
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     #[cfg(unix)]
-    unsafe { libc::localtime_r(&secs, &mut tm) };
+    unsafe {
+        libc::localtime_r(&secs, &mut tm)
+    };
     #[cfg(windows)]
-    unsafe { libc::localtime_s(&mut tm, &secs) };
+    unsafe {
+        libc::localtime_s(&mut tm, &secs)
+    };
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
@@ -273,7 +286,10 @@ mod tests {
         let prev = vec![];
         let current = vec![BlockReason::MergeabilityUnknown];
         let result = report_status_changes("auth", Some(&prev), &current, ForgeKind::GitHub);
-        assert!(result.is_some(), "MU should be reported as new on second eval");
+        assert!(
+            result.is_some(),
+            "MU should be reported as new on second eval"
+        );
     }
 
     #[test]
@@ -300,7 +316,10 @@ mod tests {
         render_spinner(&mut buf, true, 0);
         let s = String::from_utf8(buf).expect("utf8");
         assert!(s.starts_with('\r'), "should carriage-return to column 0");
-        assert!(s.contains(SPINNER_FRAMES[0]), "should render a spinner glyph");
+        assert!(
+            s.contains(SPINNER_FRAMES[0]),
+            "should render a spinner glyph"
+        );
         assert!(s.contains("Waiting..."));
         assert!(s.contains("\x1b[K"), "should clear to end of line");
     }
@@ -339,8 +358,16 @@ mod tests {
     #[test]
     fn heartbeat_prints_only_off_tty_after_interval() {
         let interval = Duration::from_secs(60);
-        assert!(should_print_heartbeat(false, Duration::from_secs(60), interval));
-        assert!(!should_print_heartbeat(false, Duration::from_secs(59), interval));
+        assert!(should_print_heartbeat(
+            false,
+            Duration::from_secs(60),
+            interval
+        ));
+        assert!(!should_print_heartbeat(
+            false,
+            Duration::from_secs(59),
+            interval
+        ));
         assert!(
             !should_print_heartbeat(true, Duration::from_secs(120), interval),
             "the live spinner replaces the heartbeat on a TTY",

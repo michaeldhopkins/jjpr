@@ -2,10 +2,10 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::graph::change_graph::find_stack_with_bookmark;
 use crate::graph::ChangeGraph;
-use crate::jj::types::{BookmarkSegment, BranchStack};
+use crate::graph::change_graph::find_stack_with_bookmark;
 use crate::jj::Jj;
+use crate::jj::types::{BookmarkSegment, BranchStack};
 
 /// The result of analyzing which segments need to be submitted.
 #[derive(Debug)]
@@ -79,10 +79,11 @@ fn overlapping_stacks<'a>(graph: &'a ChangeGraph, jj: &dyn Jj) -> Result<Vec<&'a
         .stacks
         .iter()
         .filter(|stack| {
-            stack
-                .segments
-                .iter()
-                .any(|seg| seg.bookmarks.iter().any(|b| wc_commit_ids.contains(&b.commit_id)))
+            stack.segments.iter().any(|seg| {
+                seg.bookmarks
+                    .iter()
+                    .any(|b| wc_commit_ids.contains(&b.commit_id))
+            })
         })
         .collect())
 }
@@ -272,23 +273,39 @@ mod tests {
     }
 
     impl crate::jj::Jj for StubJj {
-        fn git_fetch(&self) -> Result<()> { Ok(()) }
-        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
+        fn git_fetch(&self) -> Result<()> {
+            Ok(())
+        }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            Ok(vec![])
+        }
         fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
             Ok(self.branch_changes.clone())
         }
-        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-        fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-        fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".to_string())
+        }
+        fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> {
+            Ok(())
+        }
         fn get_working_copy_commit_id(&self) -> Result<String> {
             Ok(self.wc_commit_id.clone())
         }
-        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
-        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> {
+            unimplemented!()
+        }
         fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
             Ok(vec!["dummy_commit_id".to_string()])
         }
-        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+            Ok(false)
+        }
     }
 
     fn make_log_entry(change_id: &str) -> LogEntry {
@@ -304,7 +321,7 @@ mod tests {
             remote_bookmarks: vec![],
             is_working_copy: false,
             conflict: false,
-                empty: false,
+            empty: false,
         }
     }
 
@@ -377,10 +394,7 @@ mod tests {
 
     #[test]
     fn test_analyze_propagates_base_branch() {
-        let segments = vec![
-            make_segment("auth", "ch1"),
-            make_segment("profile", "ch2"),
-        ];
+        let segments = vec![make_segment("auth", "ch1"), make_segment("profile", "ch2")];
         let mut graph = make_graph(segments);
         graph.stacks[0].base_branch = Some("coworker-feat".to_string());
 
@@ -421,10 +435,7 @@ mod tests {
 
     #[test]
     fn select_stacks_all_returns_every_stack() {
-        let graph = make_graph_multi(vec![
-            vec![("auth", "ch1")],
-            vec![("payments", "ch2")],
-        ]);
+        let graph = make_graph_multi(vec![vec![("auth", "ch1")], vec![("payments", "ch2")]]);
         let jj = StubJj {
             wc_commit_id: "wc".to_string(),
             branch_changes: vec![],
@@ -447,7 +458,8 @@ mod tests {
             branch_changes: vec![],
         };
 
-        match select_stacks_to_show(&graph, Some("checkout"), false, &jj, &HashSet::new()).unwrap() {
+        match select_stacks_to_show(&graph, Some("checkout"), false, &jj, &HashSet::new()).unwrap()
+        {
             StackScope::Show(stacks) => {
                 assert_eq!(stacks.len(), 1);
                 assert_eq!(stacks[0].segments[0].bookmarks[0].name, "payments");

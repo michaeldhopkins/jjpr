@@ -125,12 +125,18 @@ pub fn approvals_dismissed_by_push(
     let dismisses = base_cache
         .entry(base_branch.to_string())
         .or_insert_with(|| {
-            forge.base_dismisses_stale_approvals(owner, repo, base_branch).ok().flatten()
+            forge
+                .base_dismisses_stale_approvals(owner, repo, base_branch)
+                .ok()
+                .flatten()
         });
     if *dismisses != Some(true) {
         return None;
     }
-    let approved = forge.get_pr_reviews(owner, repo, pr_number).ok()?.approved_count;
+    let approved = forge
+        .get_pr_reviews(owner, repo, pr_number)
+        .ok()?
+        .approved_count;
     (approved > 0).then_some(approved)
 }
 
@@ -152,11 +158,7 @@ pub(crate) fn parse_verified_emails(value: &serde_json::Value) -> Vec<String> {
 
 /// Trait abstracting forge operations (GitHub, GitLab, Forgejo) for testability.
 pub trait Forge: Send + Sync {
-    fn list_open_prs(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<PullRequest>>;
+    fn list_open_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>>;
 
     fn create_pr(
         &self,
@@ -169,13 +171,7 @@ pub trait Forge: Send + Sync {
         draft: bool,
     ) -> Result<PullRequest>;
 
-    fn update_pr_base(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        base: &str,
-    ) -> Result<()>;
+    fn update_pr_base(&self, owner: &str, repo: &str, number: u64, base: &str) -> Result<()>;
 
     fn request_reviewers(
         &self,
@@ -185,12 +181,7 @@ pub trait Forge: Send + Sync {
         reviewers: &[String],
     ) -> Result<()>;
 
-    fn list_comments(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Vec<IssueComment>>;
+    fn list_comments(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<IssueComment>>;
 
     fn create_comment(
         &self,
@@ -200,28 +191,11 @@ pub trait Forge: Send + Sync {
         body: &str,
     ) -> Result<IssueComment>;
 
-    fn update_comment(
-        &self,
-        owner: &str,
-        repo: &str,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<()>;
+    fn update_comment(&self, owner: &str, repo: &str, comment_id: u64, body: &str) -> Result<()>;
 
-    fn update_pr_body(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        body: &str,
-    ) -> Result<()>;
+    fn update_pr_body(&self, owner: &str, repo: &str, number: u64, body: &str) -> Result<()>;
 
-    fn mark_pr_ready(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<()>;
+    fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()>;
 
     fn get_authenticated_user(&self) -> Result<String>;
 
@@ -234,48 +208,18 @@ pub trait Forge: Send + Sync {
         Ok(Vec::new())
     }
 
-    fn find_merged_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        head: &str,
-    ) -> Result<Option<PullRequest>>;
+    fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>>;
 
-    fn merge_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        method: MergeMethod,
-    ) -> Result<()>;
+    fn merge_pr(&self, owner: &str, repo: &str, number: u64, method: MergeMethod) -> Result<()>;
 
-    fn get_pr_checks_status(
-        &self,
-        owner: &str,
-        repo: &str,
-        head_ref: &str,
-    ) -> Result<ChecksStatus>;
+    fn get_pr_checks_status(&self, owner: &str, repo: &str, head_ref: &str)
+    -> Result<ChecksStatus>;
 
-    fn get_pr_reviews(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<ReviewSummary>;
+    fn get_pr_reviews(&self, owner: &str, repo: &str, number: u64) -> Result<ReviewSummary>;
 
-    fn get_pr_mergeability(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PrMergeability>;
+    fn get_pr_mergeability(&self, owner: &str, repo: &str, number: u64) -> Result<PrMergeability>;
 
-    fn get_pr_state(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PrState>;
+    fn get_pr_state(&self, owner: &str, repo: &str, number: u64) -> Result<PrState>;
 
     /// Read one native pull-request stack by number, if the forge has them.
     ///
@@ -296,12 +240,7 @@ pub trait Forge: Send + Sync {
     /// lacked access to read as "preview not enabled". Since public preview the
     /// endpoint answers on every repository, so a `404` now points at access
     /// far more often than at availability.
-    fn get_stack(
-        &self,
-        _owner: &str,
-        _repo: &str,
-        _stack_number: u64,
-    ) -> Result<Option<Stack>> {
+    fn get_stack(&self, _owner: &str, _repo: &str, _stack_number: u64) -> Result<Option<Stack>> {
         Ok(None)
     }
 
@@ -357,7 +296,10 @@ mod tests {
             {"email": "unverified@x.com", "verified": false},
             {"email": "work@x.com", "verified": true}
         ]);
-        assert_eq!(parse_verified_emails(&json), vec!["primary@x.com", "work@x.com"]);
+        assert_eq!(
+            parse_verified_emails(&json),
+            vec!["primary@x.com", "work@x.com"]
+        );
     }
 
     #[test]
@@ -375,8 +317,16 @@ mod tests {
             html_url: String::new(),
             title: String::new(),
             body: None,
-            base: PullRequestRef { ref_name: "main".to_string(), label: String::new(), sha: String::new() },
-            head: PullRequestRef { ref_name: ref_name.to_string(), label: label.to_string(), sha: String::new() },
+            base: PullRequestRef {
+                ref_name: "main".to_string(),
+                label: String::new(),
+                sha: String::new(),
+            },
+            head: PullRequestRef {
+                ref_name: ref_name.to_string(),
+                label: label.to_string(),
+                sha: String::new(),
+            },
             draft: false,
             node_id: String::new(),
             merged_at: None,

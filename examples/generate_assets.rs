@@ -4,9 +4,8 @@ use clap::CommandFactory;
 use clap_complete::Shell;
 
 fn main() {
-    let out_dir = PathBuf::from(
-        std::env::var("JJPR_ASSETS_DIR").unwrap_or_else(|_| "target/assets".into()),
-    );
+    let out_dir =
+        PathBuf::from(std::env::var("JJPR_ASSETS_DIR").unwrap_or_else(|_| "target/assets".into()));
     let completions_dir = out_dir.join("completions");
     std::fs::create_dir_all(&completions_dir).expect("failed to create output directories");
 

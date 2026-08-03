@@ -6,9 +6,9 @@ use vcs_runner::{
     jj_op_restore, run_jj_utf8, run_jj_utf8_ignore_wc, run_jj_utf8_with_retry,
 };
 
+use super::Jj;
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
-use super::Jj;
 
 /// Real jj implementation that shells out to the jj binary.
 pub struct JjRunner {
@@ -29,7 +29,10 @@ impl JjRunner {
             anyhow::bail!("{} is not a jj repository", repo_path.display());
         }
 
-        Ok(Self { repo_path, owned_revset: "mine()".to_string() })
+        Ok(Self {
+            repo_path,
+            owned_revset: "mine()".to_string(),
+        })
     }
 
     /// Widen ownership discovery to every identity in `identity` (multiple
@@ -120,10 +123,19 @@ impl Jj for JjRunner {
         } else {
             "::@ ~ trunk()".to_string()
         };
-        let output = self.run_jj(&["bookmark", "list", "--revisions", &revset, "--template", BOOKMARK_TEMPLATE])?;
+        let output = self.run_jj(&[
+            "bookmark",
+            "list",
+            "--revisions",
+            &revset,
+            "--template",
+            BOOKMARK_TEMPLATE,
+        ])?;
         let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
         for name in warnings {
-            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)");
+            eprintln!(
+                "  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)"
+            );
             eprintln!("    To clean up the stale local bookmark:");
             eprintln!("      jj bookmark forget {name} && jj git push --deleted");
         }
@@ -133,7 +145,9 @@ impl Jj for JjRunner {
     fn get_user_email(&self) -> Result<String> {
         // Unset user.email → `config get` errors; treat as empty rather than
         // failing the whole command.
-        Ok(self.run_jj(&["config", "get", "user.email"]).unwrap_or_default())
+        Ok(self
+            .run_jj(&["config", "get", "user.email"])
+            .unwrap_or_default())
     }
 
     fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
@@ -148,7 +162,9 @@ impl Jj for JjRunner {
         ])?;
         let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
         for name in warnings {
-            eprintln!("  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)");
+            eprintln!(
+                "  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)"
+            );
             eprintln!("    To clean up the stale local bookmark:");
             eprintln!("      jj bookmark forget {name} && jj git push --deleted");
         }
@@ -217,21 +233,20 @@ impl Jj for JjRunner {
     }
 
     fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
-        self.run_jj(&[
-            "git",
-            "push",
-            "--remote",
-            remote,
-            "--bookmark",
-            name,
-        ])?;
+        self.run_jj(&["git", "push", "--remote", remote, "--bookmark", name])?;
         Ok(())
     }
 
     fn get_working_copy_commit_id(&self) -> Result<String> {
         let output = self.run_jj(&[
-            "log", "-r", "@", "--no-graph", "--limit", "1",
-            "--template", "commit_id",
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "--limit",
+            "1",
+            "--template",
+            "commit_id",
         ])?;
         if output.is_empty() {
             anyhow::bail!("could not determine working copy commit");
@@ -271,7 +286,12 @@ impl Jj for JjRunner {
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
         let revset = format!("all:{change_id}");
         let output = self.run_jj(&[
-            "log", "-r", &revset, "--no-graph", "-T", r#"commit_id ++ "\n""#,
+            "log",
+            "-r",
+            &revset,
+            "--no-graph",
+            "-T",
+            r#"commit_id ++ "\n""#,
         ])?;
         Ok(output
             .lines()

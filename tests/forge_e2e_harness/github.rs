@@ -11,7 +11,10 @@ pub struct GitHubDriver;
 
 pub fn available() -> bool {
     super::tool_available("gh")
-        && Command::new("gh").args(["auth", "status"]).output().is_ok_and(|o| o.status.success())
+        && Command::new("gh")
+            .args(["auth", "status"])
+            .output()
+            .is_ok_and(|o| o.status.success())
 }
 
 fn repo_slug() -> String {
@@ -21,7 +24,12 @@ fn repo_slug() -> String {
 /// Run `gh` and require success, returning stdout.
 fn gh(args: &[&str]) -> String {
     let out = Command::new("gh").args(args).output().expect("run gh");
-    assert!(out.status.success(), "gh {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "gh {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -46,7 +54,11 @@ fn gh_api_input(method: &str, path: &str, body: &Value) -> String {
         .write_all(body.to_string().as_bytes())
         .expect("write body");
     let out = child.wait_with_output().expect("gh api");
-    assert!(out.status.success(), "gh api {method} {path} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "gh api {method} {path} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -65,32 +77,69 @@ impl ForgeTestDriver for GitHubDriver {
 
     fn open_request(&self, head: &str, base: &str, title: &str) -> u64 {
         gh(&[
-            "pr", "create", "--repo", &repo_slug(),
-            "--head", head, "--base", base,
-            "--title", title, "--body", "e2e fixture",
+            "pr",
+            "create",
+            "--repo",
+            &repo_slug(),
+            "--head",
+            head,
+            "--base",
+            base,
+            "--title",
+            title,
+            "--body",
+            "e2e fixture",
         ]);
         self.find_request_by_head(head).expect("PR just created")
     }
 
     fn find_request_by_head(&self, head: &str) -> Option<u64> {
         let out = gh(&[
-            "pr", "list", "--repo", &repo_slug(), "--head", head,
-            "--state", "all", "--json", "number",
+            "pr",
+            "list",
+            "--repo",
+            &repo_slug(),
+            "--head",
+            head,
+            "--state",
+            "all",
+            "--json",
+            "number",
         ]);
         let prs: Vec<Value> = serde_json::from_str(&out).ok()?;
         prs.first()?.get("number")?.as_u64()
     }
 
     fn request_head_sha(&self, number: u64) -> String {
-        gh(&["pr", "view", &number.to_string(), "--repo", &repo_slug(), "--json", "headRefOid", "-q", ".headRefOid"])
-            .trim()
-            .to_string()
+        gh(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &repo_slug(),
+            "--json",
+            "headRefOid",
+            "-q",
+            ".headRefOid",
+        ])
+        .trim()
+        .to_string()
     }
 
     fn request_base(&self, number: u64) -> String {
-        gh(&["pr", "view", &number.to_string(), "--repo", &repo_slug(), "--json", "baseRefName", "-q", ".baseRefName"])
-            .trim()
-            .to_string()
+        gh(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &repo_slug(),
+            "--json",
+            "baseRefName",
+            "-q",
+            ".baseRefName",
+        ])
+        .trim()
+        .to_string()
     }
 
     fn boxed(&self) -> Box<dyn ForgeTestDriver> {
@@ -98,13 +147,30 @@ impl ForgeTestDriver for GitHubDriver {
     }
 
     fn make_draft(&self, number: u64) {
-        gh(&["pr", "ready", &number.to_string(), "--undo", "--repo", &repo_slug()]);
+        gh(&[
+            "pr",
+            "ready",
+            &number.to_string(),
+            "--undo",
+            "--repo",
+            &repo_slug(),
+        ]);
     }
 
     fn request_state(&self, number: u64) -> String {
-        gh(&["pr", "view", &number.to_string(), "--repo", &repo_slug(), "--json", "state", "-q", ".state"])
-            .trim()
-            .to_lowercase()
+        gh(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &repo_slug(),
+            "--json",
+            "state",
+            "-q",
+            ".state",
+        ])
+        .trim()
+        .to_lowercase()
     }
 
     fn admin_merge(&self, number: u64, method: MergeMethod) {
@@ -113,7 +179,15 @@ impl ForgeTestDriver for GitHubDriver {
             MergeMethod::Squash => "--squash",
             MergeMethod::Rebase => "--rebase",
         };
-        gh(&["pr", "merge", &number.to_string(), "--repo", &repo_slug(), flag, "--admin"]);
+        gh(&[
+            "pr",
+            "merge",
+            &number.to_string(),
+            "--repo",
+            &repo_slug(),
+            flag,
+            "--admin",
+        ]);
     }
 
     fn set_dismiss_stale(&self, branch: &str) {
@@ -139,8 +213,14 @@ impl ForgeTestDriver for GitHubDriver {
 
     fn jjpr_forge(&self) -> Box<dyn jjpr::forge::Forge> {
         use jjpr::forge::{AuthScheme, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
-        let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None).expect("github token");
-        let client = ForgeClient::new("https://api.github.com", token, AuthScheme::Bearer, PaginationStyle::LinkHeader);
+        let token =
+            jjpr::forge::token::resolve_token(ForgeKind::GitHub, None).expect("github token");
+        let client = ForgeClient::new(
+            "https://api.github.com",
+            token,
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        );
         Box::new(GitHubForge::new(client))
     }
 
@@ -148,8 +228,16 @@ impl ForgeTestDriver for GitHubDriver {
         let slug = repo_slug();
         // Close prefixed open PRs.
         if let Ok(prs) = serde_json::from_str::<Vec<Value>>(&gh(&[
-            "pr", "list", "--repo", &slug, "--json", "number,headRefName",
-            "--state", "open", "--limit", "50",
+            "pr",
+            "list",
+            "--repo",
+            &slug,
+            "--json",
+            "number,headRefName",
+            "--state",
+            "open",
+            "--limit",
+            "50",
         ])) {
             for pr in &prs {
                 if pr["headRefName"].as_str().unwrap_or("").starts_with(prefix)
@@ -161,11 +249,17 @@ impl ForgeTestDriver for GitHubDriver {
         }
         // Delete prefixed refs.
         if let Ok(refs) = serde_json::from_str::<Vec<Value>>(&gh(&[
-            "api", &format!("repos/{slug}/git/matching-refs/heads/{prefix}"),
+            "api",
+            &format!("repos/{slug}/git/matching-refs/heads/{prefix}"),
         ])) {
             for r in &refs {
                 if let Some(ref_name) = r["ref"].as_str() {
-                    gh_quiet(&["api", &format!("repos/{slug}/git/{ref_name}"), "-X", "DELETE"]);
+                    gh_quiet(&[
+                        "api",
+                        &format!("repos/{slug}/git/{ref_name}"),
+                        "-X",
+                        "DELETE",
+                    ]);
                 }
             }
         }
@@ -177,14 +271,21 @@ impl ForgeTestDriver for GitHubDriver {
 /// List repo rulesets and delete those whose name matches `pred`.
 fn delete_rulesets_where(pred: impl Fn(&str) -> bool) {
     let slug = repo_slug();
-    let Ok(rulesets) = serde_json::from_str::<Vec<Value>>(&gh(&["api", &format!("repos/{slug}/rulesets")])) else {
+    let Ok(rulesets) =
+        serde_json::from_str::<Vec<Value>>(&gh(&["api", &format!("repos/{slug}/rulesets")]))
+    else {
         return;
     };
     for rs in &rulesets {
         if rs["name"].as_str().is_some_and(&pred)
             && let Some(id) = rs["id"].as_u64()
         {
-            gh_quiet(&["api", &format!("repos/{slug}/rulesets/{id}"), "-X", "DELETE"]);
+            gh_quiet(&[
+                "api",
+                &format!("repos/{slug}/rulesets/{id}"),
+                "-X",
+                "DELETE",
+            ]);
         }
     }
 }

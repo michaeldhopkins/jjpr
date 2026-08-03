@@ -112,7 +112,10 @@ impl ForgeE2eContext {
         // the same process (a single test spins up several).
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_secs();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_secs();
         let pid = std::process::id() as u64;
         // Forge letter + time + pid + seq keeps prefixes short and collision-free
         // across forges, parallel runs, and multiple contexts in one test. Keep
@@ -134,9 +137,18 @@ impl ForgeE2eContext {
             .args(["git", "clone", "--colocate", &url, dest])
             .output()
             .expect("jj git clone");
-        assert!(out.status.success(), "clone {url} failed: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "clone {url} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
-        Self { driver, prefix, repo_path, _parent: parent }
+        Self {
+            driver,
+            prefix,
+            repo_path,
+            _parent: parent,
+        }
     }
 
     pub fn prefixed(&self, name: &str) -> String {
@@ -149,7 +161,12 @@ impl ForgeE2eContext {
             .current_dir(&self.repo_path)
             .output()
             .expect("run jj");
-        assert!(out.status.success(), "jj {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "jj {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
@@ -163,7 +180,13 @@ impl ForgeE2eContext {
 
     /// Push a prefixed bookmark to the remote.
     pub fn push(&self, bookmark: &str) {
-        self.run_jj(&["git", "push", "--bookmark", &self.prefixed(bookmark), "--allow-new"]);
+        self.run_jj(&[
+            "git",
+            "push",
+            "--bookmark",
+            &self.prefixed(bookmark),
+            "--allow-new",
+        ]);
     }
 
     /// Run the `jjpr` binary in this clone. Inherits the environment so the
@@ -214,5 +237,8 @@ pub fn configured_drivers() -> Vec<Box<dyn ForgeTestDriver>> {
 
 /// Whether a command exists and `--version` succeeds.
 pub(crate) fn tool_available(cmd: &str) -> bool {
-    Command::new(cmd).arg("--version").output().is_ok_and(|o| o.status.success())
+    Command::new(cmd)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }

@@ -306,8 +306,7 @@ impl StackNav for DescriptionNav {
     ) -> Result<bool> {
         let current_body = pr.body.as_deref().unwrap_or("");
 
-        let previous_data = Self::extract_section(current_body)
-            .and_then(parse_comment_data);
+        let previous_data = Self::extract_section(current_body).and_then(parse_comment_data);
 
         let (live, fossils) = build_entries(previous_data.as_ref());
         if live.is_empty() && fossils.is_empty() {
@@ -446,7 +445,13 @@ mod tests {
     fn test_fossil_cap_truncates_to_seven_with_hidden_count() {
         let live = vec![live_entry("top", 100, true)];
         let fossils: Vec<StackEntry> = (1..=10)
-            .map(|i| fossil_entry(&format!("old{i}"), i, &format!("2026-01-{:02}T00:00:00Z", i)))
+            .map(|i| {
+                fossil_entry(
+                    &format!("old{i}"),
+                    i,
+                    &format!("2026-01-{:02}T00:00:00Z", i),
+                )
+            })
             .collect();
         let body = generate_comment_body(&live, &fossils);
         assert!(
@@ -473,7 +478,13 @@ mod tests {
     fn test_fossil_cap_one_hidden_uses_singular_entry() {
         let live = vec![live_entry("top", 100, true)];
         let fossils: Vec<StackEntry> = (1..=8)
-            .map(|i| fossil_entry(&format!("old{i}"), i, &format!("2026-01-{:02}T00:00:00Z", i)))
+            .map(|i| {
+                fossil_entry(
+                    &format!("old{i}"),
+                    i,
+                    &format!("2026-01-{:02}T00:00:00Z", i),
+                )
+            })
             .collect();
         let body = generate_comment_body(&live, &fossils);
         assert!(
@@ -488,7 +499,13 @@ mod tests {
         // preserved in JJPR_DATA so future runs can re-derive history.
         let live = vec![live_entry("top", 100, true)];
         let fossils: Vec<StackEntry> = (1..=10)
-            .map(|i| fossil_entry(&format!("old{i}"), i, &format!("2026-01-{:02}T00:00:00Z", i)))
+            .map(|i| {
+                fossil_entry(
+                    &format!("old{i}"),
+                    i,
+                    &format!("2026-01-{:02}T00:00:00Z", i),
+                )
+            })
             .collect();
         let body = generate_comment_body(&live, &fossils);
         let data = parse_comment_data(&body).expect("data should round-trip");
@@ -613,8 +630,14 @@ mod tests {
         let body = format!("<!--- JJPR_DATA: {encoded} --->");
 
         let parsed = parse_comment_data(&body).expect("should parse old format");
-        assert!(!parsed.stack[0].is_merged, "missing is_merged should default to false");
-        assert!(parsed.stack[0].closed_at.is_none(), "missing closed_at should default to None");
+        assert!(
+            !parsed.stack[0].is_merged,
+            "missing is_merged should default to false"
+        );
+        assert!(
+            parsed.stack[0].closed_at.is_none(),
+            "missing closed_at should default to None"
+        );
     }
 
     #[test]
@@ -688,10 +711,7 @@ mod tests {
 
     #[test]
     fn test_description_nav_splice_replaces_when_present() {
-        let body = format!(
-            "before\n\n{}old nav{}\n\nafter",
-            NAV_START, NAV_END
-        );
+        let body = format!("before\n\n{}old nav{}\n\nafter", NAV_START, NAV_END);
         let new_section = format!("{NAV_START}new nav{NAV_END}");
         let result = DescriptionNav::splice_section(&body, &new_section);
         assert!(result.contains("before"));
@@ -713,7 +733,8 @@ mod tests {
 
     #[test]
     fn test_description_nav_preserves_description_sentinels() {
-        let body = "<!-- jjpr:description -->\ncommit body\n<!-- /jjpr:description -->\n\nuser notes";
+        let body =
+            "<!-- jjpr:description -->\ncommit body\n<!-- /jjpr:description -->\n\nuser notes";
         let section = DescriptionNav::wrap_section("stack nav content\n");
         let result = DescriptionNav::splice_section(body, &section);
         assert!(result.contains("<!-- jjpr:description -->"));

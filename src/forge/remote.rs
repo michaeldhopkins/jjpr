@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use super::types::RepoInfo;
 use super::ForgeKind;
+use super::types::RepoInfo;
 use crate::jj::GitRemote;
 
 /// Parse a GitHub remote URL into owner/repo.
@@ -307,13 +307,22 @@ mod tests {
     #[test]
     fn all_forges_agree_on_empty_path_components() {
         let github = parse_github_url("https://github.com//owner//repo/").unwrap();
-        assert_eq!((github.owner.as_str(), github.repo.as_str()), ("owner", "repo"));
+        assert_eq!(
+            (github.owner.as_str(), github.repo.as_str()),
+            ("owner", "repo")
+        );
 
         let forgejo = parse_forgejo_url("https://codeberg.org//owner//repo/").unwrap();
-        assert_eq!((forgejo.owner.as_str(), forgejo.repo.as_str()), ("owner", "repo"));
+        assert_eq!(
+            (forgejo.owner.as_str(), forgejo.repo.as_str()),
+            ("owner", "repo")
+        );
 
         let gitlab = parse_gitlab_url("https://gitlab.com//group//repo/").unwrap();
-        assert_eq!((gitlab.owner.as_str(), gitlab.repo.as_str()), ("group", "repo"));
+        assert_eq!(
+            (gitlab.owner.as_str(), gitlab.repo.as_str()),
+            ("group", "repo")
+        );
     }
 
     /// Both parsers strip `.git` from the repo component, so a trailing slash

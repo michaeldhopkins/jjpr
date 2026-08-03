@@ -93,20 +93,23 @@ impl ParityContext {
         let full_repo = format!("{OWNER}/{REPO}");
         let pr = find_pr_by_head(bookmark)
             .unwrap_or_else(|| panic!("no open PR for bookmark '{bookmark}'"));
-        let number = pr["number"]
-            .as_u64()
-            .expect("PR number")
-            .to_string();
+        let number = pr["number"].as_u64().expect("PR number").to_string();
         let status = Command::new("gh")
             .args([
-                "pr", "merge", &number,
-                "--repo", &full_repo,
+                "pr",
+                "merge",
+                &number,
+                "--repo",
+                &full_repo,
                 method.gh_flag(),
                 "--admin",
             ])
             .status()
             .expect("gh pr merge");
-        assert!(status.success(), "gh pr merge --admin failed for {bookmark}");
+        assert!(
+            status.success(),
+            "gh pr merge --admin failed for {bookmark}"
+        );
     }
 }
 
@@ -117,13 +120,19 @@ impl Drop for ParityContext {
         // Close any still-open PRs whose head matches our prefix.
         if let Ok(output) = Command::new("gh")
             .args([
-                "pr", "list", "--repo", &full_repo,
-                "--json", "number,headRefName",
-                "--state", "open", "--limit", "50",
+                "pr",
+                "list",
+                "--repo",
+                &full_repo,
+                "--json",
+                "number,headRefName",
+                "--state",
+                "open",
+                "--limit",
+                "50",
             ])
             .output()
-            && let Ok(prs) =
-                serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            && let Ok(prs) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
         {
             for pr in &prs {
                 let head = pr["headRefName"].as_str().unwrap_or("");
@@ -141,14 +150,10 @@ impl Drop for ParityContext {
         if let Ok(output) = Command::new("gh")
             .args([
                 "api",
-                &format!(
-                    "repos/{full_repo}/git/matching-refs/heads/{}",
-                    self.prefix
-                ),
+                &format!("repos/{full_repo}/git/matching-refs/heads/{}", self.prefix),
             ])
             .output()
-            && let Ok(refs) =
-                serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
+            && let Ok(refs) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout)
         {
             for r in &refs {
                 if let Some(ref_name) = r["ref"].as_str() {
@@ -156,7 +161,8 @@ impl Drop for ParityContext {
                         .args([
                             "api",
                             &format!("repos/{full_repo}/git/{ref_name}"),
-                            "-X", "DELETE",
+                            "-X",
+                            "DELETE",
                         ])
                         .output();
                 }
@@ -171,9 +177,16 @@ pub fn find_pr_by_head(head: &str) -> Option<serde_json::Value> {
     let full_repo = format!("{OWNER}/{REPO}");
     let output = Command::new("gh")
         .args([
-            "pr", "list", "--repo", &full_repo, "--head", head,
-            "--json", "number,title,baseRefName,headRefName,state",
-            "--state", "all",
+            "pr",
+            "list",
+            "--repo",
+            &full_repo,
+            "--head",
+            head,
+            "--json",
+            "number,title,baseRefName,headRefName,state",
+            "--state",
+            "all",
         ])
         .output()
         .ok()?;
@@ -187,9 +200,13 @@ pub fn fetch_pr_detail(number: u64) -> Option<serde_json::Value> {
     let full_repo = format!("{OWNER}/{REPO}");
     let output = Command::new("gh")
         .args([
-            "pr", "view", &number.to_string(),
-            "--repo", &full_repo,
-            "--json", "number,state,baseRefName,headRefName,additions,deletions,mergedAt,commits",
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            &full_repo,
+            "--json",
+            "number,state,baseRefName,headRefName,additions,deletions,mergedAt,commits",
         ])
         .output()
         .ok()?;
@@ -236,5 +253,8 @@ pub fn gh_available() -> bool {
 
 /// Path to the parity_scenarios directory, resolved at compile time.
 pub fn scenarios_dir() -> &'static Path {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/parity_scenarios"))
+    Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/parity_scenarios"
+    ))
 }

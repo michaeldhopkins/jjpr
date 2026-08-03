@@ -21,7 +21,10 @@ struct HeartbeatData {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The heartbeat path for a repo, alongside `.jj/jjpr.toml`.
@@ -72,8 +75,19 @@ impl WatchHeartbeat {
         }
         let now = now_secs();
         let pid = std::process::id();
-        let _ = write(&path, &HeartbeatData { pid, started_at: now, last_seen: now });
-        Some(Self { path, pid, started_at: now })
+        let _ = write(
+            &path,
+            &HeartbeatData {
+                pid,
+                started_at: now,
+                last_seen: now,
+            },
+        );
+        Some(Self {
+            path,
+            pid,
+            started_at: now,
+        })
     }
 
     /// Mark the watcher alive as of now. Best-effort: a transient write failure
@@ -81,7 +95,11 @@ impl WatchHeartbeat {
     pub fn refresh(&self) {
         let _ = write(
             &self.path,
-            &HeartbeatData { pid: self.pid, started_at: self.started_at, last_seen: now_secs() },
+            &HeartbeatData {
+                pid: self.pid,
+                started_at: self.started_at,
+                last_seen: now_secs(),
+            },
         );
     }
 }
@@ -103,15 +121,25 @@ mod tests {
     use super::*;
 
     fn data(last_seen: u64) -> HeartbeatData {
-        HeartbeatData { pid: 42, started_at: 0, last_seen }
+        HeartbeatData {
+            pid: 42,
+            started_at: 0,
+            last_seen,
+        }
     }
 
     #[test]
     fn is_fresh_within_window() {
         assert!(is_fresh(&data(100), 100, 30), "same instant is fresh");
         assert!(is_fresh(&data(100), 129, 30), "29s < 30s window is fresh");
-        assert!(!is_fresh(&data(100), 130, 30), "exactly the window is not fresh");
-        assert!(!is_fresh(&data(100), 200, 30), "well past the window is stale");
+        assert!(
+            !is_fresh(&data(100), 130, 30),
+            "exactly the window is not fresh"
+        );
+        assert!(
+            !is_fresh(&data(100), 200, 30),
+            "well past the window is stale"
+        );
     }
 
     #[test]
@@ -136,7 +164,11 @@ mod tests {
     fn claim_takes_over_stale_heartbeat() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join(".jj")).unwrap();
-        write(&heartbeat_path(dir.path()), &data(now_secs().saturating_sub(120))).unwrap();
+        write(
+            &heartbeat_path(dir.path()),
+            &data(now_secs().saturating_sub(120)),
+        )
+        .unwrap();
         let hb = WatchHeartbeat::claim(dir.path(), 30);
         assert!(hb.is_some(), "a stale heartbeat is taken over");
     }
@@ -156,7 +188,10 @@ mod tests {
         // to watch over that — claim still returns a (best-effort) guard.
         let dir = tempfile::TempDir::new().unwrap();
         let hb = WatchHeartbeat::claim(dir.path(), 30);
-        assert!(hb.is_some(), "an unwritable metadata dir must not block watching");
+        assert!(
+            hb.is_some(),
+            "an unwritable metadata dir must not block watching"
+        );
     }
 
     #[test]
@@ -178,8 +213,19 @@ mod tests {
         let path = heartbeat_path(dir.path());
         let hb = WatchHeartbeat::claim(dir.path(), 30).unwrap();
         // Another watcher takes over (different pid) after we go stale.
-        write(&path, &HeartbeatData { pid: hb.pid + 1, started_at: 0, last_seen: now_secs() }).unwrap();
+        write(
+            &path,
+            &HeartbeatData {
+                pid: hb.pid + 1,
+                started_at: 0,
+                last_seen: now_secs(),
+            },
+        )
+        .unwrap();
         drop(hb);
-        assert!(path.exists(), "must not delete a heartbeat another watcher owns");
+        assert!(
+            path.exists(),
+            "must not delete a heartbeat another watcher owns"
+        );
     }
 }

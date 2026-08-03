@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use crate::jj::types::{Bookmark, BookmarkSegment, LogEntry};
 use crate::jj::Jj;
+use crate::jj::types::{Bookmark, BookmarkSegment, LogEntry};
 
 /// Result of traversing from a bookmark toward trunk.
 pub struct TraversalResult {
@@ -48,10 +48,8 @@ pub fn traverse_and_discover_segments(
     // None means no merge encountered yet (all entries are on path).
     let mut on_path: Option<HashSet<String>> = None;
 
-    let bookmark_commit_ids: HashSet<&String> = all_bookmarks
-        .values()
-        .map(|b| &b.commit_id)
-        .collect();
+    let bookmark_commit_ids: HashSet<&String> =
+        all_bookmarks.values().map(|b| &b.commit_id).collect();
 
     // Reverse map: commit_id → bookmark name (for resolving merge parent names)
     let commit_id_to_bookmark: HashMap<&String, &String> = all_bookmarks
@@ -180,8 +178,8 @@ pub fn traverse_and_discover_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jj::types::GitRemote;
     use crate::jj::Jj;
+    use crate::jj::types::GitRemote;
 
     struct StubJj {
         entries: Vec<LogEntry>,
@@ -209,19 +207,21 @@ mod tests {
         fn get_working_copy_commit_id(&self) -> Result<String> {
             Ok("wc_commit".to_string())
         }
-        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { unimplemented!() }
-        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { unimplemented!() }
+        fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> {
+            unimplemented!()
+        }
         fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
             Ok(vec!["dummy_commit_id".to_string()])
         }
-        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+            Ok(false)
+        }
     }
 
-    fn entry(
-        commit_id: &str,
-        change_id: &str,
-        parents: Vec<&str>,
-    ) -> LogEntry {
+    fn entry(commit_id: &str, change_id: &str, parents: Vec<&str>) -> LogEntry {
         LogEntry {
             commit_id: commit_id.to_string(),
             change_id: change_id.to_string(),
@@ -251,13 +251,9 @@ mod tests {
     #[test]
     fn test_empty_traversal() {
         let jj = StubJj { entries: vec![] };
-        let result = traverse_and_discover_segments(
-            &jj,
-            "commit_a",
-            &HashSet::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "commit_a", &HashSet::new(), &HashMap::new())
+                .unwrap();
         assert!(result.segments.is_empty());
     }
 
@@ -276,19 +272,14 @@ mod tests {
 
         let jj = StubJj {
             entries: vec![
-                entry("cb", "chb", vec!["cc", "cd"]),  // merge
-                entry("cc", "chc", vec!["trunk"]),      // followed parent
-                entry("cd", "chd", vec!["trunk"]),      // skipped parent
+                entry("cb", "chb", vec!["cc", "cd"]), // merge
+                entry("cc", "chc", vec!["trunk"]),    // followed parent
+                entry("cd", "chd", vec!["trunk"]),    // skipped parent
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cb",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.segments.len(), 2);
         // First segment (leaf): B with merge info
@@ -303,9 +294,7 @@ mod tests {
     fn test_merge_skipped_entries_not_in_seen() {
         // Skipped arm entries should not appear in seen_commit_ids
         let b_bookmark = make_bookmark("feat-b", "cb", "chb");
-        let all_bookmarks = HashMap::from([
-            ("feat-b".to_string(), b_bookmark),
-        ]);
+        let all_bookmarks = HashMap::from([("feat-b".to_string(), b_bookmark)]);
 
         let jj = StubJj {
             entries: vec![
@@ -315,17 +304,15 @@ mod tests {
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cb",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert!(result.seen_commit_ids.contains("cb"));
         assert!(result.seen_commit_ids.contains("cc"));
-        assert!(!result.seen_commit_ids.contains("cd"), "skipped arm should not be in seen");
+        assert!(
+            !result.seen_commit_ids.contains("cd"),
+            "skipped arm should not be in seen"
+        );
     }
 
     #[test]
@@ -346,13 +333,8 @@ mod tests {
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cb",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.segments[0].merge_source_names, vec!["feat-d"]);
     }
@@ -361,9 +343,7 @@ mod tests {
     fn test_merge_source_names_fallback_to_commit_id() {
         // Skipped parent without bookmark falls back to short commit_id
         let b_bookmark = make_bookmark("feat-b", "cb", "chb");
-        let all_bookmarks = HashMap::from([
-            ("feat-b".to_string(), b_bookmark),
-        ]);
+        let all_bookmarks = HashMap::from([("feat-b".to_string(), b_bookmark)]);
 
         let jj = StubJj {
             entries: vec![
@@ -373,13 +353,8 @@ mod tests {
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cb",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.segments[0].merge_source_names, vec!["cd_long_comm"]);
     }
@@ -403,21 +378,16 @@ mod tests {
 
         let jj = StubJj {
             entries: vec![
-                entry("cb", "chb", vec!["cc", "cd"]),  // B merges C,D
-                entry("cc", "chc", vec!["ce", "cf"]),   // C merges E,F
-                entry("ce", "che", vec!["trunk"]),       // followed
-                entry("cf", "chf", vec!["trunk"]),       // skipped (by C)
-                entry("cd", "chd", vec!["trunk"]),       // skipped (by B)
+                entry("cb", "chb", vec!["cc", "cd"]), // B merges C,D
+                entry("cc", "chc", vec!["ce", "cf"]), // C merges E,F
+                entry("ce", "che", vec!["trunk"]),    // followed
+                entry("cf", "chf", vec!["trunk"]),    // skipped (by C)
+                entry("cd", "chd", vec!["trunk"]),    // skipped (by B)
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cb",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.segments.len(), 3);
         assert_eq!(result.segments[0].bookmarks[0].name, "feat-b");
@@ -441,20 +411,14 @@ mod tests {
             has_remote: false,
             is_synced: false,
         };
-        let all_bookmarks =
-            HashMap::from([("feat".to_string(), bookmark)]);
+        let all_bookmarks = HashMap::from([("feat".to_string(), bookmark)]);
 
         let jj = StubJj {
             entries: vec![entry("c1", "ch1", vec!["trunk"])],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "c1",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "c1", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].bookmarks.len(), 1);
@@ -474,13 +438,8 @@ mod tests {
 
         let fully_collected = HashSet::from(["ch1".to_string()]);
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "c2",
-            &fully_collected,
-            &HashMap::new(),
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "c2", &fully_collected, &HashMap::new()).unwrap();
 
         assert!(result.seen_commit_ids.contains("c2"));
         assert!(result.seen_commit_ids.contains("c1"));
@@ -493,7 +452,10 @@ mod tests {
         remote_bookmarks: Vec<&str>,
     ) -> LogEntry {
         let mut e = entry(commit_id, change_id, parents);
-        e.remote_bookmarks = remote_bookmarks.into_iter().map(|s| s.to_string()).collect();
+        e.remote_bookmarks = remote_bookmarks
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect();
         e
     }
 
@@ -503,19 +465,16 @@ mod tests {
             entries: vec![
                 entry("c2", "ch2", vec!["c1"]),
                 entry_with_remote_bookmarks(
-                    "c1", "ch1", vec!["trunk"],
+                    "c1",
+                    "ch1",
+                    vec!["trunk"],
                     vec!["coworker-feat@origin"],
                 ),
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "c2",
-            &HashSet::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "c2", &HashSet::new(), &HashMap::new()).unwrap();
 
         assert_eq!(result.foreign_base, Some("coworker-feat".to_string()));
         assert_eq!(result.segments.len(), 1);
@@ -537,20 +496,12 @@ mod tests {
         let jj = StubJj {
             entries: vec![
                 entry("c2", "ch2", vec!["c1"]),
-                entry_with_remote_bookmarks(
-                    "c1", "ch1", vec!["trunk"],
-                    vec!["my-feat@origin"],
-                ),
+                entry_with_remote_bookmarks("c1", "ch1", vec!["trunk"], vec!["my-feat@origin"]),
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "c2",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "c2", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert!(result.foreign_base.is_none());
         assert!(result.seen_commit_ids.contains("c1"));
@@ -560,21 +511,16 @@ mod tests {
     #[test]
     fn test_git_remote_ignored() {
         let jj = StubJj {
-            entries: vec![
-                entry_with_remote_bookmarks(
-                    "c1", "ch1", vec!["trunk"],
-                    vec!["something@git"],
-                ),
-            ],
+            entries: vec![entry_with_remote_bookmarks(
+                "c1",
+                "ch1",
+                vec!["trunk"],
+                vec!["something@git"],
+            )],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "c1",
-            &HashSet::new(),
-            &HashMap::new(),
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "c1", &HashSet::new(), &HashMap::new()).unwrap();
 
         assert!(result.foreign_base.is_none());
         assert!(result.seen_commit_ids.contains("c1"));
@@ -596,19 +542,16 @@ mod tests {
                 entry("c3", "ch3", vec!["c2"]),
                 entry("c2", "ch2", vec!["c1"]),
                 entry_with_remote_bookmarks(
-                    "c1", "ch1", vec!["trunk"],
+                    "c1",
+                    "ch1",
+                    vec!["trunk"],
                     vec!["coworker-base@origin"],
                 ),
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "c3",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "c3", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.foreign_base, Some("coworker-base".to_string()));
         assert_eq!(result.segments.len(), 2);
@@ -631,22 +574,20 @@ mod tests {
 
         let jj = StubJj {
             entries: vec![
-                entry("cb", "chb", vec!["cc", "cd", "ce"]),  // 3-parent merge
+                entry("cb", "chb", vec!["cc", "cd", "ce"]), // 3-parent merge
                 entry("cc", "chc", vec!["trunk"]),
                 entry("cd", "chd", vec!["trunk"]),
                 entry("ce", "che", vec!["trunk"]),
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cb",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
-        assert_eq!(result.segments[0].merge_source_names, vec!["feat-d", "feat-e"]);
+        assert_eq!(
+            result.segments[0].merge_source_names,
+            vec!["feat-d", "feat-e"]
+        );
         assert!(!result.seen_commit_ids.contains("cd"));
         assert!(!result.seen_commit_ids.contains("ce"));
     }
@@ -660,18 +601,13 @@ mod tests {
 
         let jj = StubJj {
             entries: vec![
-                entry("cl", "chl", vec!["cm"]),            // bookmarked leaf
-                entry("cm", "chm", vec!["cp1", "cp2"]),    // unbookmarked merge
+                entry("cl", "chl", vec!["cm"]),         // bookmarked leaf
+                entry("cm", "chm", vec!["cp1", "cp2"]), // unbookmarked merge
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cl",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cl", &HashSet::new(), &all_bookmarks).unwrap();
 
         // Leaf's segment should have no merge info (it's not a merge)
         assert_eq!(result.segments[0].bookmarks[0].name, "leaf");
@@ -690,29 +626,21 @@ mod tests {
         // Both merges' source names should accumulate, not overwrite.
         let leaf = make_bookmark("leaf", "cl", "chl");
         let root = make_bookmark("root", "cr", "chr");
-        let all_bookmarks = HashMap::from([
-            ("leaf".to_string(), leaf),
-            ("root".to_string(), root),
-        ]);
+        let all_bookmarks = HashMap::from([("leaf".to_string(), leaf), ("root".to_string(), root)]);
 
         let jj = StubJj {
             entries: vec![
-                entry("cl", "chl", vec!["cm1"]),             // bookmarked leaf
-                entry("cm1", "chm1", vec!["cm2", "cy"]),     // unbookmarked merge 1
-                entry("cm2", "chm2", vec!["cr", "cw"]),      // unbookmarked merge 2 (on followed path)
-                entry("cr", "chr", vec!["trunk"]),            // bookmarked root
-                entry("cy", "chy", vec!["trunk"]),            // skipped by M1
-                entry("cw", "chw", vec!["trunk"]),            // skipped by M2
+                entry("cl", "chl", vec!["cm1"]),         // bookmarked leaf
+                entry("cm1", "chm1", vec!["cm2", "cy"]), // unbookmarked merge 1
+                entry("cm2", "chm2", vec!["cr", "cw"]),  // unbookmarked merge 2 (on followed path)
+                entry("cr", "chr", vec!["trunk"]),       // bookmarked root
+                entry("cy", "chy", vec!["trunk"]),       // skipped by M1
+                entry("cw", "chw", vec!["trunk"]),       // skipped by M2
             ],
         };
 
-        let result = traverse_and_discover_segments(
-            &jj,
-            "cl",
-            &HashSet::new(),
-            &all_bookmarks,
-        )
-        .unwrap();
+        let result =
+            traverse_and_discover_segments(&jj, "cl", &HashSet::new(), &all_bookmarks).unwrap();
 
         // Leaf gets its own segment (no merge info)
         assert_eq!(result.segments[0].bookmarks[0].name, "leaf");
@@ -723,7 +651,15 @@ mod tests {
         assert_eq!(result.segments[1].bookmarks[0].name, "root");
         assert_eq!(result.segments[1].merge_source_names.len(), 2);
         // cy (short commit_id fallback) from M1, cw from M2
-        assert!(result.segments[1].merge_source_names.contains(&"cy".to_string()));
-        assert!(result.segments[1].merge_source_names.contains(&"cw".to_string()));
+        assert!(
+            result.segments[1]
+                .merge_source_names
+                .contains(&"cy".to_string())
+        );
+        assert!(
+            result.segments[1]
+                .merge_source_names
+                .contains(&"cw".to_string())
+        );
     }
 }

@@ -193,9 +193,8 @@ pub fn parse_log_output(output: &str) -> Result<Vec<LogEntry>> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let raw: RawLogEntry =
-                serde_json::from_str(line)
-                    .with_context(|| format!("failed to parse log JSON: {line}"))?;
+            let raw: RawLogEntry = serde_json::from_str(line)
+                .with_context(|| format!("failed to parse log JSON: {line}"))?;
 
             Ok(LogEntry {
                 commit_id: raw.commit_id,
@@ -255,7 +254,11 @@ mod tests {
                 bookmarks.is_empty(),
                 "a bookmark with no usable identity must not reach the graph: {line}"
             );
-            assert_eq!(warnings, vec!["feat".to_string()], "and the user is told: {line}");
+            assert_eq!(
+                warnings,
+                vec!["feat".to_string()],
+                "and the user is told: {line}"
+            );
         }
     }
 
@@ -272,7 +275,10 @@ mod tests {
         let (bookmarks, warnings) = parse_bookmark_output(output).unwrap();
         assert_eq!(bookmarks.len(), 1, "the healthy entry is kept");
         assert_eq!(bookmarks[0].change_id, "ch1");
-        assert!(warnings.is_empty(), "no warning when a good entry exists: {warnings:?}");
+        assert!(
+            warnings.is_empty(),
+            "no warning when a good entry exists: {warnings:?}"
+        );
     }
 
     #[test]

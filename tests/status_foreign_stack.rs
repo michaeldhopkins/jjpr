@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
 
-use jjpr::graph::change_graph::{build_change_graph, build_status_graph, ChangeGraph};
+use jjpr::graph::change_graph::{ChangeGraph, build_change_graph, build_status_graph};
 use jjpr::jj::JjRunner;
 use tempfile::TempDir;
 
@@ -33,7 +33,13 @@ impl Repo {
         // it stays consistent between these calls and JjRunner, which is all
         // `mine()` needs (author-at-creation == user.email-at-query).
         repo.run(&["config", "set", "--repo", "user.name", "Me"]);
-        repo.run(&["config", "set", "--repo", "user.email", "me@example.invalid"]);
+        repo.run(&[
+            "config",
+            "set",
+            "--repo",
+            "user.email",
+            "me@example.invalid",
+        ]);
         repo
     }
 
@@ -95,7 +101,10 @@ fn status_shows_foreign_stack_that_mine_scoping_hides() {
 
     // Mutating-command discovery: only my bookmark, never the coworker's.
     let mine = bookmark_names(&build_change_graph(&runner).expect("change graph"));
-    assert!(mine.contains("mine-feat"), "mine() graph should include my bookmark: {mine:?}");
+    assert!(
+        mine.contains("mine-feat"),
+        "mine() graph should include my bookmark: {mine:?}"
+    );
     assert!(
         !mine.contains("coworker-feat"),
         "mine() graph must NOT include a coworker's bookmark: {mine:?}"
@@ -104,7 +113,10 @@ fn status_shows_foreign_stack_that_mine_scoping_hides() {
     // Broad status discovery (positional / --all): all your stacks plus the
     // coworker branch you're on — author-agnostic, both show up.
     let broad = bookmark_names(&build_status_graph(&runner, true).expect("broad status graph"));
-    assert!(broad.contains("mine-feat"), "broad status should include my other stack: {broad:?}");
+    assert!(
+        broad.contains("mine-feat"),
+        "broad status should include my other stack: {broad:?}"
+    );
     assert!(
         broad.contains("coworker-feat"),
         "broad status must include the coworker branch I'm stacked on: {broad:?}"

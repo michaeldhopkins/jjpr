@@ -90,7 +90,10 @@ mod tests {
 
     #[test]
     fn owned_revset_single_email() {
-        let id = Identity { emails: vec!["me@x.com".to_string()], logins: vec![] };
+        let id = Identity {
+            emails: vec!["me@x.com".to_string()],
+            logins: vec![],
+        };
         assert_eq!(id.owned_revset(), r#"author(exact:"me@x.com")"#);
     }
 
@@ -115,7 +118,10 @@ mod tests {
     fn owned_revset_escapes_quote_and_backslash() {
         // Defensive: emails almost never contain these, but the revset literal
         // is the injection boundary.
-        let id = Identity { emails: vec![r#"a"b\c@x.com"#.to_string()], logins: vec![] };
+        let id = Identity {
+            emails: vec![r#"a"b\c@x.com"#.to_string()],
+            logins: vec![],
+        };
         assert_eq!(id.owned_revset(), r#"author(exact:"a\"b\\c@x.com")"#);
     }
 

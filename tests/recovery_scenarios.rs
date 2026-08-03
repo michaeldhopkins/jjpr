@@ -108,10 +108,17 @@ impl Repo {
     /// working-copy-agnostically so a concurrent writer leaving the working copy
     /// stale doesn't block the assertion (exactly how jjpr reads).
     fn descriptions(&self) -> Vec<String> {
-        self.out(&["log", "-r", "all() ~ root()", "--no-graph", "-T", r#"description.first_line() ++ "\n""#])
-            .lines()
-            .map(str::to_string)
-            .collect()
+        self.out(&[
+            "log",
+            "-r",
+            "all() ~ root()",
+            "--no-graph",
+            "-T",
+            r#"description.first_line() ++ "\n""#,
+        ])
+        .lines()
+        .map(str::to_string)
+        .collect()
     }
     fn reachable(&self, description: &str) -> bool {
         self.descriptions().iter().any(|d| d == description)
@@ -120,7 +127,10 @@ impl Repo {
         self.runner().divergent_change_ids().unwrap()
     }
     fn file_count(&self, revset: &str) -> usize {
-        self.out(&["file", "list", "-r", revset]).lines().filter(|l| !l.is_empty()).count()
+        self.out(&["file", "list", "-r", revset])
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count()
     }
 }
 
@@ -144,9 +154,20 @@ fn reconcile_preserves_independent_concurrent_work() {
     r.jj(&["--at-operation", &good, "new", "-m", "THEIR_WORK"]);
     r.jj(&["status"]); // reconcile
 
-    assert!(r.reachable("OUR_WORK"), "our work lost; got {:?}", r.descriptions());
-    assert!(r.reachable("THEIR_WORK"), "their work lost; got {:?}", r.descriptions());
-    assert!(r.divergent().is_empty(), "independent work should not be divergent");
+    assert!(
+        r.reachable("OUR_WORK"),
+        "our work lost; got {:?}",
+        r.descriptions()
+    );
+    assert!(
+        r.reachable("THEIR_WORK"),
+        "their work lost; got {:?}",
+        r.descriptions()
+    );
+    assert!(
+        r.divergent().is_empty(),
+        "independent work should not be divergent"
+    );
 }
 
 /// Concurrent edits to the SAME change reconcile to a divergent change — both
@@ -166,7 +187,10 @@ fn reconcile_preserves_divergent_same_change_edits() {
     r.jj(&["--at-operation", &good, "describe", "-m", "A (their edit)"]);
     r.jj(&["status"]); // reconcile
 
-    assert!(!r.divergent().is_empty(), "same-change edits should reconcile to a divergent change (both kept)");
+    assert!(
+        !r.divergent().is_empty(),
+        "same-change edits should reconcile to a divergent change (both kept)"
+    );
 }
 
 /// Two *byte-identical* restacks (same change, same base, same commit
@@ -191,7 +215,14 @@ fn equivalent_restacks_collapse_to_one_commit() {
     r.write("s.txt", "s\n");
     r.jj(&["status"]);
     r.jj(&["bookmark", "create", "feat", "-r", "@"]);
-    let s_change = r.out(&["log", "-r", "feat", "--no-graph", "-T", "change_id.short(8)"]);
+    let s_change = r.out(&[
+        "log",
+        "-r",
+        "feat",
+        "--no-graph",
+        "-T",
+        "change_id.short(8)",
+    ]);
     // master advances independently.
     r.jj(&["new", "master", "-m", "M"]);
     r.write("m.txt", "m\n");
@@ -204,14 +235,43 @@ fn equivalent_restacks_collapse_to_one_commit() {
     // same second: measured 10/100 divergent back-to-back, and 12/12 divergent
     // with a 2-second gap.
     r.jj_at(FIXED_TS, &["rebase", "-s", &s_change, "-d", "master"]);
-    r.jj_at(FIXED_TS, &["--at-operation", &good, "rebase", "-s", &s_change, "-d", "master"]);
+    r.jj_at(
+        FIXED_TS,
+        &[
+            "--at-operation",
+            &good,
+            "rebase",
+            "-s",
+            &s_change,
+            "-d",
+            "master",
+        ],
+    );
     r.jj(&["status"]); // reconcile
 
-    let copies = r.out(&["log", "-r", &s_change, "--no-graph", "-T", r#"commit_id ++ "\n""#]);
-    assert_eq!(copies.lines().filter(|l| !l.is_empty()).count(), 1, "equivalent restacks should collapse to one commit");
-    assert!(r.divergent().is_empty(), "equivalent restacks should not be divergent");
+    let copies = r.out(&[
+        "log",
+        "-r",
+        &s_change,
+        "--no-graph",
+        "-T",
+        r#"commit_id ++ "\n""#,
+    ]);
+    assert_eq!(
+        copies.lines().filter(|l| !l.is_empty()).count(),
+        1,
+        "equivalent restacks should collapse to one commit"
+    );
+    assert!(
+        r.divergent().is_empty(),
+        "equivalent restacks should not be divergent"
+    );
     // The single commit carries both S's file and master's file.
-    assert_eq!(r.file_count(&s_change), 3, "collapsed commit should have base.txt + m.txt + s.txt");
+    assert_eq!(
+        r.file_count(&s_change),
+        3,
+        "collapsed commit should have base.txt + m.txt + s.txt"
+    );
 }
 
 /// The realistic two-watch race: the same restack performed twice, seconds
@@ -240,7 +300,14 @@ fn restacks_a_realistic_race_apart_in_time_do_diverge() {
     r.write("s.txt", "s\n");
     r.jj(&["status"]);
     r.jj(&["bookmark", "create", "feat", "-r", "@"]);
-    let s_change = r.out(&["log", "-r", "feat", "--no-graph", "-T", "change_id.short(8)"]);
+    let s_change = r.out(&[
+        "log",
+        "-r",
+        "feat",
+        "--no-graph",
+        "-T",
+        "change_id.short(8)",
+    ]);
     r.jj(&["new", "master", "-m", "M"]);
     r.write("m.txt", "m\n");
     r.jj(&["status"]);
@@ -250,7 +317,18 @@ fn restacks_a_realistic_race_apart_in_time_do_diverge() {
     // Same restack twice, but at different clock times — as two watch processes
     // would inevitably do.
     r.jj_at(FIXED_TS, &["rebase", "-s", &s_change, "-d", "master"]);
-    r.jj_at(LATER_TS, &["--at-operation", &good, "rebase", "-s", &s_change, "-d", "master"]);
+    r.jj_at(
+        LATER_TS,
+        &[
+            "--at-operation",
+            &good,
+            "rebase",
+            "-s",
+            &s_change,
+            "-d",
+            "master",
+        ],
+    );
     r.jj(&["status"]); // reconcile
 
     assert!(
@@ -280,7 +358,14 @@ fn assert_timestamp_pin_works() {
     let r = Repo::new();
     r.write("f.txt", "x\n");
     r.jj_at(FIXED_TS, &["describe", "-m", "PINNED"]);
-    let committed = r.out(&["log", "-r", "@", "--no-graph", "-T", "committer.timestamp()"]);
+    let committed = r.out(&[
+        "log",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "committer.timestamp()",
+    ]);
     assert!(
         committed.starts_with("2001-02-03"),
         "JJ_TIMESTAMP is no longer honoured (got {committed:?}); the determinism \
@@ -306,7 +391,10 @@ fn restore_to_post_fetch_preserves_work_but_good_op_loses_it() {
     r.jj(&["status"]); // reconcile
     let post_fetch = r.current_op();
 
-    assert!(r.reachable("OUR_WORK") && r.reachable("THEIR_WORK"), "reconciled state should hold both");
+    assert!(
+        r.reachable("OUR_WORK") && r.reachable("THEIR_WORK"),
+        "reconciled state should hold both"
+    );
 
     let runner = r.runner();
     // Rolling back to the pre-fetch op discards BOTH works from the view.
@@ -347,7 +435,14 @@ fn rebase_race_corrupts_and_restore_to_post_fetch_recovers() {
     }
     r.jj(&["status"]);
     r.jj(&["bookmark", "create", "topB", "-r", "@"]);
-    let b_change = r.out(&["log", "-r", "topB", "--no-graph", "-T", "change_id.short(8)"]);
+    let b_change = r.out(&[
+        "log",
+        "-r",
+        "topB",
+        "--no-graph",
+        "-T",
+        "change_id.short(8)",
+    ]);
 
     // Simulate the fetch importing a squash-merge of A into master.
     r.jj(&["new", "master", "-m", "squash A"]);
@@ -362,12 +457,22 @@ fn rebase_race_corrupts_and_restore_to_post_fetch_recovers() {
     r.jj(&["--at-operation", &post_fetch, "abandon", "botB"]);
     r.jj(&["status"]); // reconcile
 
-    assert!(!r.divergent().is_empty(), "the rebase race should have corrupted B into a divergent change");
+    assert!(
+        !r.divergent().is_empty(),
+        "the rebase race should have corrupted B into a divergent change"
+    );
 
     // Recovery: restore to the pre-rebase (post-fetch) op.
     r.runner().restore_operation(&post_fetch).unwrap();
-    assert!(r.divergent().is_empty(), "restore to post-fetch should clear the divergence");
-    assert_eq!(r.file_count("topB"), files_before, "B's files must all be intact after recovery");
+    assert!(
+        r.divergent().is_empty(),
+        "restore to post-fetch should clear the divergence"
+    );
+    assert_eq!(
+        r.file_count("topB"),
+        files_before,
+        "B's files must all be intact after recovery"
+    );
 }
 
 /// The load-bearing guarantee for a `divergent()`-only gate: proceeding through a
@@ -399,13 +504,38 @@ fn proceeding_through_a_nondivergent_reconcile_stays_clean() {
     let b_files_before = r.file_count("B");
 
     // The fetch imports A's squash-merge into the trunk.
-    r.jj(&["--ignore-working-copy", "new", "--no-edit", "master", "-m", "A-squash"]);
-    r.jj(&["--ignore-working-copy", "bookmark", "set", "master", "-r", "description(\"A-squash\")"]);
+    r.jj(&[
+        "--ignore-working-copy",
+        "new",
+        "--no-edit",
+        "master",
+        "-m",
+        "A-squash",
+    ]);
+    r.jj(&[
+        "--ignore-working-copy",
+        "bookmark",
+        "set",
+        "master",
+        "-r",
+        "description(\"A-squash\")",
+    ]);
     // A concurrent process, forked before the squash, adds INDEPENDENT work —
     // this forks the op log; the next command reconciles the two heads.
-    r.jj(&["--ignore-working-copy", "--at-operation", &op0, "new", "master", "-m", "INDEP"]);
+    r.jj(&[
+        "--ignore-working-copy",
+        "--at-operation",
+        &op0,
+        "new",
+        "master",
+        "-m",
+        "INDEP",
+    ]);
     r.jj(&["--ignore-working-copy", "log", "-r", "@"]);
-    assert!(r.divergent().is_empty(), "an independent concurrent reconcile must not diverge");
+    assert!(
+        r.divergent().is_empty(),
+        "an independent concurrent reconcile must not diverge"
+    );
 
     // jjpr proceeds: rebase the remaining stack onto the new trunk.
     r.jj(&["rebase", "-s", &b_change, "-d", "master"]);
@@ -415,7 +545,19 @@ fn proceeding_through_a_nondivergent_reconcile_stays_clean() {
         "proceeding through a non-divergent reconcile must stay clean; got divergence {:?}",
         r.divergent()
     );
-    assert_eq!(r.file_count("B"), b_files_before, "B's files must be intact");
-    assert!(r.reachable("INDEP"), "independent concurrent work must be preserved; got {:?}", r.descriptions());
-    assert!(r.reachable("B"), "B must be preserved; got {:?}", r.descriptions());
+    assert_eq!(
+        r.file_count("B"),
+        b_files_before,
+        "B's files must be intact"
+    );
+    assert!(
+        r.reachable("INDEP"),
+        "independent concurrent work must be preserved; got {:?}",
+        r.descriptions()
+    );
+    assert!(
+        r.reachable("B"),
+        "B must be preserved; got {:?}",
+        r.descriptions()
+    );
 }

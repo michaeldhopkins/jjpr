@@ -8,10 +8,10 @@ use crate::forge::comment;
 use crate::forge::http::HttpError;
 use crate::forge::types::{MergeMethod, PullRequest};
 use crate::forge::{Forge, ForgeKind};
-use crate::jj::types::NarrowedSegment;
 use crate::jj::Jj;
+use crate::jj::types::NarrowedSegment;
 
-use super::plan::{evaluate_segment, BlockReason, MergePlan, PrMergeStatus};
+use super::plan::{BlockReason, MergePlan, PrMergeStatus, evaluate_segment};
 
 /// jj's corruption signal — divergent change ids.
 enum Divergence {
@@ -278,7 +278,12 @@ fn reconcile_local_state(
         // merge-commit landings, so this only ever runs for a real restack).
         let dismissed = pr_map.and_then(|m| m.get(*name)).and_then(|pr| {
             crate::forge::approvals_dismissed_by_push(
-                forge, owner, repo, effective_base, pr.number, &mut dismiss_cache,
+                forge,
+                owner,
+                repo,
+                effective_base,
+                pr.number,
+                &mut dismiss_cache,
             )
             .map(|n| (n, pr.number))
         });
@@ -368,7 +373,11 @@ fn reconcile_forge_state(
         Ok(prs) => prs,
         Err(e) => {
             warnings.push(mk(format!("Failed to refresh PR list: {e}")));
-            return ForgeReconcileOutcome { fresh_map: None, warnings, native_stack_block };
+            return ForgeReconcileOutcome {
+                fresh_map: None,
+                warnings,
+                native_stack_block,
+            };
         }
     };
     let fresh_map = crate::forge::build_pr_map(fresh_prs, owner);
@@ -434,7 +443,11 @@ fn reconcile_forge_state(
         }
     }
 
-    ForgeReconcileOutcome { fresh_map: Some(fresh_map), warnings, native_stack_block }
+    ForgeReconcileOutcome {
+        fresh_map: Some(fresh_map),
+        warnings,
+        native_stack_block,
+    }
 }
 
 /// Split a stack-info comment's previous payload into `(live, fossils)`
@@ -456,8 +469,7 @@ fn partition_after_merge(
     let mut live = Vec::new();
     let mut fossils = Vec::new();
     for item in items {
-        let is_merged =
-            item.is_merged || merged_names.contains(item.bookmark_name.as_str());
+        let is_merged = item.is_merged || merged_names.contains(item.bookmark_name.as_str());
         let entry = comment::StackEntry {
             bookmark_name: item.bookmark_name.clone(),
             pr_url: Some(item.pr_url.clone()),
@@ -508,8 +520,17 @@ pub(crate) fn reconcile_after_merge(
          caller forgot to gate or reset state"
     );
     let warnings = reconcile_local_state(
-        jj, forge, owner, repo, pr_map, segments, seg_idx, effective_base,
-        &plan.remote_name, plan.options.reconcile_strategy, fk,
+        jj,
+        forge,
+        owner,
+        repo,
+        pr_map,
+        segments,
+        seg_idx,
+        effective_base,
+        &plan.remote_name,
+        plan.options.reconcile_strategy,
+        fk,
     );
     // Ordinary local-sync failures need a manual rebase (local_failed). A
     // concurrent op-log reconcile was handled work-preservingly (Concurrent
@@ -520,8 +541,16 @@ pub(crate) fn reconcile_after_merge(
     state.warnings.extend(warnings);
 
     let nav = comment::create_stack_nav(plan.stack_nav);
-    let outcome =
-        reconcile_forge_state(forge, nav.as_ref(), segments, seg_idx, owner, repo, effective_base, fk);
+    let outcome = reconcile_forge_state(
+        forge,
+        nav.as_ref(),
+        segments,
+        seg_idx,
+        owner,
+        repo,
+        effective_base,
+        fk,
+    );
     if !outcome.warnings.is_empty() {
         state.forge_failed = true;
         state.warnings.extend(outcome.warnings);
@@ -679,7 +708,9 @@ impl ReconcileState {
     /// only the rebase back to preserve work). Derived from the warnings so the
     /// struct stays a plain flag/warning bag.
     pub fn has_concurrent(&self) -> bool {
-        self.warnings.iter().any(|w| w.kind == DivergenceKind::Concurrent)
+        self.warnings
+            .iter()
+            .any(|w| w.kind == DivergenceKind::Concurrent)
     }
 
     /// Block reasons corresponding to the current failure flags. Returns
@@ -745,9 +776,8 @@ pub fn execute_merge_plan(
     // Always evaluate segments just-in-time against fresh forge state.
     // The upfront plan.actions are only used for dry_run display.
     let fresh_prs = github.list_open_prs(owner, repo)?;
-    let mut pr_map: Option<HashMap<String, PullRequest>> = Some(
-        crate::forge::build_pr_map(fresh_prs, owner),
-    );
+    let mut pr_map: Option<HashMap<String, PullRequest>> =
+        Some(crate::forge::build_pr_map(fresh_prs, owner));
 
     for (seg_idx, segment) in segments.iter().enumerate() {
         let status = if let Some(ref map) = pr_map {
@@ -788,15 +818,24 @@ pub fn execute_merge_plan(
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
                 println!(
                     "  Merging '{bookmark_name}' ({}, {})...",
-                    fk.format_ref(pr.number), plan.options.merge_method
+                    fk.format_ref(pr.number),
+                    plan.options.merge_method
                 );
                 println!("    {}", pr.html_url);
 
                 merge_with_retry(
-                    github, owner, repo, pr.number, plan.options.merge_method, fk,
+                    github,
+                    owner,
+                    repo,
+                    pr.number,
+                    plan.options.merge_method,
+                    fk,
                 )
                 .with_context(|| {
-                    format!("failed to merge {} for '{bookmark_name}'", fk.format_ref(pr.number))
+                    format!(
+                        "failed to merge {} for '{bookmark_name}'",
+                        fk.format_ref(pr.number)
+                    )
                 })?;
 
                 merged.push(MergedPr {
@@ -832,16 +871,23 @@ pub fn execute_merge_plan(
         // Reconcile after any resolved segment (merged or already-merged).
         if needs_reconcile && seg_idx + 1 < segments.len() {
             let fresh_map = reconcile_after_merge(
-                jj, github, segments, seg_idx, plan, fk, pr_map.as_ref(), &mut state,
+                jj,
+                github,
+                segments,
+                seg_idx,
+                plan,
+                fk,
+                pr_map.as_ref(),
+                &mut state,
             );
             pr_map = fresh_map;
 
             // Stop here if reconcile produced any failures. Continuing
             // risks merging the next PR with a bloated diff (local stack
             // never rebased) or against stale forge state.
-            if let Some(blocked) = gate_after_reconcile(
-                &state, &segments[seg_idx + 1], pr_map.as_ref(), fk,
-            ) {
+            if let Some(blocked) =
+                gate_after_reconcile(&state, &segments[seg_idx + 1], pr_map.as_ref(), fk)
+            {
                 blocked_at = Some(blocked);
                 break;
             }
@@ -888,7 +934,10 @@ pub(crate) fn merge_with_retry(
                             if let Ok(state) = forge.get_pr_state(owner, repo, number)
                                 && state.merged
                             {
-                                println!("    {} was merged despite the error.", fk.format_ref(number));
+                                println!(
+                                    "    {} was merged despite the error.",
+                                    fk.format_ref(number)
+                                );
                                 return Ok(());
                             }
                             if attempt + 1 < MAX_ATTEMPTS {
@@ -949,7 +998,8 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
             PrMergeStatus::Mergeable { bookmark_name, pr } => {
                 println!(
                     "  Would merge '{bookmark_name}' ({}, {})",
-                    fk.format_ref(pr.number), plan.options.merge_method
+                    fk.format_ref(pr.number),
+                    plan.options.merge_method
                 );
                 merged.push(MergedPr {
                     bookmark_name: bookmark_name.clone(),
@@ -1180,31 +1230,16 @@ mod tests {
         fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
             Ok(self.open_prs.lock().expect("poisoned").clone())
         }
-        fn find_merged_pr(
-            &self,
-            _o: &str,
-            _r: &str,
-            head: &str,
-        ) -> Result<Option<PullRequest>> {
+        fn find_merged_pr(&self, _o: &str, _r: &str, head: &str) -> Result<Option<PullRequest>> {
             Ok(self.merged_prs.get(head).cloned())
         }
-        fn get_pr_mergeability(
-            &self,
-            _o: &str,
-            _r: &str,
-            n: u64,
-        ) -> Result<PrMergeability> {
+        fn get_pr_mergeability(&self, _o: &str, _r: &str, n: u64) -> Result<PrMergeability> {
             self.mergeability
                 .get(&n)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no mergeability stub for PR #{n}"))
         }
-        fn get_pr_checks_status(
-            &self,
-            _o: &str,
-            _r: &str,
-            head: &str,
-        ) -> Result<ChecksStatus> {
+        fn get_pr_checks_status(&self, _o: &str, _r: &str, head: &str) -> Result<ChecksStatus> {
             self.checks
                 .get(head)
                 .cloned()
@@ -1216,21 +1251,60 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("no reviews stub for PR #{n}"))
         }
-        fn base_dismisses_stale_approvals(&self, _o: &str, _r: &str, base: &str) -> Result<Option<bool>> {
-            self.calls.lock().expect("poisoned").push(format!("dismiss:{base}"));
+        fn base_dismisses_stale_approvals(
+            &self,
+            _o: &str,
+            _r: &str,
+            base: &str,
+        ) -> Result<Option<bool>> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("dismiss:{base}"));
             Ok(self.dismiss_stale.get(base).copied().flatten())
         }
-        fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-        fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
-        fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-        fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-        fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
+        fn create_pr(
+            &self,
+            _o: &str,
+            _r: &str,
+            _t: &str,
+            _b: &str,
+            _h: &str,
+            _ba: &str,
+            _d: bool,
+        ) -> Result<PullRequest> {
+            unimplemented!()
+        }
+        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> {
+            unimplemented!()
+        }
+        fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+            Ok(vec![])
+        }
+        fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> {
+            unimplemented!()
+        }
+        fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            Ok("test".to_string())
+        }
         fn get_pr_state(&self, _o: &str, _r: &str, n: u64) -> Result<PrState> {
-            self.calls.lock().expect("poisoned").push(format!("get_pr_state:#{n}"));
-            Ok(PrState { merged: false, state: "open".to_string() })
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("get_pr_state:#{n}"));
+            Ok(PrState {
+                merged: false,
+                state: "open".to_string(),
+            })
         }
     }
 
@@ -1273,35 +1347,63 @@ mod tests {
 
     impl Jj for RecordingJj {
         fn git_fetch(&self) -> Result<()> {
-            self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push("git_fetch".to_string());
             Ok(())
         }
         fn is_rooted_in(&self, _root: &str, _base: &str) -> Result<bool> {
             Ok(self.is_rooted)
         }
         fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
-            self.calls.lock().expect("poisoned").push(format!("push:{name}:{remote}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("push:{name}:{remote}"));
             Ok(())
         }
         fn rebase_onto(&self, source: &str, dest: &str) -> Result<()> {
-            self.calls.lock().expect("poisoned").push(format!("rebase:{source}:{dest}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("rebase:{source}:{dest}"));
             Ok(())
         }
-        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-        fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-        fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            Ok(vec![])
+        }
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
+            Ok(vec![])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".to_string())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc".to_string())
+        }
         fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
-            self.calls.lock().expect("poisoned").push(format!("resolve_change_id:{change_id}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("resolve_change_id:{change_id}"));
             Ok(vec!["dummy_commit_id".to_string()])
         }
         fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
-            self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("merge_into:{bookmark}:{dest}"));
             Ok(())
         }
         fn is_conflicted(&self, revset: &str) -> Result<bool> {
-            self.calls.lock().expect("poisoned").push(format!("is_conflicted:{revset}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("is_conflicted:{revset}"));
             // Accepts a bare bookmark or the `<root>::<bookmark>` range the
             // reconcile actually passes, so a test names a bookmark and stays
             // readable either way.
@@ -1318,33 +1420,61 @@ mod tests {
     }
     impl FailingPushJj {
         fn new() -> Self {
-            Self { calls: Mutex::new(Vec::new()) }
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
         }
     }
     impl Jj for FailingPushJj {
         fn git_fetch(&self) -> Result<()> {
-            self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push("git_fetch".to_string());
             Ok(())
         }
         fn push_bookmark(&self, name: &str, _remote: &str) -> Result<()> {
-            self.calls.lock().expect("poisoned").push(format!("push:{name}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("push:{name}"));
             anyhow::bail!("jj git push failed: conflicted commits")
         }
         fn rebase_onto(&self, source: &str, dest: &str) -> Result<()> {
-            self.calls.lock().expect("poisoned").push(format!("rebase:{source}:{dest}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("rebase:{source}:{dest}"));
             Ok(())
         }
-        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-        fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-        fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            Ok(vec![])
+        }
+        fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
+            Ok(vec![])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".to_string())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc".to_string())
+        }
         fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
-            self.calls.lock().expect("poisoned").push(format!("resolve:{change_id}"));
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("resolve:{change_id}"));
             Ok(vec!["dummy".to_string()])
         }
-        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
-        fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+        fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> {
+            Ok(())
+        }
+        fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+            Ok(false)
+        }
     }
 
     /// `auth` mergeable with `profile` blocked above it — the shape every
@@ -1436,11 +1566,10 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
         // Profile's base points at auth (needs retargeting)
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let plan = MergePlan {
             actions: vec![
@@ -1471,14 +1600,21 @@ mod tests {
 
         let jj_calls = jj.calls();
         assert!(jj_calls.contains(&"git_fetch".to_string()));
-        assert!(jj_calls.iter().any(|c| c.starts_with("rebase:ch_profile:main")));
+        assert!(
+            jj_calls
+                .iter()
+                .any(|c| c.starts_with("rebase:ch_profile:main"))
+        );
         assert!(jj_calls.iter().any(|c| c == "push:profile:origin"));
 
         // Should retarget profile PR from auth → main
         assert!(gh.calls().iter().any(|c| c == "update_base:#2:main"));
 
         // Happy path: no local warnings
-        assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+        assert!(
+            result.local_warnings.is_empty(),
+            "happy path should have no local warnings"
+        );
     }
 
     // The partially-stacked shape, verified reachable on a live repo: a native
@@ -1539,7 +1675,10 @@ mod tests {
 
         // Blocking still matters: jjpr must not carry on into a stack it cannot
         // advance, even though evaluate_segment would also refuse the stacked PR.
-        let blocked = result.blocked_at.as_ref().expect("must stop after the skip");
+        let blocked = result
+            .blocked_at
+            .as_ref()
+            .expect("must stop after the skip");
         assert_eq!(blocked.bookmark_name, "profile");
 
         // Reported as the same BlockReason the pre-merge check emits, so the
@@ -1651,7 +1790,9 @@ mod tests {
         // would error out on exactly the repos jjpr works hardest to survive.
         assert!(
             jj.calls().iter().any(|c| {
-                c.starts_with("is_conflicted:") && c.contains("::profile") && c.contains("change_id(")
+                c.starts_with("is_conflicted:")
+                    && c.contains("::profile")
+                    && c.contains("change_id(")
             }),
             "should screen the segment range divergence-safely, not the bare bookmark: {:?}",
             jj.calls()
@@ -1691,7 +1832,10 @@ mod tests {
             "the conflicted one must not be: {calls:?}"
         );
         assert!(
-            result.local_warnings.iter().any(|w| w.message.contains("settings")),
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("settings")),
             "{:?}",
             result.local_warnings
         );
@@ -1708,7 +1852,8 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
         gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let plan = MergePlan {
@@ -1738,10 +1883,19 @@ mod tests {
 
         let jj_calls = jj.calls();
         assert!(jj_calls.contains(&"git_fetch".to_string()), "still fetches");
-        assert!(!jj_calls.iter().any(|c| c.starts_with("rebase:")), "must not rebase: {jj_calls:?}");
-        assert!(!jj_calls.iter().any(|c| c.starts_with("push:")), "must not force-push: {jj_calls:?}");
+        assert!(
+            !jj_calls.iter().any(|c| c.starts_with("rebase:")),
+            "must not rebase: {jj_calls:?}"
+        );
+        assert!(
+            !jj_calls.iter().any(|c| c.starts_with("push:")),
+            "must not force-push: {jj_calls:?}"
+        );
         // Forge retarget is independent of the local skip and must still happen.
-        assert!(gh.calls().iter().any(|c| c == "update_base:#2:main"), "still retargets base");
+        assert!(
+            gh.calls().iter().any(|c| c == "update_base:#2:main"),
+            "still retargets base"
+        );
         assert!(result.local_warnings.is_empty());
     }
 
@@ -1751,10 +1905,9 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let config = crate::config::Config::default();
         let opts = MergeOptions {
@@ -1810,10 +1963,9 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let plan = MergePlan {
             actions: vec![
@@ -1916,10 +2068,9 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let mut opts = default_options();
         opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
@@ -1969,10 +2120,9 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let plan = MergePlan {
             actions: vec![
@@ -2017,14 +2167,12 @@ mod tests {
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2)
             .with_evaluatable_pr("settings", 3);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.checks.insert("sha_settings".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
-        gh.open_prs.lock().expect("poisoned")[2]
-            .base
-            .ref_name = "profile".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_settings".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[2].base.ref_name = "profile".to_string();
 
         let mut opts = default_options();
         opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
@@ -2084,35 +2232,64 @@ mod tests {
             calls: Mutex<Vec<String>>,
         }
         impl FailingMergeJj {
-            fn new() -> Self { Self { calls: Mutex::new(Vec::new()) } }
-            fn calls(&self) -> Vec<String> { self.calls.lock().expect("poisoned").clone() }
+            fn new() -> Self {
+                Self {
+                    calls: Mutex::new(Vec::new()),
+                }
+            }
+            fn calls(&self) -> Vec<String> {
+                self.calls.lock().expect("poisoned").clone()
+            }
         }
         impl Jj for FailingMergeJj {
             fn git_fetch(&self) -> Result<()> {
-                self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push("git_fetch".to_string());
                 Ok(())
             }
             fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
-                self.calls.lock().expect("poisoned").push(format!("push:{name}:{remote}"));
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push(format!("push:{name}:{remote}"));
                 Ok(())
             }
-            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
             fn merge_into(&self, bookmark: &str, _dest: &str) -> Result<()> {
-                self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}"));
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push(format!("merge_into:{bookmark}"));
                 if bookmark == "profile" {
                     anyhow::bail!("merge conflict in profile")
                 }
                 Ok(())
             }
-            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".to_string())
+            }
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["dummy".to_string()])
             }
-            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
 
         let jj = FailingMergeJj::new();
@@ -2120,14 +2297,12 @@ mod tests {
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2)
             .with_evaluatable_pr("settings", 3);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.checks.insert("sha_settings".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
-        gh.open_prs.lock().expect("poisoned")[2]
-            .base
-            .ref_name = "profile".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_settings".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[2].base.ref_name = "profile".to_string();
 
         let mut opts = default_options();
         opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
@@ -2191,21 +2366,38 @@ mod tests {
             calls: Mutex<Vec<String>>,
         }
         impl ConflictingMergeJj {
-            fn new() -> Self { Self { calls: Mutex::new(Vec::new()) } }
-            fn calls(&self) -> Vec<String> { self.calls.lock().expect("poisoned").clone() }
+            fn new() -> Self {
+                Self {
+                    calls: Mutex::new(Vec::new()),
+                }
+            }
+            fn calls(&self) -> Vec<String> {
+                self.calls.lock().expect("poisoned").clone()
+            }
         }
         impl Jj for ConflictingMergeJj {
             fn git_fetch(&self) -> Result<()> {
-                self.calls.lock().expect("poisoned").push("git_fetch".to_string());
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push("git_fetch".to_string());
                 Ok(())
             }
             fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
-                self.calls.lock().expect("poisoned").push(format!("push:{name}:{remote}"));
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push(format!("push:{name}:{remote}"));
                 Ok(())
             }
-            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
             fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()> {
-                self.calls.lock().expect("poisoned").push(format!("merge_into:{bookmark}:{dest}"));
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push(format!("merge_into:{bookmark}:{dest}"));
                 Ok(())
             }
             fn is_conflicted(&self, revset: &str) -> Result<bool> {
@@ -2214,11 +2406,21 @@ mod tests {
                 // rather than the bare bookmark, so match either form.
                 Ok(revset == "profile" || revset.ends_with("::profile"))
             }
-            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".to_string())
+            }
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["dummy".to_string()])
             }
@@ -2229,14 +2431,12 @@ mod tests {
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2)
             .with_evaluatable_pr("settings", 3);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
-        gh.checks.insert("sha_settings".to_string(), ChecksStatus::Pending);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
-        gh.open_prs.lock().expect("poisoned")[2]
-            .base
-            .ref_name = "profile".to_string();
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_settings".to_string(), ChecksStatus::Pending);
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[2].base.ref_name = "profile".to_string();
 
         let mut opts = default_options();
         opts.reconcile_strategy = crate::config::ReconcileStrategy::Merge;
@@ -2287,8 +2487,12 @@ mod tests {
         );
         // Warning should mention the conflict
         assert!(
-            result.local_warnings.iter().any(|w| w.message.contains("has conflicts")),
-            "should warn about conflicts: {:?}", result.local_warnings
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("has conflicts")),
+            "should warn about conflicts: {:?}",
+            result.local_warnings
         );
     }
 
@@ -2299,7 +2503,8 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
             actions: vec![
@@ -2331,7 +2536,10 @@ mod tests {
             "should not retarget when base is already correct: {:?}",
             gh.calls()
         );
-        assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+        assert!(
+            result.local_warnings.is_empty(),
+            "happy path should have no local warnings"
+        );
     }
 
     #[test]
@@ -2340,7 +2548,8 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
 
         let plan = MergePlan {
             actions: vec![
@@ -2371,7 +2580,10 @@ mod tests {
             "should push to the remote from the plan, not hardcoded origin: {:?}",
             jj.calls()
         );
-        assert!(result.local_warnings.is_empty(), "happy path should have no local warnings");
+        assert!(
+            result.local_warnings.is_empty(),
+            "happy path should have no local warnings"
+        );
     }
 
     #[test]
@@ -2492,25 +2704,77 @@ mod tests {
             fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
                 Ok(vec![make_pr("auth", 1)])
             }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { Ok(ChecksStatus::Pass) }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(
+                &self,
+                _o: &str,
+                _r: &str,
+                _n: u64,
+                _revs: &[String],
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                Ok(vec![])
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                Ok(ChecksStatus::Pass)
+            }
             fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
-                Ok(ReviewSummary { approved_count: 1, changes_requested: false })
+                Ok(ReviewSummary {
+                    approved_count: 1,
+                    changes_requested: false,
+                })
             }
             fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
-                Ok(PrMergeability { mergeable: Some(true), mergeable_state: "clean".to_string() })
+                Ok(PrMergeability {
+                    mergeable: Some(true),
+                    mergeable_state: "clean".to_string(),
+                })
             }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
         }
 
@@ -2518,7 +2782,8 @@ mod tests {
         let plan = make_plan_single_mergeable("auth", 1);
         let segments = vec![make_segment("auth")];
 
-        let err = execute_merge_plan(&jj, &FailingMergeGitHub, &plan, &segments, false).unwrap_err();
+        let err =
+            execute_merge_plan(&jj, &FailingMergeGitHub, &plan, &segments, false).unwrap_err();
         assert!(format!("{err:#}").contains("merge conflict detected"));
     }
 
@@ -2603,7 +2868,10 @@ mod tests {
 
         let gh_calls = gh.calls();
         assert_eq!(
-            gh_calls.iter().filter(|c| c.starts_with("merge_pr")).count(),
+            gh_calls
+                .iter()
+                .filter(|c| c.starts_with("merge_pr"))
+                .count(),
             3,
             "should merge all 3 PRs: {gh_calls:?}"
         );
@@ -2745,11 +3013,10 @@ mod tests {
         let mut gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.checks.insert("sha_profile".to_string(), ChecksStatus::Pending);
+        gh.checks
+            .insert("sha_profile".to_string(), ChecksStatus::Pending);
         // Profile's base still points at auth (needs retarget to coworker-feat, not main)
-        gh.open_prs.lock().expect("poisoned")[0]
-            .base
-            .ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[0].base.ref_name = "auth".to_string();
 
         let plan = MergePlan {
             actions: vec![
@@ -2777,13 +3044,17 @@ mod tests {
 
         // Should rebase onto coworker-feat, not main
         assert!(
-            jj.calls().iter().any(|c| c == "rebase:ch_profile:coworker-feat"),
+            jj.calls()
+                .iter()
+                .any(|c| c == "rebase:ch_profile:coworker-feat"),
             "should rebase onto stack_base: {:?}",
             jj.calls()
         );
         // Should retarget to coworker-feat, not main
         assert!(
-            gh.calls().iter().any(|c| c == "update_base:#2:coworker-feat"),
+            gh.calls()
+                .iter()
+                .any(|c| c == "update_base:#2:coworker-feat"),
             "should retarget to stack_base: {:?}",
             gh.calls()
         );
@@ -2792,24 +3063,51 @@ mod tests {
     #[test]
     fn test_format_block_reasons_github() {
         let fk = ForgeKind::GitHub;
-        assert_eq!(format_block_reason(&BlockReason::NoPr, fk), "No PR exists for this bookmark");
-        assert_eq!(format_block_reason(&BlockReason::Draft, fk), "PR is still a draft");
-        assert_eq!(format_block_reason(&BlockReason::ChecksFailing, fk), "CI checks are failing");
-        assert_eq!(format_block_reason(&BlockReason::ChecksPending, fk), "CI checks are pending");
+        assert_eq!(
+            format_block_reason(&BlockReason::NoPr, fk),
+            "No PR exists for this bookmark"
+        );
+        assert_eq!(
+            format_block_reason(&BlockReason::Draft, fk),
+            "PR is still a draft"
+        );
+        assert_eq!(
+            format_block_reason(&BlockReason::ChecksFailing, fk),
+            "CI checks are failing"
+        );
+        assert_eq!(
+            format_block_reason(&BlockReason::ChecksPending, fk),
+            "CI checks are pending"
+        );
         assert_eq!(
             format_block_reason(&BlockReason::InsufficientApprovals { have: 0, need: 2 }, fk),
             "Insufficient approvals (0/2)"
         );
-        assert_eq!(format_block_reason(&BlockReason::ChangesRequested, fk), "Changes have been requested");
-        assert_eq!(format_block_reason(&BlockReason::Conflicted, fk), "Has merge conflicts");
-        assert!(format_block_reason(&BlockReason::MergeabilityUnknown, fk).contains("still being computed"));
+        assert_eq!(
+            format_block_reason(&BlockReason::ChangesRequested, fk),
+            "Changes have been requested"
+        );
+        assert_eq!(
+            format_block_reason(&BlockReason::Conflicted, fk),
+            "Has merge conflicts"
+        );
+        assert!(
+            format_block_reason(&BlockReason::MergeabilityUnknown, fk)
+                .contains("still being computed")
+        );
     }
 
     #[test]
     fn test_format_block_reasons_gitlab() {
         let fk = ForgeKind::GitLab;
-        assert_eq!(format_block_reason(&BlockReason::NoPr, fk), "No MR exists for this bookmark");
-        assert_eq!(format_block_reason(&BlockReason::Draft, fk), "MR is still a draft");
+        assert_eq!(
+            format_block_reason(&BlockReason::NoPr, fk),
+            "No MR exists for this bookmark"
+        );
+        assert_eq!(
+            format_block_reason(&BlockReason::Draft, fk),
+            "MR is still a draft"
+        );
     }
 
     #[test]
@@ -2828,33 +3126,92 @@ mod tests {
                         method: "PUT".to_string(),
                         path: "repos/o/r/pulls/1/merge".to_string(),
                         body: "Bad Gateway".to_string(),
-                    }.into())
+                    }
+                    .into())
                 } else {
                     Ok(())
                 }
             }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
-            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(
+                &self,
+                _o: &str,
+                _r: &str,
+                _n: u64,
+                _revs: &[String],
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                Ok(vec![])
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
         }
 
         let result = merge_with_retry(
-            &RetryGitHub { attempt: AtomicU32::new(0) },
-            "o", "r", 1, MergeMethod::Squash, ForgeKind::GitHub,
+            &RetryGitHub {
+                attempt: AtomicU32::new(0),
+            },
+            "o",
+            "r",
+            1,
+            MergeMethod::Squash,
+            ForgeKind::GitHub,
         );
         assert!(result.is_ok(), "should succeed after retry: {result:?}");
     }
@@ -2869,32 +3226,92 @@ mod tests {
                     method: "PUT".to_string(),
                     path: "repos/o/r/pulls/1/merge".to_string(),
                     body: r#"{"message":"Merge already in progress"}"#.to_string(),
-                }.into())
+                }
+                .into())
             }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: true, state: "closed".to_string() })
+                Ok(PrState {
+                    merged: true,
+                    state: "closed".to_string(),
+                })
             }
-            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(
+                &self,
+                _o: &str,
+                _r: &str,
+                _n: u64,
+                _revs: &[String],
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                Ok(vec![])
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
         }
 
         let result = merge_with_retry(
             &AlreadyInProgressGitHub,
-            "o", "r", 1, MergeMethod::Squash, ForgeKind::GitHub,
+            "o",
+            "r",
+            1,
+            MergeMethod::Squash,
+            ForgeKind::GitHub,
         );
-        assert!(result.is_ok(), "should succeed when state shows merged: {result:?}");
+        assert!(
+            result.is_ok(),
+            "should succeed when state shows merged: {result:?}"
+        );
     }
 
     #[test]
@@ -2907,30 +3324,87 @@ mod tests {
                     method: "PUT".to_string(),
                     path: "repos/o/r/pulls/1/merge".to_string(),
                     body: "Bad request".to_string(),
-                }.into())
+                }
+                .into())
             }
             fn get_pr_state(&self, _o: &str, _r: &str, _n: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".to_string() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".to_string(),
+                })
             }
-            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> { Ok(vec![]) }
-            fn create_pr(&self, _o: &str, _r: &str, _t: &str, _b: &str, _h: &str, _ba: &str, _d: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _revs: &[String]) -> Result<()> { unimplemented!() }
-            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
-            fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> { unimplemented!() }
-            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> { unimplemented!() }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".to_string()) }
-            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> { Ok(None) }
-            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> { unimplemented!() }
-            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> { unimplemented!() }
-            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> { unimplemented!() }
+            fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+                Ok(vec![])
+            }
+            fn create_pr(
+                &self,
+                _o: &str,
+                _r: &str,
+                _t: &str,
+                _b: &str,
+                _h: &str,
+                _ba: &str,
+                _d: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn request_reviewers(
+                &self,
+                _o: &str,
+                _r: &str,
+                _n: u64,
+                _revs: &[String],
+            ) -> Result<()> {
+                unimplemented!()
+            }
+            fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
+                Ok(vec![])
+            }
+            fn create_comment(
+                &self,
+                _o: &str,
+                _r: &str,
+                _i: u64,
+                _b: &str,
+            ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+                unimplemented!()
+            }
+            fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+                unimplemented!()
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".to_string())
+            }
+            fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
+            fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+                unimplemented!()
+            }
+            fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+                unimplemented!()
+            }
+            fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+                unimplemented!()
+            }
         }
 
         let result = merge_with_retry(
             &BadRequestGitHub,
-            "o", "r", 1, MergeMethod::Squash, ForgeKind::GitHub,
+            "o",
+            "r",
+            1,
+            MergeMethod::Squash,
+            ForgeKind::GitHub,
         );
         assert!(result.is_err(), "should fail immediately on 400");
     }
@@ -2944,19 +3418,39 @@ mod tests {
         // RecordingJj that returns 2 commit IDs for resolve_change_id
         struct DivergentJj;
         impl Jj for DivergentJj {
-            fn git_fetch(&self) -> Result<()> { Ok(()) }
-            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
-            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
-            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn git_fetch(&self) -> Result<()> {
+                Ok(())
+            }
+            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".to_string())
+            }
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["commit_a".to_string(), "commit_b".to_string()])
             }
-            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
-            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
 
         let plan = MergePlan {
@@ -2984,7 +3478,12 @@ mod tests {
 
         // auth merges; profile is gated because reconcile detected divergence.
         // Continuing would risk merging profile with a bloated diff.
-        assert_eq!(result.merged.len(), 1, "only auth should merge: {:?}", result.merged);
+        assert_eq!(
+            result.merged.len(),
+            1,
+            "only auth should merge: {:?}",
+            result.merged
+        );
         assert_eq!(result.merged[0].bookmark_name, "auth");
         assert!(gh.calls().iter().any(|c| c == "merge_pr:#1:squash"));
         assert!(
@@ -2995,8 +3494,12 @@ mod tests {
         assert_eq!(blocked.bookmark_name, "profile");
         assert!(blocked.reasons.contains(&BlockReason::LocalSyncFailed));
         assert!(
-            result.local_warnings.iter().any(|w| w.message.contains("divergent")),
-            "divergence should still be reported: {:?}", result.local_warnings
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("divergent")),
+            "divergence should still be reported: {:?}",
+            result.local_warnings
         );
     }
 
@@ -3025,14 +3528,30 @@ mod tests {
         // Divergent at the segment's oldest commit only; the tip resolves fine.
         struct DivergentRootJj;
         impl Jj for DivergentRootJj {
-            fn git_fetch(&self) -> Result<()> { Ok(()) }
-            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
-            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> { Ok(()) }
-            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn git_fetch(&self) -> Result<()> {
+                Ok(())
+            }
+            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".to_string())
+            }
             fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
                 if change_id == "ch_root" {
                     Ok(vec!["commit_a".to_string(), "commit_b".to_string()])
@@ -3040,8 +3559,12 @@ mod tests {
                     Ok(vec!["commit_only".to_string()])
                 }
             }
-            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
-            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
 
         let mut profile = make_segment("profile");
@@ -3052,7 +3575,11 @@ mod tests {
         root.local_bookmarks = vec![];
         profile.changes.push(root);
         assert_eq!(rebase_root(&profile), "ch_root", "precondition");
-        assert_ne!(rebase_root(&profile), profile.bookmark.change_id, "root != tip");
+        assert_ne!(
+            rebase_root(&profile),
+            profile.bookmark.change_id,
+            "root != tip"
+        );
 
         let plan = MergePlan {
             actions: vec![
@@ -3077,7 +3604,12 @@ mod tests {
 
         let result = execute_merge_plan(&DivergentRootJj, &gh, &plan, &segments, false).unwrap();
 
-        assert_eq!(result.merged.len(), 1, "only auth should merge: {:?}", result.merged);
+        assert_eq!(
+            result.merged.len(),
+            1,
+            "only auth should merge: {:?}",
+            result.merged
+        );
         assert!(
             !gh.calls().iter().any(|c| c == "merge_pr:#2:squash"),
             "profile must NOT merge while its rebase root is divergent"
@@ -3110,8 +3642,12 @@ mod tests {
             fn divergent_change_ids(&self) -> Result<Vec<String>> {
                 Ok(vec!["ch_root".to_string()])
             }
-            fn git_fetch(&self) -> Result<()> { panic!("gated before fetch") }
-            fn rebase_onto(&self, _s: &str, _d: &str) -> Result<()> { panic!("gated before rebase") }
+            fn git_fetch(&self) -> Result<()> {
+                panic!("gated before fetch")
+            }
+            fn rebase_onto(&self, _s: &str, _d: &str) -> Result<()> {
+                panic!("gated before rebase")
+            }
             fn resolve_change_id(&self, _c: &str) -> Result<Vec<String>> {
                 panic!("gated before the per-segment divergence check")
             }
@@ -3121,13 +3657,27 @@ mod tests {
             fn is_rooted_in(&self, _r: &str, _b: &str) -> Result<bool> {
                 panic!("gated before the is_rooted_in skip")
             }
-            fn push_bookmark(&self, _n: &str, _r: &str) -> Result<()> { panic!("gated before push") }
-            fn merge_into(&self, _b: &str, _d: &str) -> Result<()> { panic!("gated before merge_into") }
-            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn push_bookmark(&self, _n: &str, _r: &str) -> Result<()> {
+                panic!("gated before push")
+            }
+            fn merge_into(&self, _b: &str, _d: &str) -> Result<()> {
+                panic!("gated before merge_into")
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<crate::jj::types::Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<crate::jj::types::LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<crate::jj::types::GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".to_string())
+            }
         }
 
         let plan = MergePlan {
@@ -3172,9 +3722,7 @@ mod tests {
         assert!(!BlockReason::ChecksFailing.is_transient());
         assert!(!BlockReason::ChangesRequested.is_transient());
         assert!(!BlockReason::Conflicted.is_transient());
-        assert!(
-            !BlockReason::InsufficientApprovals { have: 0, need: 1 }.is_transient()
-        );
+        assert!(!BlockReason::InsufficientApprovals { have: 0, need: 1 }.is_transient());
         // LocalSyncFailed and ForgeReconcileFailed need user action; not transient.
         assert!(!BlockReason::LocalSyncFailed.is_transient());
         assert!(!BlockReason::ForgeReconcileFailed.is_transient());
@@ -3203,12 +3751,21 @@ mod tests {
             ForgeKind::GitHub,
         );
         assert!(msg.contains("#223"), "should name the stack: {msg}");
-        assert!(msg.contains("2 of 4"), "should say where in the stack: {msg}");
+        assert!(
+            msg.contains("2 of 4"),
+            "should say where in the stack: {msg}"
+        );
         // The remedy has to be the command that actually works — `jjpr merge`
         // never will, and GitHub's own 403 text ("use the web interface") is
         // stale now that `gh stack merge` exists.
-        assert!(msg.contains("gh stack merge 221"), "should give the remedy: {msg}");
-        assert!(msg.contains("the 1 below it"), "should say how much else lands: {msg}");
+        assert!(
+            msg.contains("gh stack merge 221"),
+            "should give the remedy: {msg}"
+        );
+        assert!(
+            msg.contains("the 1 below it"),
+            "should say how much else lands: {msg}"
+        );
     }
 
     // Caught by running the real binary against a real stack: at the bottom of a
@@ -3387,14 +3944,30 @@ mod tests {
             self.pushed.lock().expect("poisoned").push(name.to_string());
             Ok(())
         }
-        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-        fn get_default_branch(&self) -> Result<String> { Ok("main".into()) }
-        fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".into()) }
-        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> { Ok(vec!["c".into()]) }
-        fn merge_into(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-        fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            Ok(vec![])
+        }
+        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> {
+            Ok(vec![])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".into())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc".into())
+        }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec!["c".into()])
+        }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn is_conflicted(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
     }
 
     #[test]
@@ -3404,30 +3977,66 @@ mod tests {
         let mut gh = RecordingGitHub::new();
         gh.dismiss_stale.insert("main".to_string(), Some(true));
         gh.dismiss_stale.insert("release".to_string(), Some(false));
-        gh.reviews.insert(1, ReviewSummary { approved_count: 2, changes_requested: false });
-        gh.reviews.insert(2, ReviewSummary { approved_count: 0, changes_requested: false });
+        gh.reviews.insert(
+            1,
+            ReviewSummary {
+                approved_count: 2,
+                changes_requested: false,
+            },
+        );
+        gh.reviews.insert(
+            2,
+            ReviewSummary {
+                approved_count: 0,
+                changes_requested: false,
+            },
+        );
 
         let mut cache = HashMap::new();
         // Base resets approvals on push AND the PR is approved → how many are lost.
-        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "main", 1, &mut cache), Some(2));
+        assert_eq!(
+            approvals_dismissed_by_push(&gh, "o", "r", "main", 1, &mut cache),
+            Some(2)
+        );
         // Base resets, but nothing is approved → nothing to warn about.
-        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "main", 2, &mut cache), None);
+        assert_eq!(
+            approvals_dismissed_by_push(&gh, "o", "r", "main", 2, &mut cache),
+            None
+        );
         // Base does not reset approvals → no warning regardless of approvals.
-        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "release", 1, &mut cache), None);
+        assert_eq!(
+            approvals_dismissed_by_push(&gh, "o", "r", "release", 1, &mut cache),
+            None
+        );
         // Base protection undetermined (no rule / no permission) → no warning.
-        assert_eq!(approvals_dismissed_by_push(&gh, "o", "r", "unknown", 1, &mut cache), None);
+        assert_eq!(
+            approvals_dismissed_by_push(&gh, "o", "r", "unknown", 1, &mut cache),
+            None
+        );
 
         // The per-base lookup is cached: `main` was queried once despite two calls.
         let main_lookups = gh.calls().iter().filter(|c| *c == "dismiss:main").count();
-        assert_eq!(main_lookups, 1, "base dismiss lookup should be deduped per base");
+        assert_eq!(
+            main_lookups, 1,
+            "base dismiss lookup should be deduped per base"
+        );
     }
 
     fn reconcile_two(jj: &dyn Jj) -> Vec<LocalDivergenceWarning> {
         let segments = vec![make_segment("bottom"), make_segment("top")];
         let gh = RecordingGitHub::new();
         reconcile_local_state(
-            jj, &gh, "o", "r", None, &segments, 0, "main", "origin",
-            crate::config::ReconcileStrategy::Rebase, ForgeKind::GitHub,
+            jj,
+            &gh,
+            "o",
+            "r",
+            None,
+            &segments,
+            0,
+            "main",
+            "origin",
+            crate::config::ReconcileStrategy::Rebase,
+            ForgeKind::GitHub,
         )
     }
 
@@ -3440,8 +4049,14 @@ mod tests {
 
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
-        assert!(warnings[0].message.contains("ch_x"), "should name the divergent change");
-        assert!(!*jj.fetched.lock().unwrap(), "gates before touching the repo");
+        assert!(
+            warnings[0].message.contains("ch_x"),
+            "should name the divergent change"
+        );
+        assert!(
+            !*jj.fetched.lock().unwrap(),
+            "gates before touching the repo"
+        );
         assert!(!*jj.rebased.lock().unwrap());
         assert!(jj.restored.lock().unwrap().is_empty());
         assert!(jj.pushed.lock().unwrap().is_empty());
@@ -3458,11 +4073,17 @@ mod tests {
 
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
-        assert!(*jj.rebased.lock().unwrap(), "rebase was attempted (fetch was clean)");
+        assert!(
+            *jj.rebased.lock().unwrap(),
+            "rebase was attempted (fetch was clean)"
+        );
         // Restore targets exactly the post-fetch op — the only op captured, so we
         // structurally cannot roll back past the fetch.
         assert_eq!(*jj.restored.lock().unwrap(), vec!["pf".to_string()]);
-        assert!(jj.pushed.lock().unwrap().is_empty(), "must not push a mangled tree");
+        assert!(
+            jj.pushed.lock().unwrap().is_empty(),
+            "must not push a mangled tree"
+        );
     }
 
     #[test]
@@ -3473,7 +4094,9 @@ mod tests {
         let warnings = reconcile_two(&jj);
 
         assert!(
-            !warnings.iter().any(|w| w.kind == DivergenceKind::Concurrent),
+            !warnings
+                .iter()
+                .any(|w| w.kind == DivergenceKind::Concurrent),
             "got {warnings:?}"
         );
         assert!(*jj.rebased.lock().unwrap());
@@ -3492,9 +4115,18 @@ mod tests {
         let warnings = reconcile_two(&jj);
 
         assert!(warnings.is_empty(), "clean skip, no warnings: {warnings:?}");
-        assert!(*jj.fetched.lock().unwrap(), "still fetches to learn trunk moved");
-        assert!(!*jj.rebased.lock().unwrap(), "must not rebase an already-based stack");
-        assert!(jj.pushed.lock().unwrap().is_empty(), "must not force-push descendants");
+        assert!(
+            *jj.fetched.lock().unwrap(),
+            "still fetches to learn trunk moved"
+        );
+        assert!(
+            !*jj.rebased.lock().unwrap(),
+            "must not rebase an already-based stack"
+        );
+        assert!(
+            jj.pushed.lock().unwrap().is_empty(),
+            "must not force-push descendants"
+        );
         assert!(jj.restored.lock().unwrap().is_empty());
     }
 
@@ -3508,8 +4140,14 @@ mod tests {
 
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
-        assert!(!*jj.rebased.lock().unwrap(), "must not rebase when it can't verify the state");
-        assert!(jj.pushed.lock().unwrap().is_empty(), "must not push when it can't verify the state");
+        assert!(
+            !*jj.rebased.lock().unwrap(),
+            "must not rebase when it can't verify the state"
+        );
+        assert!(
+            jj.pushed.lock().unwrap().is_empty(),
+            "must not push when it can't verify the state"
+        );
     }
 
     /// `block_reasons()` ordering is load-bearing: prev_reconcile_block
@@ -3565,8 +4203,11 @@ mod tests {
             ],
             merge_source_names: vec![],
         };
-        assert_eq!(rebase_root(&seg), "ch_root",
-            "must use the oldest change id (changes.last()), not the bookmark tip");
+        assert_eq!(
+            rebase_root(&seg),
+            "ch_root",
+            "must use the oldest change id (changes.last()), not the bookmark tip"
+        );
     }
 
     #[test]
@@ -3599,20 +4240,33 @@ mod tests {
         let reasons = s.block_reasons();
         assert_eq!(
             reasons,
-            vec![BlockReason::LocalSyncFailed, BlockReason::ForgeReconcileFailed],
+            vec![
+                BlockReason::LocalSyncFailed,
+                BlockReason::ForgeReconcileFailed
+            ],
             "block_reasons must be deterministic and Local-first"
         );
     }
 
     #[test]
     fn block_reasons_local_only_omits_forge() {
-        let s = ReconcileState { local_failed: true, forge_failed: false, warnings: vec![], native_stack_block: None };
+        let s = ReconcileState {
+            local_failed: true,
+            forge_failed: false,
+            warnings: vec![],
+            native_stack_block: None,
+        };
         assert_eq!(s.block_reasons(), vec![BlockReason::LocalSyncFailed]);
     }
 
     #[test]
     fn block_reasons_forge_only_omits_local() {
-        let s = ReconcileState { local_failed: false, forge_failed: true, warnings: vec![], native_stack_block: None };
+        let s = ReconcileState {
+            local_failed: false,
+            forge_failed: true,
+            warnings: vec![],
+            native_stack_block: None,
+        };
         assert_eq!(s.block_reasons(), vec![BlockReason::ForgeReconcileFailed]);
     }
 
@@ -3645,17 +4299,39 @@ mod tests {
     fn reconcile_after_merge_panics_if_re_entered_with_local_failed() {
         struct StubJj;
         impl Jj for StubJj {
-            fn git_fetch(&self) -> Result<()> { Ok(()) }
-            fn push_bookmark(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn rebase_onto(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".into()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".into()) }
-            fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> { Ok(vec!["c".into()]) }
-            fn merge_into(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
+            fn git_fetch(&self) -> Result<()> {
+                Ok(())
+            }
+            fn push_bookmark(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".into())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".into())
+            }
+            fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
+                Ok(vec!["c".into()])
+            }
+            fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn is_conflicted(&self, _: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
         let gh = RecordingGitHub::new().with_evaluatable_pr("auth", 1);
         let plan = MergePlan {
@@ -3670,32 +4346,61 @@ mod tests {
         };
         let segments = vec![make_segment("auth"), make_segment("profile")];
         let mut state = ReconcileState {
-            local_failed: true,           // simulate caller re-entering
+            local_failed: true, // simulate caller re-entering
             forge_failed: false,
             native_stack_block: None,
             warnings: vec![],
         };
         // Should panic in debug builds.
-        reconcile_after_merge(&StubJj, &gh, &segments, 0, &plan, ForgeKind::GitHub, None, &mut state);
+        reconcile_after_merge(
+            &StubJj,
+            &gh,
+            &segments,
+            0,
+            &plan,
+            ForgeKind::GitHub,
+            None,
+            &mut state,
+        );
     }
 
     #[test]
     fn reconcile_after_merge_sets_local_failed_when_local_state_warns() {
         struct FailingFetchJj;
         impl Jj for FailingFetchJj {
-            fn git_fetch(&self) -> Result<()> { anyhow::bail!("fetch denied") }
-            fn push_bookmark(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn rebase_onto(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".into()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".into()) }
+            fn git_fetch(&self) -> Result<()> {
+                anyhow::bail!("fetch denied")
+            }
+            fn push_bookmark(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".into())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".into())
+            }
             fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
                 Ok(vec!["c".into()])
             }
-            fn merge_into(&self, _: &str, _: &str) -> Result<()> { Ok(()) }
-            fn is_conflicted(&self, _: &str) -> Result<bool> { Ok(false) }
+            fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn is_conflicted(&self, _: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
         let gh = RecordingGitHub::new().with_evaluatable_pr("profile", 2);
         let plan = MergePlan {
@@ -3711,11 +4416,23 @@ mod tests {
         let segments = vec![make_segment("auth"), make_segment("profile")];
         let mut state = ReconcileState::default();
 
-        reconcile_after_merge(&FailingFetchJj, &gh, &segments, 0, &plan, ForgeKind::GitHub, None, &mut state);
+        reconcile_after_merge(
+            &FailingFetchJj,
+            &gh,
+            &segments,
+            0,
+            &plan,
+            ForgeKind::GitHub,
+            None,
+            &mut state,
+        );
 
         assert!(state.local_failed, "fetch failure must set local_failed");
         assert!(
-            state.warnings.iter().any(|w| w.kind == DivergenceKind::Local),
+            state
+                .warnings
+                .iter()
+                .any(|w| w.kind == DivergenceKind::Local),
             "fetch failure must record a Local-kind warning"
         );
     }
@@ -3727,26 +4444,68 @@ mod tests {
             fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
                 anyhow::bail!("502 bad gateway")
             }
-            fn create_pr(&self, _: &str, _: &str, _: &str, _: &str, _: &str, _: &str, _: bool) -> Result<PullRequest> { unimplemented!() }
-            fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
-            fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
-            fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> { Ok(()) }
-            fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> { Ok(()) }
-            fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> { Ok(vec![]) }
-            fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> { unimplemented!() }
-            fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> { Ok(()) }
-            fn get_authenticated_user(&self) -> Result<String> { Ok("test".into()) }
-            fn merge_pr(&self, _: &str, _: &str, _: u64, _: MergeMethod) -> Result<()> { Ok(()) }
-            fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> { Ok(ChecksStatus::Pass) }
+            fn create_pr(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: bool,
+            ) -> Result<PullRequest> {
+                unimplemented!()
+            }
+            fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                Ok(())
+            }
+            fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> {
+                Ok(())
+            }
+            fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> {
+                Ok(vec![])
+            }
+            fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+                Ok(())
+            }
+            fn get_authenticated_user(&self) -> Result<String> {
+                Ok("test".into())
+            }
+            fn merge_pr(&self, _: &str, _: &str, _: u64, _: MergeMethod) -> Result<()> {
+                Ok(())
+            }
+            fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+                Ok(ChecksStatus::Pass)
+            }
             fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
-                Ok(ReviewSummary { approved_count: 1, changes_requested: false })
+                Ok(ReviewSummary {
+                    approved_count: 1,
+                    changes_requested: false,
+                })
             }
             fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
-                Ok(PrMergeability { mergeable: Some(true), mergeable_state: "clean".into() })
+                Ok(PrMergeability {
+                    mergeable: Some(true),
+                    mergeable_state: "clean".into(),
+                })
             }
-            fn find_merged_pr(&self, _: &str, _: &str, _: &str) -> Result<Option<PullRequest>> { Ok(None) }
+            fn find_merged_pr(&self, _: &str, _: &str, _: &str) -> Result<Option<PullRequest>> {
+                Ok(None)
+            }
             fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
-                Ok(PrState { merged: false, state: "open".into() })
+                Ok(PrState {
+                    merged: false,
+                    state: "open".into(),
+                })
             }
         }
         let plan = MergePlan {
@@ -3763,11 +4522,26 @@ mod tests {
         let jj = RecordingJj::new();
         let mut state = ReconcileState::default();
 
-        reconcile_after_merge(&jj, &ListFailGitHub, &segments, 0, &plan, ForgeKind::GitHub, None, &mut state);
+        reconcile_after_merge(
+            &jj,
+            &ListFailGitHub,
+            &segments,
+            0,
+            &plan,
+            ForgeKind::GitHub,
+            None,
+            &mut state,
+        );
 
-        assert!(state.forge_failed, "list_open_prs failure must set forge_failed");
         assert!(
-            state.warnings.iter().any(|w| w.kind == DivergenceKind::Forge),
+            state.forge_failed,
+            "list_open_prs failure must set forge_failed"
+        );
+        assert!(
+            state
+                .warnings
+                .iter()
+                .any(|w| w.kind == DivergenceKind::Forge),
             "forge failure must record a Forge-kind warning"
         );
     }
@@ -3855,8 +4629,10 @@ mod tests {
         let result = execute_merge_plan(&jj, &gh, &plan, &segments, false).unwrap();
 
         assert_eq!(
-            result.merged.len(), 1,
-            "only auth should merge before the gate fires: merged={:?}", result.merged
+            result.merged.len(),
+            1,
+            "only auth should merge before the gate fires: merged={:?}",
+            result.merged
         );
         assert_eq!(result.merged[0].bookmark_name, "auth");
         assert!(gh.calls().iter().any(|c| c == "merge_pr:#1:squash"));
@@ -3881,21 +4657,39 @@ mod tests {
     fn test_rebase_failure_blocks_subsequent_merges() {
         struct FailingRebaseJj;
         impl Jj for FailingRebaseJj {
-            fn git_fetch(&self) -> Result<()> { Ok(()) }
-            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> { Ok(()) }
+            fn git_fetch(&self) -> Result<()> {
+                Ok(())
+            }
+            fn push_bookmark(&self, _name: &str, _remote: &str) -> Result<()> {
+                Ok(())
+            }
             fn rebase_onto(&self, _source: &str, _dest: &str) -> Result<()> {
                 anyhow::bail!("rebase failed: conflict")
             }
-            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> { Ok(vec![]) }
-            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> { Ok(vec![]) }
-            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> { Ok(vec![]) }
-            fn get_default_branch(&self) -> Result<String> { Ok("main".to_string()) }
-            fn get_working_copy_commit_id(&self) -> Result<String> { Ok("wc".to_string()) }
+            fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+                Ok(vec![])
+            }
+            fn get_changes_to_commit(&self, _to: &str) -> Result<Vec<LogEntry>> {
+                Ok(vec![])
+            }
+            fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+                Ok(vec![])
+            }
+            fn get_default_branch(&self) -> Result<String> {
+                Ok("main".to_string())
+            }
+            fn get_working_copy_commit_id(&self) -> Result<String> {
+                Ok("wc".to_string())
+            }
             fn resolve_change_id(&self, _change_id: &str) -> Result<Vec<String>> {
                 Ok(vec!["dummy".to_string()])
             }
-            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> { Ok(()) }
-            fn is_conflicted(&self, _revset: &str) -> Result<bool> { Ok(false) }
+            fn merge_into(&self, _bookmark: &str, _dest: &str) -> Result<()> {
+                Ok(())
+            }
+            fn is_conflicted(&self, _revset: &str) -> Result<bool> {
+                Ok(false)
+            }
         }
 
         let gh = RecordingGitHub::new()
@@ -3929,7 +4723,12 @@ mod tests {
         let blocked = result.blocked_at.expect("profile should be blocked");
         assert_eq!(blocked.bookmark_name, "profile");
         assert!(blocked.reasons.contains(&BlockReason::LocalSyncFailed));
-        assert!(result.local_warnings.iter().any(|w| w.message.contains("rebase")));
+        assert!(
+            result
+                .local_warnings
+                .iter()
+                .any(|w| w.message.contains("rebase"))
+        );
     }
 
     #[test]
@@ -3977,7 +4776,10 @@ mod tests {
 
         let jj_calls = jj.calls.lock().expect("poisoned");
         let fetch_count = jj_calls.iter().filter(|c| *c == "git_fetch").count();
-        assert_eq!(fetch_count, 1, "should only fetch once, not twice: {jj_calls:?}");
+        assert_eq!(
+            fetch_count, 1,
+            "should only fetch once, not twice: {jj_calls:?}"
+        );
     }
 
     #[test]
@@ -3991,9 +4793,7 @@ mod tests {
         let gh = RecordingGitHub::new()
             .with_evaluatable_pr("auth", 1)
             .with_evaluatable_pr("profile", 2);
-        gh.open_prs.lock().expect("poisoned")[1]
-            .base
-            .ref_name = "auth".to_string();
+        gh.open_prs.lock().expect("poisoned")[1].base.ref_name = "auth".to_string();
 
         let plan = MergePlan {
             actions: vec![
@@ -4061,15 +4861,24 @@ mod tests {
     fn test_partition_moves_newly_merged_to_fossils() {
         // Previous comment had A, B, C all live. Merge command merged A.
         // A moves to fossils; B and C stay live.
-        let items = vec![item("A", 1, false), item("B", 2, false), item("C", 3, false)];
+        let items = vec![
+            item("A", 1, false),
+            item("B", 2, false),
+            item("C", 3, false),
+        ];
         let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
         let (live, fossils) = partition_after_merge(&items, &merged, "C");
         assert_eq!(
-            live.iter().map(|e| e.bookmark_name.as_str()).collect::<Vec<_>>(),
+            live.iter()
+                .map(|e| e.bookmark_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["B", "C"]
         );
         assert_eq!(
-            fossils.iter().map(|e| e.bookmark_name.as_str()).collect::<Vec<_>>(),
+            fossils
+                .iter()
+                .map(|e| e.bookmark_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["A"]
         );
         assert!(fossils[0].is_merged, "A must be marked merged");
@@ -4079,7 +4888,10 @@ mod tests {
     fn test_partition_keeps_existing_fossils() {
         // Previous comment had A live, F (already merged in earlier run).
         // No new merges this round.
-        let items = vec![item("A", 1, false), fossil_item("F", 2, "2026-04-01T00:00:00Z")];
+        let items = vec![
+            item("A", 1, false),
+            fossil_item("F", 2, "2026-04-01T00:00:00Z"),
+        ];
         let merged: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let (live, fossils) = partition_after_merge(&items, &merged, "A");
         assert_eq!(live.len(), 1);
@@ -4112,19 +4924,29 @@ mod tests {
         let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
         let (_, fossils) = partition_after_merge(&items, &merged, "C");
         assert_eq!(
-            fossils.iter().map(|e| e.bookmark_name.as_str()).collect::<Vec<_>>(),
+            fossils
+                .iter()
+                .map(|e| e.bookmark_name.as_str())
+                .collect::<Vec<_>>(),
             vec!["A", "F1", "F2"],
             "newly-merged A should land at the top of the fossil block"
         );
         // A has no timestamp yet — next submit will populate from forge.
         assert!(fossils[0].closed_at.is_none());
         // Older fossils keep their stored timestamps unchanged.
-        assert_eq!(fossils[1].closed_at.as_deref(), Some("2026-03-15T00:00:00Z"));
+        assert_eq!(
+            fossils[1].closed_at.as_deref(),
+            Some("2026-03-15T00:00:00Z")
+        );
     }
 
     #[test]
     fn test_partition_marks_current_pr_only_among_live() {
-        let items = vec![item("A", 1, false), item("B", 2, false), item("C", 3, false)];
+        let items = vec![
+            item("A", 1, false),
+            item("B", 2, false),
+            item("C", 3, false),
+        ];
         let merged: std::collections::HashSet<&str> = ["A"].into_iter().collect();
         let (live, fossils) = partition_after_merge(&items, &merged, "B");
         let by_name: HashMap<&str, &comment::StackEntry> = live

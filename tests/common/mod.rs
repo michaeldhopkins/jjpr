@@ -65,22 +65,12 @@ impl JjTestRepo {
         );
         run_cmd(
             "jj",
-            &[
-                "config",
-                "set",
-                "--repo",
-                "user.email",
-                "test@jjpr.dev",
-            ],
+            &["config", "set", "--repo", "user.email", "test@jjpr.dev"],
             repo,
         );
 
         let origin_url = origin_dir.path().to_str().expect("non-utf8 path");
-        run_cmd(
-            "jj",
-            &["git", "remote", "add", "origin", origin_url],
-            repo,
-        );
+        run_cmd("jj", &["git", "remote", "add", "origin", origin_url], repo);
 
         // Create initial commit and push main so trunk() resolves
         std::fs::write(repo.join("README.md"), "test repo\n").expect("write");
@@ -88,14 +78,7 @@ impl JjTestRepo {
         run_cmd("jj", &["bookmark", "set", "main", "-r", "@-"], repo);
         run_cmd(
             "jj",
-            &[
-                "git",
-                "push",
-                "--remote",
-                "origin",
-                "--bookmark",
-                "main",
-            ],
+            &["git", "push", "--remote", "origin", "--bookmark", "main"],
             repo,
         );
 

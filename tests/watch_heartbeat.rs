@@ -18,11 +18,20 @@ fn second_watch_exits_when_one_is_already_running() {
     }
     let dir = TempDir::new().unwrap();
     assert!(
-        Command::new("jj").args(["git", "init"]).current_dir(dir.path()).output().unwrap().status.success(),
+        Command::new("jj")
+            .args(["git", "init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap()
+            .status
+            .success(),
         "jj git init failed"
     );
     // Simulate a live watcher: a fresh heartbeat next to jjpr's repo metadata.
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     std::fs::write(
         dir.path().join(".jj").join("jjpr-watch.json"),
         format!(r#"{{"pid":999999,"started_at":{now},"last_seen":{now}}}"#),
@@ -53,7 +62,12 @@ fn second_watch_exits_when_one_is_already_running() {
     };
 
     let mut stdout = String::new();
-    child.stdout.take().unwrap().read_to_string(&mut stdout).unwrap();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
     assert!(
         stdout.contains("jjpr watch is already running on this repo in another window"),
         "expected the already-running message; stdout={stdout:?}"

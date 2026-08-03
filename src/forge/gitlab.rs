@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 
+use super::Forge;
 use super::http::ForgeClient;
 use super::types::{
-    ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest,
-    PullRequestRef, ReviewSummary,
+    ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest, PullRequestRef,
+    ReviewSummary,
 };
-use super::Forge;
 
 /// GitLab implementation using direct HTTP via `ForgeClient`.
 pub struct GitLabForge {
@@ -56,7 +56,10 @@ fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
         base: PullRequestRef {
             ref_name: mr["target_branch"].as_str().unwrap_or("").to_string(),
             label: String::new(),
-            sha: mr["diff_refs"]["base_sha"].as_str().unwrap_or("").to_string(),
+            sha: mr["diff_refs"]["base_sha"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
         },
         head: PullRequestRef {
             ref_name: mr["source_branch"].as_str().unwrap_or("").to_string(),
@@ -114,17 +117,20 @@ fn parse_pipeline_status(pipeline: Option<&serde_json::Value>) -> ChecksStatus {
     match latest["status"].as_str().unwrap_or("unknown") {
         "success" => ChecksStatus::Pass,
         "failed" | "canceled" => ChecksStatus::Fail,
-        "created" | "waiting_for_resource" | "preparing" | "pending" | "running"
-        | "manual" | "scheduled" => ChecksStatus::Pending,
+        "created"
+        | "waiting_for_resource"
+        | "preparing"
+        | "pending"
+        | "running"
+        | "manual"
+        | "scheduled" => ChecksStatus::Pending,
         _ => ChecksStatus::Pending,
     }
 }
 
 /// Parse a GitLab MR's `detailed_merge_status` into `PrMergeability`.
 fn parse_mergeability(mr: &serde_json::Value) -> PrMergeability {
-    let detailed_status = mr["detailed_merge_status"]
-        .as_str()
-        .unwrap_or("unknown");
+    let detailed_status = mr["detailed_merge_status"].as_str().unwrap_or("unknown");
 
     let mergeable = match detailed_status {
         "mergeable" => Some(true),
@@ -171,16 +177,11 @@ impl Forge for GitLabForge {
         parse_mr(&output)
     }
 
-    fn update_pr_base(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        base: &str,
-    ) -> Result<()> {
+    fn update_pr_base(&self, owner: &str, repo: &str, number: u64, base: &str) -> Result<()> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}");
-        self.client.put(&path, &serde_json::json!({ "target_branch": base }))?;
+        self.client
+            .put(&path, &serde_json::json!({ "target_branch": base }))?;
         Ok(())
     }
 
@@ -229,16 +230,12 @@ impl Forge for GitLabForge {
         }
 
         let path = format!("projects/{project}/merge_requests/{number}");
-        self.client.put(&path, &serde_json::json!({ "reviewer_ids": reviewer_ids }))?;
+        self.client
+            .put(&path, &serde_json::json!({ "reviewer_ids": reviewer_ids }))?;
         Ok(())
     }
 
-    fn list_comments(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<Vec<IssueComment>> {
+    fn list_comments(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<IssueComment>> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}/notes?per_page=100");
         let items = self.client.get_paginated(&path)?;
@@ -254,7 +251,9 @@ impl Forge for GitLabForge {
     ) -> Result<IssueComment> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}/notes");
-        let output = self.client.post(&path, &serde_json::json!({ "body": body }))?;
+        let output = self
+            .client
+            .post(&path, &serde_json::json!({ "body": body }))?;
         let id = output["id"]
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("created note missing id"))?;
@@ -264,13 +263,7 @@ impl Forge for GitLabForge {
         })
     }
 
-    fn update_comment(
-        &self,
-        owner: &str,
-        repo: &str,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<()> {
+    fn update_comment(&self, owner: &str, repo: &str, comment_id: u64, body: &str) -> Result<()> {
         // GitLab's note update API requires the MR iid in the path:
         //   PUT /projects/:id/merge_requests/:iid/notes/:note_id
         // but the Forge trait only passes comment_id. We scan MRs (all states)
@@ -284,12 +277,10 @@ impl Forge for GitLabForge {
             if iid == 0 {
                 continue;
             }
-            let note_path =
-                format!("projects/{project}/merge_requests/{iid}/notes/{comment_id}");
-            let result = self.client.put(
-                &note_path,
-                &serde_json::json!({ "body": body }),
-            );
+            let note_path = format!("projects/{project}/merge_requests/{iid}/notes/{comment_id}");
+            let result = self
+                .client
+                .put(&note_path, &serde_json::json!({ "body": body }));
             if result.is_ok() {
                 return Ok(());
             }
@@ -298,28 +289,19 @@ impl Forge for GitLabForge {
         anyhow::bail!("could not find note {comment_id} on any MR in project")
     }
 
-    fn update_pr_body(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        body: &str,
-    ) -> Result<()> {
+    fn update_pr_body(&self, owner: &str, repo: &str, number: u64, body: &str) -> Result<()> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}");
-        self.client.put(&path, &serde_json::json!({ "description": body }))?;
+        self.client
+            .put(&path, &serde_json::json!({ "description": body }))?;
         Ok(())
     }
 
-    fn mark_pr_ready(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<()> {
+    fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}");
-        self.client.put(&path, &serde_json::json!({ "draft": false }))?;
+        self.client
+            .put(&path, &serde_json::json!({ "draft": false }))?;
         Ok(())
     }
 
@@ -352,43 +334,35 @@ impl Forge for GitLabForge {
         }
     }
 
-    fn find_merged_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        head: &str,
-    ) -> Result<Option<PullRequest>> {
+    fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>> {
         let project = Self::encode_project(owner, repo);
         let encoded_head = super::http::url_encode(head);
         let path =
             format!("projects/{project}/merge_requests?source_branch={encoded_head}&state=merged");
         let output = self.client.get(&path)?;
-        let mrs: Vec<serde_json::Value> = serde_json::from_value(output)
-            .context("failed to parse merged MR list response")?;
+        let mrs: Vec<serde_json::Value> =
+            serde_json::from_value(output).context("failed to parse merged MR list response")?;
         mrs.first().map(parse_mr).transpose()
     }
 
-    fn merge_pr(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-        method: MergeMethod,
-    ) -> Result<()> {
+    fn merge_pr(&self, owner: &str, repo: &str, number: u64, method: MergeMethod) -> Result<()> {
         let project = Self::encode_project(owner, repo);
         let merge_path = format!("projects/{project}/merge_requests/{number}/merge");
         match method {
             MergeMethod::Squash => {
-                self.client.put(&merge_path, &serde_json::json!({ "squash": true }))?;
+                self.client
+                    .put(&merge_path, &serde_json::json!({ "squash": true }))?;
             }
             MergeMethod::Merge => {
-                self.client.put(&merge_path, &serde_json::json!({ "squash": false }))?;
+                self.client
+                    .put(&merge_path, &serde_json::json!({ "squash": false }))?;
             }
             MergeMethod::Rebase => {
                 // Rebase the MR onto the target branch first, then merge (fast-forward).
                 let rebase_path = format!("projects/{project}/merge_requests/{number}/rebase");
                 self.client.put(&rebase_path, &serde_json::json!({}))?;
-                self.client.put(&merge_path, &serde_json::json!({ "squash": false }))?;
+                self.client
+                    .put(&merge_path, &serde_json::json!({ "squash": false }))?;
             }
         }
         Ok(())
@@ -401,22 +375,16 @@ impl Forge for GitLabForge {
         head_ref: &str,
     ) -> Result<ChecksStatus> {
         let project = Self::encode_project(owner, repo);
-        let path = format!(
-            "projects/{project}/pipelines?ref={head_ref}&per_page=1&order_by=id&sort=desc"
-        );
+        let path =
+            format!("projects/{project}/pipelines?ref={head_ref}&per_page=1&order_by=id&sort=desc");
         let output = self.client.get(&path)?;
-        let pipelines: Vec<serde_json::Value> = serde_json::from_value(output)
-            .context("failed to parse pipelines response")?;
+        let pipelines: Vec<serde_json::Value> =
+            serde_json::from_value(output).context("failed to parse pipelines response")?;
 
         Ok(parse_pipeline_status(pipelines.first()))
     }
 
-    fn get_pr_reviews(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<ReviewSummary> {
+    fn get_pr_reviews(&self, owner: &str, repo: &str, number: u64) -> Result<ReviewSummary> {
         let project = Self::encode_project(owner, repo);
 
         // 1. Approval count from the approvals endpoint
@@ -457,12 +425,7 @@ impl Forge for GitLabForge {
         })
     }
 
-    fn get_pr_state(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PrState> {
+    fn get_pr_state(&self, owner: &str, repo: &str, number: u64) -> Result<PrState> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}");
         let mr = self.client.get(&path)?;
@@ -472,12 +435,7 @@ impl Forge for GitLabForge {
         })
     }
 
-    fn get_pr_mergeability(
-        &self,
-        owner: &str,
-        repo: &str,
-        number: u64,
-    ) -> Result<PrMergeability> {
+    fn get_pr_mergeability(&self, owner: &str, repo: &str, number: u64) -> Result<PrMergeability> {
         let project = Self::encode_project(owner, repo);
         let path = format!("projects/{project}/merge_requests/{number}");
         let mr = self.client.get(&path)?;
@@ -491,7 +449,9 @@ impl Forge for GitLabForge {
 /// clears only code-owner approvals — either counts as "will dismiss".
 fn parse_gitlab_reset_on_push(v: &serde_json::Value) -> bool {
     v["reset_approvals_on_push"].as_bool().unwrap_or(false)
-        || v["selective_code_owner_removals"].as_bool().unwrap_or(false)
+        || v["selective_code_owner_removals"]
+            .as_bool()
+            .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -520,7 +480,10 @@ mod tests {
             {"id": 2, "email": "pending@x.com", "confirmed_at": null},
             {"id": 3, "email": "work@x.com", "confirmed_at": "2022-02-02T00:00:00Z"}
         ]);
-        assert_eq!(parse_gitlab_emails(&json), vec!["primary@x.com", "work@x.com"]);
+        assert_eq!(
+            parse_gitlab_emails(&json),
+            vec!["primary@x.com", "work@x.com"]
+        );
     }
 
     // --- JSON fixture tests: verify parsing without any HTTP ---
@@ -676,11 +639,13 @@ mod tests {
         .unwrap();
         let comment = parse_note(&note).unwrap();
         assert_eq!(comment.id, 500);
-        assert!(comment
-            .body
-            .as_deref()
-            .unwrap()
-            .contains("<!-- jjpr:stack-info -->"));
+        assert!(
+            comment
+                .body
+                .as_deref()
+                .unwrap()
+                .contains("<!-- jjpr:stack-info -->")
+        );
     }
 
     #[test]
@@ -796,11 +761,11 @@ mod tests {
             {"username": "alice", "state": "approved"},
             {"username": "bob", "state": "requested_changes"}
         ]);
-        let has_changes = reviewers
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
+        let has_changes = reviewers.as_array().unwrap().iter().any(|r| {
+            r["state"]
+                .as_str()
+                .is_some_and(|s| s == "requested_changes")
+        });
         assert!(has_changes);
     }
 
@@ -810,11 +775,11 @@ mod tests {
             {"username": "alice", "state": "approved"},
             {"username": "bob", "state": "approved"}
         ]);
-        let has_changes = reviewers
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
+        let has_changes = reviewers.as_array().unwrap().iter().any(|r| {
+            r["state"]
+                .as_str()
+                .is_some_and(|s| s == "requested_changes")
+        });
         assert!(!has_changes);
     }
 
@@ -881,9 +846,11 @@ mod tests {
     #[test]
     fn test_reviewer_state_empty_degrades() {
         let reviewers: Vec<serde_json::Value> = vec![];
-        let has_changes = reviewers
-            .iter()
-            .any(|r| r["state"].as_str().is_some_and(|s| s == "requested_changes"));
+        let has_changes = reviewers.iter().any(|r| {
+            r["state"]
+                .as_str()
+                .is_some_and(|s| s == "requested_changes")
+        });
         assert!(!has_changes);
     }
 }
