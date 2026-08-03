@@ -321,9 +321,17 @@ config file values.")]
 #[derive(Subcommand)]
 pub enum AuthCommands {
     /// Test forge authentication and show the authenticated user
-    Test,
+    Test {
+        /// Git remote name (required when the repo has more than one forge remote)
+        #[arg(long)]
+        remote: Option<String>,
+    },
     /// Show authentication setup instructions for the detected forge
-    Setup,
+    Setup {
+        /// Git remote name (required when the repo has more than one forge remote)
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

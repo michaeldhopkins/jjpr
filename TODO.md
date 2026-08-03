@@ -13,30 +13,34 @@ the crate and the second-densest source of mutants (`watch.rs` 105, behind
 why it was not done inside a pure-formatting commit. Worth doing on its own
 terms, with the mutation numbers re-measured afterwards.
 
-## Open: `auth test` misdiagnoses ambiguous remotes
+## Fixed: `auth test` misdiagnosed ambiguous remotes (2026-08-03)
 
-Found 2026-08-02 while reviewing the empty-path-components fix. With two
-recognised forge remotes the two code paths disagree:
+Found while reviewing the empty-path-components fix. With two recognised forge
+remotes, `submit`/`status` (via `resolve_remote`) correctly said
+`multiple forge remotes found: origin, second. Use --remote to specify one.`,
+while `auth test` (via `detect_forge_for_cwd`) said `could not detect forge`.
 
-- `submit`/`status` (via `resolve_remote`) say
-  `multiple forge remotes found: origin, second. Use --remote to specify one.`
-- `auth test` (via `detect_forge_for_cwd`) says
-  `could not detect forge. Run from a jj repo with a supported remote, or set
-  forge = "..."`
+The second was actively wrong: it reported *no* supported remote when the
+problem was *two*, and the advice it gave could not help. It mattered more than
+a stray message because `auth test` is what jjpr's other errors tell you to run
+— the forge failure path prints ``try `jjpr auth test` `` — so the diagnostic of
+last resort was the one that lied. Verified pre-existing rather than caused by
+the parser change: two *clean* GitLab remotes reproduced it identically.
 
-The second is actively wrong: it reports *no* supported remote when the problem
-is *two*, and the advice it gives cannot help. It matters more than a stray
-message because `auth test` is what jjpr's other errors tell you to run — the
-forge failure path literally prints ``try `jjpr auth test` ``. So the diagnostic
-of last resort is the one that lies.
+The root cause was broader than the symptom. `detect_forge_for_cwd` discarded
+every error with `.ok()?`, so five distinct failures — not a jj repo, unreadable
+config, jj itself failing, no supported remote, more than one — all collapsed to
+the same sentence. It now returns `Result` and each surfaces its own.
 
-Not fixed here: it is a different code path from the parser change that surfaced
-it, and changing auth behaviour inside a release is the kind of unrelated risk
-this file exists to defer. The fix is presumably to route
-`detect_forge_for_cwd` through `resolve_remote` so there is one answer.
+Propagating alone would not have been enough: the message names `--remote`, and
+`auth` had no such flag (`submit` and `merge` did). Fixing only the message would
+have offered advice the command could not take, so `test` and `setup` both gained
+it. `setup` still falls back to printing help for every forge rather than
+erroring, because it is what you run *before* a repo is configured.
 
-Verified pre-existing, not caused by the parser change: two *clean* GitLab
-remotes reproduce it identically.
+Verified by reverting the fix and re-running the new test rather than by mutation
+testing: the diff yields only 2 mutants, one unviable, so a green mutants run
+would not have proven the test could fail.
 
 ## Fixed: empty path components in remote URLs (2026-08-02)
 

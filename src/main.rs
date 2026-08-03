@@ -138,13 +138,8 @@ fn main() -> Result<()> {
             })
         }
         Some(Commands::Auth { command }) => match command {
-            AuthCommands::Test => {
-                let Some(detected) = detect_forge_for_cwd() else {
-                    anyhow::bail!(
-                        "could not detect forge. Run from a jj repo with a supported remote, \
-                             or set forge = \"...\" in .jj/jjpr.toml"
-                    );
-                };
+            AuthCommands::Test { remote } => {
+                let detected = detect_forge_for_cwd(remote.as_deref())?;
                 print_forge_detection(&detected);
                 let forge = build_forge(
                     detected.kind,
@@ -154,13 +149,16 @@ fn main() -> Result<()> {
                 )?;
                 jjpr::auth::test_auth(forge.as_ref())
             }
-            AuthCommands::Setup => {
-                match detect_forge_for_cwd() {
-                    Some(detected) => {
+            AuthCommands::Setup { remote } => {
+                // Deliberately still falls back rather than propagating: `setup`
+                // is what you run BEFORE the repo is configured, so failing to
+                // detect a forge is an expected state here, not an error.
+                match detect_forge_for_cwd(remote.as_deref()) {
+                    Ok(detected) => {
                         print_forge_detection(&detected);
                         jjpr::auth::print_auth_help(detected.kind);
                     }
-                    None => jjpr::auth::print_auth_help_all(),
+                    Err(_) => jjpr::auth::print_auth_help_all(),
                 }
                 Ok(())
             }
@@ -1812,14 +1810,26 @@ enum ForgeSource {
 
 /// Best-effort forge detection for auth commands.
 /// Checks repo-local config first; falls back to auto-detection from remotes.
-fn detect_forge_for_cwd() -> Option<DetectedForge> {
-    let repo_path = find_repo_root().ok()?;
-    let cfg = config::load_config_with_repo(Some(&repo_path)).ok()?;
-    let jj = JjRunner::new(repo_path).ok()?;
-    let remotes = jj.get_git_remotes().ok()?;
+/// Resolve which forge the current directory talks to.
+///
+/// Returns the underlying error rather than `Option`, because every step here
+/// can fail for a different and individually actionable reason — not a jj repo,
+/// unreadable config, jj itself failing, no supported remote, or more than one.
+/// Collapsing them with `.ok()?` meant `auth test` reported "could not detect
+/// forge" for all five. That was worst for the ambiguous case, where it claimed
+/// there was NO supported remote when the problem was two of them, and jjpr's
+/// own forge errors send you to `auth test` — so the diagnostic of last resort
+/// was the one that misled.
+fn detect_forge_for_cwd(preferred_remote: Option<&str>) -> Result<DetectedForge> {
+    let repo_path = find_repo_root()?;
+    let cfg = config::load_config_with_repo(Some(&repo_path))?;
+    let jj = JjRunner::new(repo_path)?;
+    let remotes = jj.get_git_remotes()?;
 
     if let Some(kind) = cfg.forge {
-        let host = pick_remote(&remotes, None)
+        // Config pins the forge, so the host is a nicety: a repo can legitimately
+        // have no matching remote here and still be configured correctly.
+        let host = pick_remote(&remotes, preferred_remote)
             .ok()
             .and_then(|r| remote::extract_host(&r.url).map(|s| s.to_string()));
         let env_var = cfg
@@ -1827,7 +1837,7 @@ fn detect_forge_for_cwd() -> Option<DetectedForge> {
             .as_deref()
             .unwrap_or(kind.token_env_var());
         let token = std::env::var(env_var).ok();
-        return Some(DetectedForge {
+        return Ok(DetectedForge {
             kind,
             host,
             token,
@@ -1836,9 +1846,9 @@ fn detect_forge_for_cwd() -> Option<DetectedForge> {
         });
     }
 
-    let (remote_name, kind, _) = remote::resolve_remote(&remotes, None).ok()?;
+    let (remote_name, kind, _) = remote::resolve_remote(&remotes, preferred_remote)?;
     let host = find_remote_host(&remotes, &remote_name).map(|s| s.to_string());
-    Some(DetectedForge {
+    Ok(DetectedForge {
         kind,
         host,
         token: None,
