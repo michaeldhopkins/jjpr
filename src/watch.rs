@@ -335,7 +335,11 @@ fn run_merge_phase(
                 break;
             }
         };
-        *consecutive_errors = 0;
+        // Deliberately does NOT reset `consecutive_errors` on a successful eval.
+        // The counter is shared with the outer loop's phases, and resetting it
+        // here made the give-up budget unreachable: any later phase that failed
+        // had its increment wiped by the next segment's success. `run_watch_loop`
+        // now resets once, at the end of an iteration that had no errors at all.
 
         let prev_seg_idx = seg_idx;
 
@@ -582,19 +586,58 @@ pub fn wait_for_bookmark(
     }
 }
 
-// `too_many_lines` fires at 284/275 only because rustfmt's 2024 style edition
-// splits argument lists one-per-line; the body did not gain a statement or a
-// branch. Allowed rather than silenced globally via clippy.toml, so the limit
-// keeps applying everywhere else and this stays the one visible exception.
+/// What the watch loop should do after a phase failed.
+enum PhaseError {
+    /// The budget still has room: sleep, then run the iteration again.
+    Retry,
+    /// Stop the loop — the budget is spent, or the user interrupted the sleep.
+    GiveUp,
+}
+
+/// Count a phase failure, report it, and decide whether the retry budget is
+/// spent.
+///
+/// The three phase arms in `run_watch_loop` were byte-identical apart from the
+/// label, and the duplication had already drifted: only the graph-scan arm
+/// printed "Too many consecutive errors; giving up." Submit and PR refresh
+/// exited silently after ten failures, so the last thing a user saw was an error
+/// line indistinguishable from the nine before it. Single-sourcing the arm fixes
+/// that by construction rather than by remembering to keep three copies in step.
+///
+/// Returns rather than breaking because a helper cannot drive the caller's loop;
+/// `GiveUp` covers both exhausting the budget and a shutdown during the sleep,
+/// which is what the inline versions did with two separate `break`s.
+fn handle_phase_error(
+    label: &str,
+    err: &anyhow::Error,
+    consecutive_errors: &mut u32,
+    poll_interval: Duration,
+    shutdown: &AtomicBool,
+    is_tty: bool,
+    spinner_frame: &mut usize,
+) -> PhaseError {
+    *consecutive_errors += 1;
+    let now = local_time_hhmm();
+    eprintln!("  [{now}] {label} error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {err}");
+    if *consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+        eprintln!("  Too many consecutive errors; giving up.");
+        return PhaseError::GiveUp;
+    }
+    if spinner_sleep(poll_interval, shutdown, is_tty, spinner_frame) {
+        return PhaseError::GiveUp;
+    }
+    PhaseError::Retry
+}
+
+// `too_many_lines` used to be allowed here at 284/275. Extracting
+// `handle_phase_error` — three byte-identical copies of the retry arm — brought
+// it back under the limit, so the allow is gone rather than suppressed.
 //
-// It is a real signal even so — the function is long enough to be worth
-// decomposing, which is deferred work rather than something to do inside a
-// pure-formatting commit (see TODO.md).
-#[allow(
-    clippy::too_many_arguments,
-    clippy::cognitive_complexity,
-    clippy::too_many_lines
-)]
+// The two remaining allows are honest: 13 parameters is a genuine seam problem,
+// and the loop really does carry high branching. Both are worth another pass,
+// but only with tests underneath them first — see TODO.md for why that order is
+// not negotiable here.
+#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
 pub fn run_watch_loop(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -692,27 +735,35 @@ pub fn run_watch_loop(
         // reconcile_after_merge a fresh chance.
         state.reset();
 
+        // `consecutive_errors` is shared by every phase below, so "consecutive"
+        // has to mean "iterations that failed", not "the last thing that
+        // happened failed". Each phase used to reset it on its own success,
+        // which made the give-up budget unreachable: with a healthy scan and a
+        // failing submit the counter just oscillated 0 -> 1 -> 0 and watch
+        // retried forever, printing `Submit error (1/10)` on every poll — a
+        // countdown that never advanced. Measured at 1,000,548 attempts in 10s.
+        //
+        // Snapshot it here instead and reset at the bottom only if nothing
+        // incremented it, which also covers the increments `run_merge_phase`
+        // makes internally. Failing phases `continue` and so never reach that
+        // reset, which is what lets the count accumulate across iterations.
+        let errors_at_iteration_start = consecutive_errors;
+
         // --- Phase 1: Re-discover segments ---
         let segments = match rediscover_segments(jj, target_bookmark) {
-            Ok(segs) => {
-                consecutive_errors = 0;
-                segs
-            }
-            Err(e) => {
-                consecutive_errors += 1;
-                let now = local_time_hhmm();
-                eprintln!(
-                    "  [{now}] Graph scan error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}"
-                );
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    eprintln!("  Too many consecutive errors; giving up.");
-                    break;
-                }
-                if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
-                    break;
-                }
-                continue;
-            }
+            Ok(segs) => segs,
+            Err(e) => match handle_phase_error(
+                "Graph scan",
+                &e,
+                &mut consecutive_errors,
+                poll_interval,
+                &shutdown,
+                is_tty,
+                &mut spinner_frame,
+            ) {
+                PhaseError::GiveUp => break,
+                PhaseError::Retry => continue,
+            },
         };
 
         if segments.is_empty() {
@@ -775,46 +826,36 @@ pub fn run_watch_loop(
             stack_nav,
             submit_opts,
         ) {
-            Ok(names) => {
-                consecutive_errors = 0;
-                names
-            }
-            Err(e) => {
-                consecutive_errors += 1;
-                let now = local_time_hhmm();
-                eprintln!(
-                    "  [{now}] Submit error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}"
-                );
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    break;
-                }
-                if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
-                    break;
-                }
-                continue;
-            }
+            Ok(names) => names,
+            Err(e) => match handle_phase_error(
+                "Submit",
+                &e,
+                &mut consecutive_errors,
+                poll_interval,
+                &shutdown,
+                is_tty,
+                &mut spinner_frame,
+            ) {
+                PhaseError::GiveUp => break,
+                PhaseError::Retry => continue,
+            },
         };
 
         // --- Phase 3: Refresh PR map ---
         let pr_map = match refresh_pr_map(forge, owner, repo) {
-            Ok(m) => {
-                consecutive_errors = 0;
-                m
-            }
-            Err(e) => {
-                consecutive_errors += 1;
-                let now = local_time_hhmm();
-                eprintln!(
-                    "  [{now}] PR refresh error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}"
-                );
-                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                    break;
-                }
-                if spinner_sleep(poll_interval, &shutdown, is_tty, &mut spinner_frame) {
-                    break;
-                }
-                continue;
-            }
+            Ok(m) => m,
+            Err(e) => match handle_phase_error(
+                "PR refresh",
+                &e,
+                &mut consecutive_errors,
+                poll_interval,
+                &shutdown,
+                is_tty,
+                &mut spinner_frame,
+            ) {
+                PhaseError::GiveUp => break,
+                PhaseError::Retry => continue,
+            },
         };
 
         // Resolve created PRs from the fresh PR map (avoids an extra API call)
@@ -943,6 +984,23 @@ pub fn run_watch_loop(
             }
         } else {
             no_progress_count = 0;
+        }
+
+        // The iteration ran every phase without a failure, so the error streak
+        // is genuinely broken. Placed before the `all_done` continue so a
+        // progress-making iteration clears it too.
+        if consecutive_errors == errors_at_iteration_start {
+            consecutive_errors = 0;
+        } else if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+            // Reached only by an increment that did NOT exit the iteration
+            // itself — in practice `run_merge_phase`'s eval-error arm, which
+            // increments and breaks its segment loop but returns Ok. The three
+            // phase arms above check the budget and `continue` before they get
+            // here, so without this an eval error could repeat forever: it was
+            // the one increment in the loop that nothing ever tested against
+            // the threshold.
+            eprintln!("  Too many consecutive errors; giving up.");
+            break;
         }
 
         if merge_outcome.all_done {
@@ -1682,6 +1740,13 @@ mod tests {
             }
         }
 
+        /// Scan count, which is one per outer-loop iteration — a cleaner
+        /// iteration counter than any forge call, since a phase can hit the
+        /// forge more than once per pass.
+        fn iterations(&self) -> u32 {
+            *self.calls.lock().expect("poisoned")
+        }
+
         fn log_entry_for_bookmark(&self) -> LogEntry {
             LogEntry {
                 commit_id: self.bookmark_commit_id.clone(),
@@ -2076,6 +2141,7 @@ mod tests {
     struct ListFailForge {
         prs: HashMap<String, PullRequest>,
         merge_calls: std::sync::Mutex<Vec<u64>>,
+        list_calls: std::sync::Mutex<u32>,
     }
     impl ListFailForge {
         fn new(prs: Vec<PullRequest>) -> Self {
@@ -2086,14 +2152,21 @@ mod tests {
             Self {
                 prs: map,
                 merge_calls: std::sync::Mutex::new(vec![]),
+                list_calls: std::sync::Mutex::new(0),
             }
         }
         fn merge_calls(&self) -> Vec<u64> {
             self.merge_calls.lock().expect("poisoned").clone()
         }
+        /// How many times the failing call was attempted. Lets a caller assert
+        /// on retry COUNT rather than merely on eventual termination.
+        fn list_call_count(&self) -> u32 {
+            *self.list_calls.lock().expect("poisoned")
+        }
     }
     impl Forge for ListFailForge {
         fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+            *self.list_calls.lock().expect("poisoned") += 1;
             anyhow::bail!("502 bad gateway")
         }
         fn merge_pr(&self, _: &str, _: &str, n: u64, _: MergeMethod) -> Result<()> {
@@ -2976,6 +3049,645 @@ mod tests {
         assert!(
             segs.iter().any(|s| s.changes.iter().any(|c| c.conflict)),
             "the conflicted target's segment must carry the conflict flag so the loop waits for resolution"
+        );
+    }
+
+    /// Jj whose graph scan always fails, counting how many times it was tried.
+    ///
+    /// `build_change_graph` calls `get_my_bookmarks` first, so failing there is
+    /// what drives `run_watch_loop`'s "Graph scan error" arm — the retry path
+    /// that owns `consecutive_errors`.
+    #[derive(Default)]
+    struct ScanFailJj {
+        scans: std::sync::Mutex<u32>,
+    }
+
+    impl ScanFailJj {
+        fn scan_count(&self) -> u32 {
+            *self.scans.lock().expect("poisoned")
+        }
+    }
+
+    impl Jj for ScanFailJj {
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            *self.scans.lock().expect("poisoned") += 1;
+            anyhow::bail!("jj process exited with status 1")
+        }
+        fn git_fetch(&self) -> Result<()> {
+            Ok(())
+        }
+        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> {
+            Ok(vec![])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".into())
+        }
+        fn push_bookmark(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc".into())
+        }
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn is_conflicted(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn gate_test_draft_pr(name: &str, number: u64) -> PullRequest {
+        let mut pr = gate_test_pr(name, number);
+        pr.draft = true;
+        pr
+    }
+
+    fn stack_log_entry(commit: &str, change: &str, parents: Vec<&str>, bookmark: &str) -> LogEntry {
+        LogEntry {
+            commit_id: commit.into(),
+            change_id: change.into(),
+            author_name: "Test".into(),
+            author_email: "test@test.com".into(),
+            description: "test".into(),
+            description_first_line: "test".into(),
+            parents: parents.into_iter().map(str::to_string).collect(),
+            local_bookmarks: vec![bookmark.into()],
+            remote_bookmarks: vec![],
+            is_working_copy: false,
+            conflict: false,
+            empty: false,
+        }
+    }
+
+    /// A real two-segment stack: `auth` at the bottom, `profile` on top of it.
+    ///
+    /// Needed because the single-bookmark `WaitJj` cannot express the case where
+    /// one segment makes progress while another fails.
+    struct StackJj {
+        bookmarks: Vec<Bookmark>,
+        log_entries: HashMap<String, Vec<LogEntry>>,
+        scans: std::sync::Mutex<u32>,
+    }
+
+    impl StackJj {
+        fn two_segment_stack() -> Self {
+            let profile = stack_log_entry(
+                "commit_profile",
+                "change_profile",
+                vec!["commit_auth"],
+                "profile",
+            );
+            let auth = stack_log_entry("commit_auth", "change_auth", vec![], "auth");
+            Self {
+                bookmarks: vec![
+                    Bookmark {
+                        name: "auth".into(),
+                        commit_id: "commit_auth".into(),
+                        change_id: "change_auth".into(),
+                        has_remote: false,
+                        is_synced: false,
+                    },
+                    Bookmark {
+                        name: "profile".into(),
+                        commit_id: "commit_profile".into(),
+                        change_id: "change_profile".into(),
+                        has_remote: false,
+                        is_synced: false,
+                    },
+                ],
+                log_entries: HashMap::from([
+                    ("commit_profile".to_string(), vec![profile, auth.clone()]),
+                    ("commit_auth".to_string(), vec![auth]),
+                ]),
+                scans: std::sync::Mutex::new(0),
+            }
+        }
+        fn iterations(&self) -> u32 {
+            *self.scans.lock().expect("poisoned")
+        }
+    }
+
+    impl Jj for StackJj {
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            *self.scans.lock().expect("poisoned") += 1;
+            Ok(self.bookmarks.clone())
+        }
+        fn get_changes_to_commit(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {
+            Ok(self
+                .log_entries
+                .get(to_commit_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+        fn git_fetch(&self) -> Result<()> {
+            Ok(())
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".into())
+        }
+        fn push_bookmark(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("commit_profile".into())
+        }
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec!["commit_auth".into()])
+        }
+        fn is_conflicted(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// Forge whose PRs are DRAFTS and whose `mark_pr_ready` fails.
+    ///
+    /// That combination is the only way `evaluate_segment` returns Err: it
+    /// propagates `mark_pr_ready` with `?` when a draft meets `options.ready`,
+    /// while every other forge read is folded into a `BlockReason` instead of an
+    /// error. Driving that arm is what reaches `run_merge_phase`'s eval-error
+    /// increment.
+    struct EvalFailForge {
+        prs: HashMap<String, PullRequest>,
+        merge_calls: std::sync::Mutex<Vec<u64>>,
+        ready_calls: std::sync::Mutex<u32>,
+    }
+    impl EvalFailForge {
+        /// Takes PRs as given: a caller mixes drafts (which fail `mark_pr_ready`
+        /// and so make `evaluate_segment` error) with non-drafts (which merge).
+        fn new(prs: Vec<PullRequest>) -> Self {
+            let map = prs
+                .into_iter()
+                .map(|p| (p.head.ref_name.clone(), p))
+                .collect();
+            Self {
+                prs: map,
+                merge_calls: std::sync::Mutex::new(vec![]),
+                ready_calls: std::sync::Mutex::new(0),
+            }
+        }
+        fn ready_call_count(&self) -> u32 {
+            *self.ready_calls.lock().expect("poisoned")
+        }
+    }
+    impl Forge for EvalFailForge {
+        fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+            Ok(self.prs.values().cloned().collect())
+        }
+        fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            *self.ready_calls.lock().expect("poisoned") += 1;
+            anyhow::bail!("403 forbidden")
+        }
+        fn merge_pr(&self, _: &str, _: &str, n: u64, _: MergeMethod) -> Result<()> {
+            self.merge_calls.lock().expect("poisoned").push(n);
+            Ok(())
+        }
+        fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
+            Ok(PrMergeability {
+                mergeable: Some(true),
+                mergeable_state: "clean".into(),
+            })
+        }
+        fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+            Ok(ChecksStatus::Pass)
+        }
+        fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
+            Ok(ReviewSummary {
+                approved_count: 1,
+                changes_requested: false,
+            })
+        }
+        fn find_merged_pr(&self, _: &str, _: &str, _: &str) -> Result<Option<PullRequest>> {
+            Ok(None)
+        }
+        fn create_pr(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<PullRequest> {
+            unimplemented!()
+        }
+        fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> {
+            Ok(vec![])
+        }
+        fn create_comment(&self, _: &str, _: &str, _: u64, body: &str) -> Result<IssueComment> {
+            // A two-segment stack posts a navigation comment, so unlike the
+            // single-segment fixtures this one is actually reached.
+            Ok(IssueComment {
+                id: 1,
+                body: Some(body.to_string()),
+            })
+        }
+        fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            Ok("test".into())
+        }
+        fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
+            Ok(PrState {
+                merged: false,
+                state: "open".into(),
+            })
+        }
+    }
+
+    /// Forge whose PR listing fails on every SECOND call.
+    ///
+    /// The submit phase and the refresh phase both call `list_open_prs`, so a
+    /// forge that always fails it stops at submit and never reaches the refresh
+    /// arm. Alternating is what isolates that arm.
+    struct RefreshFailForge {
+        prs: HashMap<String, PullRequest>,
+        merge_calls: std::sync::Mutex<Vec<u64>>,
+        list_calls: std::sync::Mutex<u32>,
+    }
+    impl RefreshFailForge {
+        fn new(prs: Vec<PullRequest>) -> Self {
+            Self {
+                prs: prs
+                    .into_iter()
+                    .map(|p| (p.head.ref_name.clone(), p))
+                    .collect(),
+                merge_calls: std::sync::Mutex::new(vec![]),
+                list_calls: std::sync::Mutex::new(0),
+            }
+        }
+    }
+    impl Forge for RefreshFailForge {
+        fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+            let mut n = self.list_calls.lock().expect("poisoned");
+            *n += 1;
+            // Submit and refresh both go through this one method, so failing it
+            // outright stops at submit and never reaches the refresh arm.
+            // Alternating is what isolates that arm — but the sequence starts
+            // with `print_initial_watch_status`, which lists once before the
+            // loop. So the calls run 1=initial, 2=submit, 3=refresh, 4=submit,
+            // 5=refresh...: the refresh calls are the ODD ones above 1.
+            if *n > 1 && *n % 2 == 1 {
+                anyhow::bail!("504 gateway timeout")
+            }
+            Ok(self.prs.values().cloned().collect())
+        }
+        fn mark_pr_ready(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
+        }
+        fn merge_pr(&self, _: &str, _: &str, n: u64, _: MergeMethod) -> Result<()> {
+            self.merge_calls.lock().expect("poisoned").push(n);
+            Ok(())
+        }
+        fn get_pr_mergeability(&self, _: &str, _: &str, _: u64) -> Result<PrMergeability> {
+            Ok(PrMergeability {
+                mergeable: Some(true),
+                mergeable_state: "clean".into(),
+            })
+        }
+        fn get_pr_checks_status(&self, _: &str, _: &str, _: &str) -> Result<ChecksStatus> {
+            Ok(ChecksStatus::Pass)
+        }
+        fn get_pr_reviews(&self, _: &str, _: &str, _: u64) -> Result<ReviewSummary> {
+            Ok(ReviewSummary {
+                approved_count: 1,
+                changes_requested: false,
+            })
+        }
+        fn find_merged_pr(&self, _: &str, _: &str, _: &str) -> Result<Option<PullRequest>> {
+            Ok(None)
+        }
+        fn create_pr(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<PullRequest> {
+            unimplemented!()
+        }
+        fn update_pr_base(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn update_pr_body(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn request_reviewers(&self, _: &str, _: &str, _: u64, _: &[String]) -> Result<()> {
+            Ok(())
+        }
+        fn list_comments(&self, _: &str, _: &str, _: u64) -> Result<Vec<IssueComment>> {
+            Ok(vec![])
+        }
+        fn create_comment(&self, _: &str, _: &str, _: u64, body: &str) -> Result<IssueComment> {
+            // A two-segment stack posts a navigation comment, so unlike the
+            // single-segment fixtures this one is actually reached.
+            Ok(IssueComment {
+                id: 1,
+                body: Some(body.to_string()),
+            })
+        }
+        fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            Ok("test".into())
+        }
+        fn get_pr_state(&self, _: &str, _: &str, _: u64) -> Result<PrState> {
+            Ok(PrState {
+                merged: false,
+                state: "open".into(),
+            })
+        }
+    }
+
+    /// The PR-refresh phase is the third retry arm, and it must respect the
+    /// same budget as the scan and submit arms.
+    ///
+    /// Its error path `continue`s before the stall check, so unlike the eval arm
+    /// nothing else can stop the loop — the budget is the only exit, and the
+    /// count is exact.
+    #[test]
+    fn watch_retries_a_failing_pr_refresh_exactly_max_consecutive_times() {
+        let jj = WaitJj::new("auth", 0);
+        let forge = RefreshFailForge::new(vec![gate_test_pr("auth", 1)]);
+        let plan = gate_test_plan();
+
+        run_watch_loop(
+            &jj,
+            &forge,
+            &plan.repo_info,
+            plan.forge_kind,
+            &plan.remote_name,
+            &plan.default_branch,
+            &plan.options,
+            &WatchSubmitOptions::default(),
+            "auth",
+            None,
+            plan.stack_nav,
+            WatchOptions {
+                shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                timeout: Some(Duration::from_secs(10)),
+                poll_interval: Duration::ZERO,
+                is_tty: false,
+            },
+            None,
+        )
+        .expect("a failing refresh is a handled condition, not an error out of the loop");
+
+        // MAX loop iterations plus the pre-loop status scan.
+        assert_eq!(
+            jj.iterations(),
+            MAX_CONSECUTIVE_ERRORS + 1,
+            "watch must retry a failing PR refresh exactly {MAX_CONSECUTIVE_ERRORS} \
+             times before giving up"
+        );
+    }
+
+    /// The eval-error budget, exercised on the path where it is the ONLY thing
+    /// that can stop watch.
+    ///
+    /// A two-segment stack where `auth` merges every iteration and `profile`
+    /// fails to evaluate. The merge counts as progress, so `no_progress_count`
+    /// resets and the stall detector never fires — leaving
+    /// `consecutive_errors >= MAX_CONSECUTIVE_ERRORS` as the only exit. That is
+    /// the interleaved case the sibling test cannot reach, and the reason the
+    /// `*=` mutant on the eval increment survived until now: with the counter
+    /// pinned at 0 the loop runs until the deadline instead of giving up.
+    #[test]
+    fn watch_gives_up_when_eval_errors_interleave_with_progress() {
+        let jj = StackJj::two_segment_stack();
+        let forge = EvalFailForge::new(vec![
+            gate_test_pr("auth", 1),
+            gate_test_draft_pr("profile", 2),
+        ]);
+        let mut plan = gate_test_plan();
+        plan.options.ready = true;
+
+        run_watch_loop(
+            &jj,
+            &forge,
+            &plan.repo_info,
+            plan.forge_kind,
+            &plan.remote_name,
+            &plan.default_branch,
+            &plan.options,
+            &WatchSubmitOptions::default(),
+            "profile",
+            None,
+            plan.stack_nav,
+            WatchOptions {
+                shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                timeout: Some(Duration::from_secs(10)),
+                poll_interval: Duration::ZERO,
+                is_tty: false,
+            },
+            None,
+        )
+        .expect("a failing eval is a handled condition, not an error out of the loop");
+
+        assert_eq!(
+            jj.iterations(),
+            MAX_CONSECUTIVE_ERRORS + 1,
+            "the error budget must stop watch once progress keeps the stall \
+             detector at bay (plus the one pre-loop status scan)"
+        );
+    }
+
+    /// Repeated segment-eval errors must terminate watch — and the mechanism
+    /// that stops them is the STALL detector, not the error budget.
+    ///
+    /// This test originally asserted `MAX_CONSECUTIVE_ERRORS` and passed, which
+    /// was a coincidence worth recording: `mark_pr_ready` is called twice per
+    /// iteration (once promoting the draft, once inside `evaluate_segment`), and
+    /// `no_progress_count >= 5` exits after five iterations, so 5 x 2 = 10 hit
+    /// the error budget's value exactly. Asserting ITERATIONS instead names the
+    /// real mechanism and cannot be satisfied by that arithmetic accident.
+    ///
+    /// Why the budget cannot govern here: an eval error makes no progress, so
+    /// the stall counter reaches 5 strictly before the error counter reaches 10.
+    /// `run_watch_loop`'s eval-error threshold therefore only bites when errors
+    /// INTERLEAVE with progress — a merge succeeding resets `no_progress_count`
+    /// while `consecutive_errors` keeps climbing. That path is not covered here,
+    /// and the `*=` mutant on the eval increment survives because of it (noted
+    /// in TODO.md rather than papered over).
+    #[test]
+    fn watch_stops_on_repeated_eval_errors_via_the_stall_detector() {
+        let jj = WaitJj::new("auth", 0);
+        let forge = EvalFailForge::new(vec![gate_test_draft_pr("auth", 1)]);
+        let mut plan = gate_test_plan();
+        plan.options.ready = true;
+
+        run_watch_loop(
+            &jj,
+            &forge,
+            &plan.repo_info,
+            plan.forge_kind,
+            &plan.remote_name,
+            &plan.default_branch,
+            &plan.options,
+            &WatchSubmitOptions::default(),
+            "auth",
+            None,
+            plan.stack_nav,
+            WatchOptions {
+                shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                timeout: Some(Duration::from_secs(10)),
+                poll_interval: Duration::ZERO,
+                is_tty: false,
+            },
+            None,
+        )
+        .expect("a failing eval is a handled condition, not an error out of the loop");
+
+        // 5 loop iterations plus the one `print_initial_watch_status` performs
+        // before the loop starts — it calls `rediscover_segments` too.
+        assert_eq!(
+            jj.iterations(),
+            6,
+            "the stall detector must stop watch after 5 no-progress iterations \
+             (plus the one pre-loop status scan); without it a permanently \
+             failing eval loops until the deadline"
+        );
+        assert!(
+            forge.ready_call_count() > 0,
+            "the eval path must actually have been exercised"
+        );
+    }
+
+    /// The submit phase has its own retry arm, and it must respect the same
+    /// budget as the scan arm.
+    ///
+    /// `create_submission_plan` calls `list_open_prs` (plan.rs), so a forge that
+    /// fails that call makes `run_submit_phase` return Err and drives the loop's
+    /// "Submit error" arm — a different `consecutive_errors += 1` / `>=` pair
+    /// from the scan one, and mutation testing found both unprotected.
+    ///
+    /// `WaitJj` supplies a real bookmark so the scan SUCCEEDS and the loop gets
+    /// far enough to submit; `HealthyJj` cannot be used here because it returns
+    /// no bookmarks and the loop exits on empty segments before reaching submit.
+    #[test]
+    fn watch_retries_a_failing_submit_exactly_max_consecutive_times() {
+        let jj = WaitJj::new("auth", 0);
+        let forge = ListFailForge::new(vec![]);
+        let plan = gate_test_plan();
+
+        run_watch_loop(
+            &jj,
+            &forge,
+            &plan.repo_info,
+            plan.forge_kind,
+            &plan.remote_name,
+            &plan.default_branch,
+            &plan.options,
+            &WatchSubmitOptions::default(),
+            "auth",
+            None,
+            plan.stack_nav,
+            WatchOptions {
+                shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                timeout: Some(Duration::from_secs(10)),
+                poll_interval: Duration::ZERO,
+                is_tty: false,
+            },
+            None,
+        )
+        .expect("a failing submit is a handled condition, not an error out of the loop");
+
+        // +1 for `print_initial_watch_status`, which lists PRs once before the
+        // loop starts. Asserting the exact total rather than a bound is what
+        // makes this fail for the whole mutant family: flipping `>=` to `<`
+        // gives up after one retry (2 calls), and breaking the increment never
+        // gives up at all (the pre-fix behaviour was 1,000,548 calls in 10s).
+        assert_eq!(
+            forge.list_call_count(),
+            MAX_CONSECUTIVE_ERRORS + 1,
+            "watch must attempt submit exactly {MAX_CONSECUTIVE_ERRORS} times \
+             (plus the one initial status listing) before giving up"
+        );
+    }
+
+    /// Watch must retry a failing graph scan EXACTLY `MAX_CONSECUTIVE_ERRORS`
+    /// times and then give up.
+    ///
+    /// This pins three things that mutation testing found unprotected, all in
+    /// `run_watch_loop`'s error arm: the `consecutive_errors += 1` increment
+    /// (survived `-=` and `*=`), and the `>= MAX_CONSECUTIVE_ERRORS` threshold
+    /// (survived `>=` -> `<`). With the threshold flipped, watch gives up after a
+    /// single transient error; with the increment broken it never gives up at
+    /// all and spins forever against a broken repo. Asserting the exact scan
+    /// count is what distinguishes those — a mere "it eventually returns" would
+    /// pass for all three mutants.
+    ///
+    /// The deadline is a safety net, not the mechanism: it bounds the test if the
+    /// give-up logic is broken, and the count assertion is what then fails.
+    #[test]
+    fn watch_retries_a_failing_graph_scan_exactly_max_consecutive_times() {
+        let jj = ScanFailJj::default();
+        let forge = ListFailForge::new(vec![]);
+        let plan = gate_test_plan();
+
+        let result = run_watch_loop(
+            &jj,
+            &forge,
+            &plan.repo_info,
+            plan.forge_kind,
+            &plan.remote_name,
+            &plan.default_branch,
+            &plan.options,
+            &WatchSubmitOptions::default(),
+            "auth",
+            None,
+            plan.stack_nav,
+            WatchOptions {
+                shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                timeout: Some(Duration::from_secs(10)),
+                poll_interval: Duration::ZERO,
+                is_tty: false,
+            },
+            None,
+        )
+        .expect("a failing scan is a handled condition, not an error out of the loop");
+
+        assert_eq!(
+            jj.scan_count(),
+            MAX_CONSECUTIVE_ERRORS,
+            "watch must retry the scan exactly {MAX_CONSECUTIVE_ERRORS} times before giving up, \
+             not bail on the first error and not spin forever"
+        );
+        assert!(
+            result.merge_result.merged.is_empty(),
+            "nothing can merge when the graph never scans"
         );
     }
 }

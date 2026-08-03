@@ -1,17 +1,155 @@
 # jjpr TODO
 
-## Open: `run_watch_loop` is long enough to want decomposing
+## Fixed: watch never gave up on a failing submit, refresh, or merge (2026-08-03)
 
-Carries `#[allow(clippy::too_many_lines)]` as of the 2026-08-03 reformat. The
-allow was added because rustfmt's 2024 style edition pushed it from under the
-limit to 284/275 by splitting argument lists — no statement or branch was added,
-so failing the build on that alone would have been noise.
+Found while writing tests for the mutation misses below. Measured, not theorised:
+a `run_watch_loop` with a healthy graph scan and a forge whose `list_open_prs`
+always failed ran **1,000,548 submit attempts in 10 seconds** and never gave up.
+It should stop after `MAX_CONSECUTIVE_ERRORS` (10).
 
-The lint is still telling the truth: at ~284 lines it is the longest function in
-the crate and the second-densest source of mutants (`watch.rs` 105, behind
-`main.rs` 190). Splitting it is a genuine refactor of watch behaviour, which is
-why it was not done inside a pure-formatting commit. Worth doing on its own
-terms, with the mutation numbers re-measured afterwards.
+`consecutive_errors` is one counter shared by four phases, and each phase reset it
+on its OWN success (scan, submit, PR refresh, and `run_merge_phase` internally).
+So with an earlier phase succeeding and a later one failing, it oscillated
+0 -> 1 -> 0 -> 1 and the `>=` guard was unreachable. Only the scan arm could ever
+fire, because nothing reset before it in an iteration. The user-visible symptom
+was `Submit error (1/10)` printed on every poll — a countdown that never advanced.
+
+Fixed by making "consecutive" mean *iterations*, not *the last thing that
+happened*: the counter is snapshotted at the top of an iteration and reset at the
+bottom only if nothing incremented it. Failing phases `continue` and so never
+reach that reset, which is what lets the count accumulate; the snapshot
+comparison also captures the increments `run_merge_phase` makes internally, which
+a plain "reset at the bottom" would have wiped.
+
+This is also why 783/788 and 805/810 came back MISSED and resisted a
+straightforward retry test — the code they guard was unreachable. The mutation
+misses were a symptom of the bug, not merely a coverage gap.
+
+Verified: submit attempts went 1,000,548 -> 11 (ten retries plus the one
+pre-loop `print_initial_watch_status` listing), and the three submit-arm mutants
+(`+=`->`-=`, `+=`->`*=`, `>=`->`<`) are each killed, checked by applying them by
+hand rather than inferring it.
+
+**The merge-phase eval arm turned out to be a second instance of the same bug.**
+It increments `consecutive_errors` and breaks its segment loop but returns Ok, so
+the outer loop's per-phase threshold checks never saw it — nothing in the loop
+ever tested that increment against the budget. Added a check at the bottom of the
+iteration for increments that did not exit the iteration themselves.
+
+**But two safety nets overlap, and the other one wins.** `no_progress_count >= 5`
+(watch.rs) fires strictly before `MAX_CONSECUTIVE_ERRORS = 10` whenever the
+errors make no progress — which repeated eval errors do by definition. So for a
+persistently failing eval it is the STALL detector that stops watch, at 5
+iterations, and the error budget never gets there. The new threshold only bites
+when errors INTERLEAVE with progress: a merge succeeding resets
+`no_progress_count` while `consecutive_errors` keeps climbing.
+
+That interleaved path is now covered. `StackJj` builds a real two-segment stack
+(`auth` under `profile`) where `auth` merges every iteration and `profile` fails
+to evaluate: the merge counts as progress, `no_progress_count` resets, and the
+error budget becomes the only thing that can stop the loop. It exits at
+`MAX_CONSECUTIVE_ERRORS`, and the long-surviving `*=` mutant on the eval
+increment is finally killed — with `*= 1` the counter pins at 0 and the loop runs
+to the deadline.
+
+Verified in BOTH directions, which matters given how the previous test fooled
+itself. The three mutants that should die do (`+=`->`*=`, `+=`->`-=`, and the new
+`>=` threshold), and changing the stall limit from 5 to 50 does NOT affect this
+test — proving it isolates the error budget instead of quietly measuring the
+stall detector again.
+
+All four retry arms are now covered by five tests, and each was confirmed to
+exercise its OWN arm rather than a sibling. That check matters because the arms
+are structurally identical — same increment, same threshold, same message shape —
+so an iteration count looks the same whichever one fired. Mutating each arm's
+threshold separately is what distinguishes them: the PR-refresh test kills the
+refresh threshold and leaves the scan and submit thresholds alive, which is proof
+the alternating-failure fixture lands where it claims. Twelve mutants killed
+across the four arms.
+
+Worth recording how that was found, because the first version of the test passed
+for the wrong reason. It asserted `MAX_CONSECUTIVE_ERRORS` calls to
+`mark_pr_ready` and went green — but `mark_pr_ready` is called TWICE per
+iteration (once promoting the draft, once inside `evaluate_segment`), and the
+stall detector exits after 5, so 5 x 2 = 10 hit the budget's value by arithmetic
+accident. The test now asserts ITERATIONS instead, which names the real mechanism
+and cannot be satisfied that way; changing the stall limit from 5 to 50 kills it.
+
+## Open: `run_watch_loop` — TESTS FIRST, then decompose
+
+Carries three suppressed complexity lints (`too_many_arguments`,
+`cognitive_complexity`, and `too_many_lines` added in the 2026-08-03 reformat,
+which pushed it to 284/275 by splitting argument lists without adding a statement
+or a branch). Three lints on one function is the signal; the length is not.
+
+**Measured 2026-08-03 — do not re-derive.** First whole-file mutation run in this
+repo, `cargo mutants --file src/watch.rs`, 102 of 105 mutants completed:
+
+| outcome | count |
+|---|---|
+| caught | 32 |
+| **missed** | **52** |
+| timeout | 6 |
+| unviable | 12 |
+
+**32 caught against 52 missed — a 38% catch rate**, versus 95% measured on
+`forge/remote.rs`. The distribution is what matters: **24 of the 52 misses are
+inside `run_watch_loop` itself**, plus 10 more in `run_merge_phase`, which it
+calls. They are not cosmetic — they are the state machine's mechanics:
+
+- `702` `consecutive_errors += 1` survives `-=` and `*=`
+- `707` `if consecutive_errors >= MAX_CONSECUTIVE_ERRORS` survives `>=` → `<`
+- `783`, `805`, `936` the other progress/retry counters, same operators
+- `788`, `810` their thresholds, same comparison flip
+- `835`, `840`, `841`, `864`, `910` negated guards survive `delete !`
+- `872` a compound condition survives `||` → `&&`
+
+Concretely: you can invert the error counter, or flip the give-up threshold so
+watch either never gives up on a broken repo or gives up on the first error, and
+the entire suite still passes.
+
+**So the order is the reverse of what "decompose it" implies.** The tests cannot
+detect changes to this function's control flow, which means extraction would be
+an unguarded rewrite of the least-verified code in the crate. Sequence:
+
+1. **DONE.** Tests targeting the misses — counters, thresholds, guards. Five
+   tests, twelve mutants killed across the four retry arms. Re-measured:
+   **38% -> 61%** (57 caught / 37 missed), and misses inside `run_watch_loop`
+   fell **24 -> 9**, none of them in the retry or exit control flow. That was the
+   specific thing that made extraction unsafe, so the blocker is cleared.
+2. **STARTED.** First extraction: `handle_phase_error`. The three phase arms
+   (scan, submit, PR refresh) were byte-identical apart from a label, so they
+   collapse to one helper plus a `PhaseError` decision — the caller still owns
+   the `break`/`continue` because a helper cannot drive its caller's loop.
+3. **PARTLY DONE.** `too_many_lines` is off: the extraction brought the function
+   back under the limit, so the lint passes rather than being suppressed. The
+   other two allows stand and are honest — 13 parameters is a real seam problem
+   and the loop genuinely branches hard.
+
+The duplication had already drifted, which is the argument for having done it:
+only the graph-scan arm printed "Too many consecutive errors; giving up."
+Submit and PR refresh exited SILENTLY after ten failures, so the last thing a
+user saw was an error line indistinguishable from the nine before it. Three
+copies of a block cannot be kept in step by intention; one helper fixes it by
+construction.
+
+Remaining work on this function is the nine non-retry misses: the `delete !`
+guards, the arithmetic at 646/860/871, and the `||` -> `&&` at 872. Note the
+misses have moved OUT of the loop — the file's remaining 37 cluster in reporting
+functions (`report_orphaned_prs`, `report_reconcile_failure`,
+`print_initial_watch_status`) where a flipped comparison changes which message
+prints rather than what jjpr does. Those are candidates for judging equivalent,
+not for more tests.
+
+Two caveats on the numbers. The 6 timeouts are ambiguous — an injected infinite
+loop inside a polling loop is arguably detected rather than missed, so the true
+rate may be a little better than 38%. And 3 mutants never ran, so this is 102/105.
+
+Why there is no direct coverage today: `run_watch_loop` has exactly one caller
+(`main.rs`). The 41 unit tests in `watch.rs` exercise helpers and predicates
+around it, and the only binary-level watch tests are 2 in `tty_watch.rs` (spinner
+rendering) and 1 in `watch_heartbeat.rs` (second watch exits when one is
+running). All three test peripheral concerns.
 
 ## Fixed: `auth test` misdiagnosed ambiguous remotes (2026-08-03)
 
