@@ -310,3 +310,99 @@ fn test_auth_test_forgejo_uses_custom_token_env() {
         .failure()
         .stderr(predicate::str::contains(custom_env));
 }
+
+/// A repo with two forge remotes and nothing else configured.
+fn setup_two_forge_remotes() -> TempDir {
+    let repo_dir = TempDir::new().expect("create temp dir");
+    let repo = repo_dir.path();
+
+    run_cmd("jj", &["git", "init", "--colocate"], repo);
+    run_cmd(
+        "jj",
+        &["config", "set", "--repo", "user.name", "Test"],
+        repo,
+    );
+    run_cmd(
+        "jj",
+        &["config", "set", "--repo", "user.email", "t@t.dev"],
+        repo,
+    );
+    run_cmd(
+        "jj",
+        &[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo",
+        ],
+        repo,
+    );
+    run_cmd(
+        "jj",
+        &[
+            "git",
+            "remote",
+            "add",
+            "mirror",
+            "https://github.com/owner/mirror",
+        ],
+        repo,
+    );
+
+    repo_dir
+}
+
+/// `auth test` must report AMBIGUITY when there are two forge remotes, not
+/// "could not detect forge".
+///
+/// It previously said the latter, because `detect_forge_for_cwd` discarded every
+/// error with `.ok()?`. That reads as "you have no supported remote" when the
+/// truth is "you have two", and the advice it offered could not help. It matters
+/// more than a stray string: jjpr's other forge errors tell you to run
+/// `jjpr auth test`, so this was the diagnostic of last resort.
+#[test]
+fn auth_test_reports_ambiguity_rather_than_claiming_no_forge() {
+    if !jj_available() {
+        eprintln!("skipping: jj not available");
+        return;
+    }
+
+    let repo = setup_two_forge_remotes();
+
+    jjpr()
+        .args(["auth", "test", "--no-fetch"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("multiple forge remotes")
+                .and(predicate::str::contains("origin"))
+                .and(predicate::str::contains("mirror"))
+                .and(predicate::str::contains("could not detect forge").not()),
+        );
+}
+
+/// The ambiguity error tells you to use `--remote`, so `auth test` has to have
+/// one. Naming a remote that is not a forge remote proves the flag reaches
+/// `resolve_remote` rather than being accepted and ignored — an ignored flag
+/// would fall back to the ambiguity error instead.
+#[test]
+fn auth_test_honours_the_remote_flag_its_error_recommends() {
+    if !jj_available() {
+        eprintln!("skipping: jj not available");
+        return;
+    }
+
+    let repo = setup_two_forge_remotes();
+
+    jjpr()
+        .args(["auth", "test", "--no-fetch", "--remote", "nosuchremote"])
+        .current_dir(repo.path())
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("nosuchremote")
+                .and(predicate::str::contains("multiple forge remotes").not()),
+        );
+}
