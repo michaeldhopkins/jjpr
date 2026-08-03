@@ -97,6 +97,30 @@ Beware a second finding riding along: writing the test for the `||` guard surfac
 
 Two related facts measured on that same cancelled run. **A cancelled job does NOT lose its `if: always()` steps** — Summarise and Archive both ran and succeeded, so a timed-out run still reports partial results; the cost of a timeout is the wasted 45 minutes, not a lost report. And **~20s/mutant** is the figure CI actually delivers with a warm cache, which is where the limit of 100 comes from (~33 minutes) rather than from the 88s/mutant local measurement.
 
+**First whole-file run, `src/watch.rs`, 2026-08-03** (102 of 105 completed): **32 caught, 52 missed, 6 timeout, 12 unviable** — a **38% catch rate** against the 95% measured on `forge/remote.rs`. That spread is the point: a single tree-wide score would have averaged these into a number that describes neither file. Mutation testing is worth running per-file on the code you are about to change, not once for a headline figure.
+
+**Re-measured the same day after five tests: 57 caught, 37 missed, 1 timeout, 12 unviable — 61%.** The useful number is not the delta in the score, it is that **caught rose by 25 while only 12 mutants were targeted directly**. Tests that drive a long function end-to-end cover guards and arithmetic nobody aimed at, so on badly-tested code the first tests that reach the function at all pay roughly double. Timeouts also fell 6 -> 1: those were mutants that made the loop spin forever, and fixing the give-up logic terminated them without a test being written for it.
+
+Read the distribution, not the total. Misses inside `run_watch_loop` fell 24 -> 9, and none of the nine are in the retry/exit control flow — so the thing that made decomposition unsafe is gone even though the file's score is still far from 95%. The remaining misses cluster in reporting functions (`report_orphaned_prs`, `report_reconcile_failure`, `print_initial_watch_status`), where a `==` -> `!=` changes which message prints rather than what jjpr does. Chasing those buys a better number without buying much safety; judging them as equivalent is often the honest call.
+
+**Never put a mutation run between yourself and finishing a change.** There are three tools here and they cost four orders of magnitude apart, so reaching for the wrong one is the whole difference between mutation testing being useful and being a tax:
+
+| tool | cost | what it is for |
+|---|---|---|
+| `cargo mutants --file <f>` | **~23 min** | A MAP. Where is this file weak? Once per file you are about to work on seriously. |
+| Hand-applying one mutant | **~15 s** | VERIFICATION. Does this specific test actually fail without the fix? |
+| `--in-diff` in CI | ~2 min, async | The per-change gate. Already wired; nobody waits on it. |
+
+Effectively all the verification value comes from the middle row. Edit the line, run the one test, revert — `sed -i '' '<line>s/+= 1/-= 1/'` then `cargo test --lib <test>`. Doing that a dozen times is what proved every test written for `watch.rs`, and each answer arrived in seconds.
+
+The full runner is a **planning** activity, not a gate. It found nothing by itself: it pointed at 24 misses, and the bugs were found by writing the tests it pointed toward. Re-running all 105 mutants to check a four-line refactor — which happened here, and blocked a push for 23 minutes — is the anti-pattern. The targeted check answered the identical question in two minutes.
+
+**Verify that your mutation actually applied before believing a SURVIVED.** Three separate false readings happened in one session, each of which would have been recorded as a coverage gap: a `sed` aimed one line off silently changed nothing and exited 0; `grep 'x *= 1'` treated `*` as a quantifier and reported an applied mutation as missing; and `grep -F '-= 1'` parsed `-=` as an option (needs `--`). A mutation that was never applied looks exactly like one nothing detects. Assert the edit landed — `grep -Fq -- '<mutated text>'` — before running the test.
+
+The distribution mattered more than the total. 24 of the 52 misses sit inside `run_watch_loop` and another 10 in `run_merge_phase`, and they are the retry counters, their give-up thresholds, and the negated guards — `+=` survives `-=`, `>=` survives `<`, `delete !` survives. So watch's error-handling state machine is unverified, and any refactor of it is unguarded. Full detail and the sequencing that follows from it are in TODO.md; the general lesson is that **a MISSED cluster inside one function is a stronger signal than the file's score**, because it says which change you cannot safely make.
+
+Also worth knowing before running one: a whole-file run is long enough that it will outlive a session. This one was stopped before finishing, but `mutants.out/{caught,missed,unviable,timeout}.txt` are written incrementally, so the partial results were complete enough to act on. Read those files rather than relying on the command's final summary line.
+
 **Not done yet:** a completed full-tree run. At ~88s/mutant that needs sharding across machines, and its missed list — not an estimate — is what should decide whether a nightly gate is worth adding.
 
 ## After every code change

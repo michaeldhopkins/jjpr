@@ -31,8 +31,26 @@ is now.
 
 Watch keeps waiting as long as a PR is making progress toward merge,
 including through slow CI. A PR stuck on pending checks or a missing
-approval is not treated as a stall: the loop keeps polling until you
-pass `--timeout` and it elapses, or you press `Ctrl+C`.
+approval is not treated as a stall — waiting on a review is the normal
+case, not a failure.
+
+It does stop on its own in four situations, so it will not poll a
+broken repository forever:
+
+- **Everything merged.** The stack is done.
+- **No progress for five consecutive polls.** Nothing merged, nothing
+  created, nothing promoted. Watch reports which bookmarks remain and
+  exits rather than spinning.
+- **Ten consecutive polls that hit an error.** A failing `jj` command
+  or forge call is retried, and the count is shown as it climbs
+  (`Submit error (3/10)`). Ten in a row means the failure is not
+  transient — a revoked token or a deleted repository will not fix
+  itself — so watch gives up and says so. A single poll that succeeds
+  end to end clears the count.
+- **The watched bookmark disappears.** The stack merged, or the
+  bookmark was deleted.
+
+Plus the two you control: `--timeout` elapsing, and `Ctrl+C`.
 
 While waiting between polls, a terminal shows a live spinner so you can
 tell watch is still running. When output is piped or captured (CI, logs),
