@@ -97,9 +97,20 @@ Beware a second finding riding along: writing the test for the `||` guard surfac
 
 ## After every code change
 
-**`cargo install --path .`** — reinstall the local binary so the `jjpr` on `PATH` matches the source you just changed.
+Three things, every time — not at the end of a branch, not before pushing:
 
-jjpr is a tool you actually run, so this is a non-optional final step of *every* code change — not a release step and not a pushing step. Never defer it to "before pushing" or wait for approval: it is a local install with no outward side effect, and skipping it leaves you running a stale binary. Install on every change; push only when asked.
+1. **`cargo fmt`** — not `--check`, the real thing. CI runs `cargo fmt --check` and fails on any difference, so an unformatted tree is a red build, and a *batch* of unformatted commits is a red build plus a reformatting diff tangled into unrelated work.
+2. **`cargo clippy --locked --tests -- -D warnings`** — the exact CI invocation. `-D warnings` is the part that matters: plenty of lints are `warn` locally and therefore invisible, and `too_many_lines` in particular fires on things that look harmless (see below).
+3. **`cargo install --path .`** — reinstall the local binary so the `jjpr` on `PATH` matches the source you just changed.
+
+The install is non-optional because jjpr is a tool you actually run: it is a local install with no outward side effect, and skipping it leaves you testing a stale binary. Install on every change; push only when asked.
+
+**Run fmt and clippy per change, not per branch.** Both gates are cheap and both are strict in CI, so the only thing deferring them buys is discovering a wall of failures at push time. Two concrete ways this has already gone wrong here:
+
+- Formatting went unchecked until 0.38.0 and drifted a whole style edition behind. The correction touched **45 files**, and an incidental `cargo fmt` during unrelated work got snapshotted into whatever commit happened to be `@`, briefly turning a one-file bug fix into a 7000-line diff. Under jj the working copy is snapshotted on every command, so an unformatted tree is not inert — it is waiting to attach itself to your next commit.
+- That same reformat pushed `run_watch_loop` from under clippy's line limit to 284/275 **without adding a statement or a branch**, failing a `-D warnings` build for a pure layout change. Formatting and linting are coupled here; checking one without the other is how you find out at push time.
+
+`cargo fmt --check` runs in both `ci.yml` and `release.yml`. It is deliberately the first step in each — it needs no build and no jj, so it fails in seconds rather than after the suite.
 
 ## Commit style
 
@@ -118,9 +129,13 @@ Subject ≤ 70 chars. Body explains *why* and lists any breaking migration steps
 
 ## Before pushing
 
-Every push must pass these steps. CI runs `cargo check --locked`, `cargo test`, `cargo clippy`, and `cargo deny` — a stale lockfile or clippy warning will fail the build.
+Every push must pass these steps. CI runs `cargo fmt --check`, `cargo check --locked`, `cargo test`, `cargo clippy --locked --tests -- -D warnings`, and `cargo deny` — a stale lockfile, a formatting difference, or a single clippy warning fails the build. `release.yml` duplicates all of them as the publish gate, so a gate added to one must be added to the other.
 
+None of this should be news by the time you get here: fmt and clippy belong to *every code change* (see above), and this list is the final check, not the first time you run them.
+
+0. **`cargo fmt`** — if this produces a diff, you skipped a step earlier. Commit it with the change it belongs to rather than as a trailing "fix formatting" commit.
 1. **Bump the version** in `Cargo.toml` when adding features or making behavioral changes (semver: patch for fixes, minor for new features/behavioral changes).
+   - "Behavioral change" includes becoming *more* permissive. 0.37.0 went out as a minor, not a patch, because accepting previously-rejected remote URLs turned some working single-remote repos into ambiguous ones. "Everything it changes was already broken" is a claim worth testing before it justifies a patch.
 2. **Update Cargo.lock** — run `cargo check` after any `Cargo.toml` change so the lockfile stays in sync. CI uses `--locked` and will reject a stale lockfile.
    - **`fuzz/Cargo.lock` carries the version too, and nothing in the normal flow touches it.** It only moves when someone builds a fuzz target, so a version bump leaves it behind silently — it sat at 0.36.0 through the entire 0.36.1 release. Nothing fails, because the fuzz jobs do not pass `--locked`, which is exactly why it goes unnoticed. Refresh it with `cargo +nightly fuzz build <target>` (any target) when bumping.
 3. **`cargo test`** — all tests must pass.
