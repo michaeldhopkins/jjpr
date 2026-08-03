@@ -83,6 +83,46 @@ Name of the environment variable that holds the API token. When
 unset, jjpr falls back to the forge's default (`GITHUB_TOKEN`,
 `GITLAB_TOKEN`, or `FORGEJO_TOKEN`). Repo-local only.
 
+## `[identity]`
+
+Which commits count as yours. jjpr scopes `submit`, `merge`, and
+`watch` to your own work, so it has to decide who authored a commit.
+It already knows your local `user.email`, and it will ask the forge
+for the verified emails on your account when the local one isn't
+enough. This section covers what neither of those finds.
+
+```toml
+[identity]
+emails = ["old@employer.example", "me@personal.example"]
+logins = ["my-second-account"]
+```
+
+- `emails` — author emails that are yours, beyond `user.email` and
+  anything fetched from the forge.
+- `logins` — forge logins that are yours, for a second account jjpr
+  can't enumerate from the authenticated one.
+
+Both default to empty and are additive: entries here are unioned with
+what jjpr discovers, never a replacement for it.
+
+You need this in two situations. The first is commits authored under
+an email you no longer use — a machine still configured with an old
+address, or history carried over from another job. The second is a
+token without the `user` scope: fetching your verified emails needs
+it, and a `repo`-only token (which is what `gh` stores by default for
+some setups) can't. jjpr degrades to this config rather than guessing,
+and says so:
+
+```
+A bookmark in the working copy isn't recognized as yours —
+likely authored under a different email. Add it with
+`[identity] emails = ["..."]` in the jjpr config, or name it explicitly.
+```
+
+"Name it explicitly" is the alternative: pass the bookmark to the
+command (`jjpr submit my-bookmark`) instead of letting jjpr infer it
+from the working copy.
+
 ## Configuring forges
 
 Forge-specific authentication and self-hosted instance setup live in
