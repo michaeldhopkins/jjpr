@@ -11,6 +11,12 @@
 # commit happens to be @ without anyone running an add.
 /mutants.out/
 /mutants.out.old/
+# Scratch files the mutants workflow writes at the repo root to carry state from
+# the Mutants step to Summarise. Ignored for the same jj reason as above, since
+# reproducing the job locally creates them.
+/mutants-status.txt
+/mutants-selected.txt
+/mutants.diff
 
 # Fuzzing. The canonical corpus lives in the nightly's GitHub Actions cache, not in
 # git — it grows without bound and is regenerable, so committing it would add
