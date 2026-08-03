@@ -46,9 +46,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      # Mirrors ci.yml deliberately. This job duplicates check/test/clippy/deny
+      # rather than reusing them, so every gate added there has to be added here
+      # too or the publish path quietly enforces less than the PR path — which is
+      # exactly how release.yml ended up as the one workflow missing the jj
+      # install, and that nearly blocked 0.37.0.
+      - name: cargo fmt
+        run: cargo fmt --check
 
       # This job gates publishing, so it must run the SAME suite as ci.yml — and
       # 41 of those tests need jj on PATH. They used to skip themselves when it

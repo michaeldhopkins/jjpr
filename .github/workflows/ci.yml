@@ -17,9 +17,20 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      # Placed before the jj download and every cargo build: it needs neither,
+      # so a formatting slip fails in seconds instead of after the whole suite.
+      #
+      # rustfmt takes `style_edition` from the crate edition, so this is pinned to
+      # edition 2024 layout by Cargo.toml rather than by anything here. Formatting
+      # went unchecked until 0.38.0 and had silently drifted a full style edition
+      # behind; the correction touched 45 files, which is a diff nobody wants to
+      # review twice. Keeping it enforced is what stops that recurring.
+      - name: cargo fmt
+        run: cargo fmt --check
 
       # REQUIRED, not optional. 41 tests across cli, jj_integration,
       # recovery_scenarios, rebase_working_copy, identity_ownership, parity,
