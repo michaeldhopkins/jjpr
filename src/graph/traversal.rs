@@ -76,7 +76,14 @@ pub fn traverse_and_discover_segments(
                     commit_id_to_bookmark
                         .get(cid)
                         .map(|n| (*n).clone())
-                        .unwrap_or_else(|| cid[..cid.len().min(12)].to_string())
+                        // Truncate by CHARS, not bytes. `cid[..len.min(12)]`
+                        // guards against a short id but not a multi-byte one:
+                        // if byte 12 lands mid-character Rust panics, turning a
+                        // display truncation into a crash. Real commit ids are
+                        // hex, but this parses another program's stdout — the
+                        // whole reason that boundary is fuzzed. Found by the
+                        // `graph_invariants` nightly.
+                        .unwrap_or_else(|| cid.chars().take(12).collect())
                 })
                 .collect();
 
@@ -357,6 +364,50 @@ mod tests {
             traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
 
         assert_eq!(result.segments[0].merge_source_names, vec!["cd_long_comm"]);
+    }
+
+    /// The same fallback, but with a commit id whose byte 12 is inside a
+    /// character.
+    ///
+    /// `cid[..cid.len().min(12)]` byte-slices, and `.min(12)` only guards
+    /// against a SHORT id — a multi-byte one panics with "byte index 12 is not
+    /// a char boundary", turning a display truncation into a crash. Found by the
+    /// `graph_invariants` nightly, which produced 17 distinct inputs reaching it;
+    /// one is kept as `seed-multibyte-commit-id-in-merge-parent` so the per-push
+    /// replay holds it down.
+    ///
+    /// jj emits hex commit ids, so this is not reachable from a healthy jj —
+    /// but the parsers exist precisely because that output is another program's
+    /// and jjpr does not control it. The right behaviour is a truncated string,
+    /// not a panic.
+    #[test]
+    fn a_multibyte_commit_id_truncates_instead_of_panicking() {
+        let b_bookmark = make_bookmark("feat-b", "cb", "chb");
+        let all_bookmarks = HashMap::from([("feat-b".to_string(), b_bookmark)]);
+
+        // 'é' is two bytes and starts at byte 11, so it spans the 12-byte
+        // boundary. Eleven leading ASCII chars, not ten — with ten, 'é' occupies
+        // bytes 10..12 and byte 12 IS a boundary, so the fixture would not
+        // exercise the bug at all. The assertion below is what caught that.
+        let multibyte = "cccccccccccéxxxxx";
+        assert!(
+            !multibyte.is_char_boundary(12),
+            "fixture must straddle byte 12 or it does not exercise the bug"
+        );
+
+        let jj = StubJj {
+            entries: vec![
+                entry("cb", "chb", vec!["cc", multibyte]),
+                entry("cc", "chc", vec!["trunk"]),
+                entry(multibyte, "chd", vec!["trunk"]),
+            ],
+        };
+
+        let result =
+            traverse_and_discover_segments(&jj, "cb", &HashSet::new(), &all_bookmarks).unwrap();
+
+        // Twelve CHARACTERS, which is what a human wants from a short id.
+        assert_eq!(result.segments[0].merge_source_names, vec!["cccccccccccé"]);
     }
 
     #[test]
