@@ -181,7 +181,11 @@ fn reconcile_local_state(
             for next_change_id in to_check {
                 match jj.resolve_change_id(next_change_id) {
                     Ok(ref commit_ids) if commit_ids.len() > 1 => {
-                        let short_id = &next_change_id[..next_change_id.len().min(12)];
+                        // Chars, not bytes — see the same fix in
+                        // graph/traversal.rs. Slicing at byte 12 panics when
+                        // that index is inside a multi-byte character, and this
+                        // id comes from jj's stdout rather than from us.
+                        let short_id: String = next_change_id.chars().take(12).collect();
                         let count = commit_ids.len();
                         warnings.push(mk(format!(
                             "Change '{short_id}' is divergent ({count} commits share this change ID)"
