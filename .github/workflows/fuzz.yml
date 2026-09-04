@@ -11,17 +11,28 @@ name: Fuzz
 # of being dropped, since only one cache entry is ever restored. A coverage job then
 # measures which parts of jjpr the corpus actually reaches.
 #
-# Cost: this repo is public, so GitHub-hosted runners are free and unmetered. The
-# constraint being optimised for is the 6h per-job hard cap and wall clock, not
-# CPU-minutes — hence a budget comfortably under the cap rather than a scheduler.
+# Cost: this repo is public, so GitHub-hosted runners are free and unmetered, but the
+# budget is deliberately SMALL — 15 minutes per shard since 2026-09-04, down from 4h.
+# Two things drove that. Twelve 4h shards took ~48 runner-hours a night, more than a
+# repo this size should take from a free pool. And GitHub reclaims hosted runners
+# mid-job as background attrition: two consecutive nights lost one shard each, more
+# than two hours in, with no crash artifact and no status-page incident ("runner has
+# received a shutdown signal", then "lost communication with the server"). Nothing in
+# a job survives its runner dying, so a long job is mostly a long exposure to that.
+#
+# Fifteen minutes is enough for what the nightly is FOR now: keep the corpus cache
+# alive (GitHub deletes entries untouched for 7 days, and only the merge job here
+# writes it) and keep compounding coverage a little each night. The corpora were at
+# saturation by 2026-08-01 anyway — see the baseline in AGENTS.md — so the marginal
+# hour was buying very little.
 on:
   schedule:
     - cron: "0 7 * * *" # ~07:00 UTC nightly
   workflow_dispatch:
     inputs:
       max_total_time:
-        description: "Fuzz duration in seconds, per shard (default 4h). Use a small value to smoke-test the workflow."
-        default: "14400"
+        description: "Fuzz duration in seconds, per shard (default 15 min)."
+        default: "900"
 
 env:
   CARGO_TERM_COLOR: always
@@ -76,11 +87,10 @@ jobs:
     name: Fuzz ${{ matrix.target }} shard ${{ matrix.shard }}
     needs: build
     runs-on: ubuntu-latest
-    # GitHub force-cancels a job at a 6h hard cap. That shows as "cancelled" and
-    # SWALLOWS the "Fail on crashes" red signal, so an over-cap budget silently hides
-    # real crashes. Keep budget + setup under the cap so the job COMPLETES; this
-    # timeout is a backstop below it.
-    timeout-minutes: 300
+    # A job cancelled by a timeout shows as "cancelled" and SWALLOWS the "Fail on
+    # crashes" red signal, so the budget must be comfortably under this backstop so
+    # the job COMPLETES. 60 leaves a wide margin over 15 min of fuzzing plus setup.
+    timeout-minutes: 60
     strategy:
       fail-fast: false # one shard finding a crash must not cancel the others or the merge
       matrix:
@@ -133,7 +143,7 @@ jobs:
           ./bin/$T \
             -fork=1 -ignore_crashes=1 \
             $DICT \
-            -max_total_time=${{ github.event.inputs.max_total_time || '14400' }} \
+            -max_total_time=${{ github.event.inputs.max_total_time || '900' }} \
             -timeout=25 \
             -rss_limit_mb=4096 \
             -artifact_prefix=fuzz/artifacts/$T/ \
