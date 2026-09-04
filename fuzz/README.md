@@ -85,8 +85,12 @@ grep -oE '"[a-zA-Z]+":' src/jj/templates.rs | sort -u | sed 's/"/\\"/g; s/^/"/; 
 - `.github/workflows/fuzz-replay.yml` — every push/PR. Replays each target's corpus
   (`-runs=0`). Deterministic, minutes, read-only on the corpus cache.
 - `.github/workflows/fuzz.yml` — nightly. Builds once, fans out to shards, merges each
-  target's corpus back, then reports coverage. Budget is 4h/shard, under GitHub's 6h
-  hard cap so the job **completes** — a cancelled job swallows the crash signal.
+  target's corpus back, then reports coverage. Budget is 15 min/shard (cut from 4h on
+  2026-09-04: GitHub reclaimed runners under the long jobs, and the corpora were at
+  saturation anyway). Its main job now is keeping the corpus cache alive — GitHub
+  deletes entries untouched for 7 days, and only this workflow writes it — while the
+  replay reads it. A cancelled job swallows the crash signal, so the budget stays well
+  under the job timeout.
 
 ## Reproducibility
 
