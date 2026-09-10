@@ -46,8 +46,10 @@ mdbook build docs/
 echo "Built book in docs/book/"
 
 # 3. Deploy to michaeldhopkins.com.
-site_dir="$HOME/projects/michaeldhopkins.com/public/docs/jjpr"
-if [[ ! -d "$HOME/projects/michaeldhopkins.com" ]]; then
+# CI overrides SITE_DIR to point at a checkout of michaeldhopkins.com; the
+# missing-checkout skip below only applies to the default local path.
+site_dir="${SITE_DIR:-$HOME/projects/michaeldhopkins.com/public/docs/jjpr}"
+if [[ -z "${SITE_DIR:-}" && ! -d "$HOME/projects/michaeldhopkins.com" ]]; then
     echo "warn: $HOME/projects/michaeldhopkins.com not found — skipping deploy" >&2
     exit 0
 fi

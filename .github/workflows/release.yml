@@ -298,6 +298,82 @@ jobs:
           event-type: update-formula
           client-payload: '{"formula": "jjpr", "repo": "michaeldhopkins/jjpr", "version": "${{ needs.check-version.outputs.version }}"}'
 
+      - name: Trigger michaeldhopkins.com release index update
+        if: env.SITE_TOKEN != ''
+        env:
+          SITE_TOKEN: ${{ secrets.SITE_GITHUB_TOKEN }}
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.SITE_GITHUB_TOKEN }}
+          repository: michaeldhopkins/michaeldhopkins.com
+          event-type: release-published
+          client-payload: '{"repo": "michaeldhopkins/jjpr", "version": "${{ needs.check-version.outputs.version }}"}'
+
+  publish-docs:
+    name: Publish docs to michaeldhopkins.com
+    needs: [check-version, release]
+    # Flip the SITE_DOCS_ENABLED variable on once SITE_GITHUB_TOKEN is set;
+    # secrets are not readable from a job-level `if`, so a variable gates it.
+    if: vars.SITE_DOCS_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # jjpr's book is pure mdbook — the version footer comes from Cargo.toml,
+      # so no Rust toolchain is needed here.
+      - uses: taiki-e/install-action@mdbook
+
+      - name: Check out michaeldhopkins.com
+        uses: actions/checkout@v5
+        with:
+          repository: michaeldhopkins/michaeldhopkins.com
+          token: ${{ secrets.SITE_GITHUB_TOKEN }}
+          path: site
+          ref: main
+          # Needed to rebase if the site's release-index workflow pushes mid-run.
+          fetch-depth: 0
+
+      - name: Build docs into the site checkout
+        env:
+          SITE_DIR: ${{ github.workspace }}/site/public/docs/jjpr
+        run: ./generate-docs.sh
+
+      - name: Verify the book was produced
+        # docs/book/ exists only if mdbook ran against this fresh checkout;
+        # the site path alone would pass on the docs already committed there.
+        run: |
+          test -s docs/book/index.html
+          test -s site/public/docs/jjpr/index.html
+
+      - name: Commit and push
+        working-directory: site
+        env:
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add public/docs/jjpr
+          if git diff --cached --quiet; then
+            echo "No docs changes"
+            exit 0
+          fi
+          git commit -m "Refresh jjpr docs for v${VERSION}"
+
+          # The site's own release-index workflow commits to main too. Different
+          # paths, so the rebase never conflicts, but the push can be rejected.
+          for attempt in $(seq 1 5); do
+            if git push origin HEAD:main; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected; rebasing onto latest main (attempt $attempt)"
+            git fetch origin main
+            git rebase origin/main
+            sleep $((RANDOM % 5 + 1))
+          done
+          echo "::error::failed to push docs after 5 attempts"
+          exit 1
+
   update-aur:
     name: Update AUR packages
     needs: [check-version, release]
