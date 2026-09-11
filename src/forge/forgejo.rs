@@ -312,6 +312,8 @@ fn parse_forgejo_dismiss(v: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::test_server::{StubServer, route};
+    use crate::forge::{AuthScheme, PaginationStyle};
 
     #[test]
     fn forgejo_dismiss_reads_branch_protection() {
@@ -569,5 +571,43 @@ mod tests {
 
         let rebase = serde_json::json!({ "Do": "rebase" });
         assert_eq!(rebase["Do"].as_str().unwrap(), "rebase");
+    }
+
+    fn stub_forge(server: &StubServer) -> ForgejoForge {
+        ForgejoForge::new(ForgeClient::new(
+            server.base_url(),
+            "tok".to_string(),
+            AuthScheme::Token,
+            PaginationStyle::PageNumber { limit: 50 },
+        ))
+    }
+
+    #[test]
+    fn delete_comment_deletes_the_issue_comment() {
+        let server = StubServer::start(vec![route(
+            "DELETE",
+            "/repos/o/r/issues/comments/99",
+            204,
+            "",
+        )]);
+
+        stub_forge(&server)
+            .delete_comment("o", "r", 99)
+            .expect("204 is success");
+
+        assert_eq!(
+            server.request_lines(),
+            vec!["DELETE /repos/o/r/issues/comments/99"]
+        );
+    }
+
+    #[test]
+    fn delete_comment_fails_when_the_forge_refuses() {
+        let server = StubServer::start(vec![]);
+
+        let err = stub_forge(&server)
+            .delete_comment("o", "r", 99)
+            .expect_err("a 404 must not read as deleted");
+        assert!(err.to_string().contains("HTTP 404"), "{err}");
     }
 }

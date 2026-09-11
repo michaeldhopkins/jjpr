@@ -476,6 +476,8 @@ fn parse_gitlab_reset_on_push(v: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::test_server::{StubServer, route};
+    use crate::forge::{AuthScheme, PaginationStyle};
 
     #[test]
     fn gitlab_reset_on_push_reads_project_approval_settings() {
@@ -871,5 +873,88 @@ mod tests {
                 .is_some_and(|s| s == "requested_changes")
         });
         assert!(!has_changes);
+    }
+
+    fn stub_forge(server: &StubServer) -> GitLabForge {
+        GitLabForge::new(ForgeClient::new(
+            server.base_url(),
+            "tok".to_string(),
+            AuthScheme::PrivateToken,
+            PaginationStyle::LinkHeader,
+        ))
+    }
+
+    const MR_LIST: &str = "/projects/o%2Fr/merge_requests?state=all&per_page=100";
+
+    /// The note id alone does not say which MR owns it, so the backend
+    /// tries each MR in turn. An MR without an iid is skipped rather than
+    /// tried as MR 0, and the first MR that accepts the request ends the
+    /// scan.
+    #[test]
+    fn delete_comment_tries_each_mr_until_one_owns_the_note() {
+        let server = StubServer::start(vec![
+            route(
+                "GET",
+                MR_LIST,
+                200,
+                r#"[{"id":1},{"iid":7},{"iid":8},{"iid":9}]"#,
+            ),
+            route(
+                "DELETE",
+                "/projects/o%2Fr/merge_requests/8/notes/5",
+                204,
+                "",
+            ),
+        ]);
+
+        stub_forge(&server)
+            .delete_comment("o", "r", 5)
+            .expect("MR 8 owns the note");
+
+        assert_eq!(
+            server.request_lines(),
+            vec![
+                format!("GET {MR_LIST}"),
+                "DELETE /projects/o%2Fr/merge_requests/7/notes/5".to_string(),
+                "DELETE /projects/o%2Fr/merge_requests/8/notes/5".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn delete_comment_fails_when_no_mr_owns_the_note() {
+        let server =
+            StubServer::start(vec![route("GET", MR_LIST, 200, r#"[{"iid":7},{"iid":8}]"#)]);
+
+        let err = stub_forge(&server)
+            .delete_comment("o", "r", 5)
+            .expect_err("every MR answered 404");
+        assert!(err.to_string().contains("could not find note 5"), "{err}");
+    }
+
+    #[test]
+    fn update_comment_puts_the_body_to_the_owning_mr() {
+        let server = StubServer::start(vec![
+            route("GET", MR_LIST, 200, r#"[{"iid":7}]"#),
+            route(
+                "PUT",
+                "/projects/o%2Fr/merge_requests/7/notes/5",
+                200,
+                r#"{"id":5}"#,
+            ),
+        ]);
+
+        stub_forge(&server)
+            .update_comment("o", "r", 5, "new text")
+            .expect("MR 7 owns the note");
+
+        let put = server
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "PUT")
+            .expect("one PUT");
+        assert_eq!(put.target, "/projects/o%2Fr/merge_requests/7/notes/5");
+        let sent: serde_json::Value = serde_json::from_str(&put.body).expect("JSON body");
+        assert_eq!(sent, serde_json::json!({ "body": "new text" }));
     }
 }

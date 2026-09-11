@@ -5,6 +5,8 @@ pub mod gitlab;
 pub mod http;
 pub mod remote;
 pub mod status;
+#[cfg(test)]
+pub(crate) mod test_server;
 pub mod token;
 pub mod types;
 

@@ -685,6 +685,8 @@ impl Forge for GitHubForge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::test_server::{StubServer, route};
+    use crate::forge::{AuthScheme, PaginationStyle};
 
     /// A real `GET /repos/{owner}/{repo}/stacks/{n}` payload (captured live,
     /// SHAs truncated) for a **partially merged** stack: PR 353 has landed and
@@ -1492,5 +1494,43 @@ mod tests {
         }"#;
         let pr: PullRequest = serde_json::from_str(json_null).unwrap();
         assert_eq!(pr.author, "");
+    }
+
+    fn stub_forge(server: &StubServer) -> GitHubForge {
+        GitHubForge::new(ForgeClient::new(
+            server.base_url(),
+            "tok".to_string(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        ))
+    }
+
+    #[test]
+    fn delete_comment_deletes_the_issue_comment() {
+        let server = StubServer::start(vec![route(
+            "DELETE",
+            "/repos/o/r/issues/comments/99",
+            204,
+            "",
+        )]);
+
+        stub_forge(&server)
+            .delete_comment("o", "r", 99)
+            .expect("204 is success");
+
+        assert_eq!(
+            server.request_lines(),
+            vec!["DELETE /repos/o/r/issues/comments/99"]
+        );
+    }
+
+    #[test]
+    fn delete_comment_fails_when_the_forge_refuses() {
+        let server = StubServer::start(vec![]);
+
+        let err = stub_forge(&server)
+            .delete_comment("o", "r", 99)
+            .expect_err("a 404 must not read as deleted");
+        assert!(err.to_string().contains("HTTP 404"), "{err}");
     }
 }
