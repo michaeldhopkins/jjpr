@@ -572,7 +572,7 @@ pub fn create_submission_plan(
                 );
                 eprintln!("    Skipping push to avoid closing the existing PR.");
                 eprintln!(
-                    "    hint: jj bookmark delete {} && jj git push --deleted",
+                    "    hint: jj bookmark delete {0} && jj git push --bookmark {0}",
                     bookmark.name
                 );
             }

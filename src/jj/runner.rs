@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use anyhow::Result;
 use vcs_runner::{
@@ -17,6 +19,10 @@ pub struct JjRunner {
     /// discovery. Defaults to jj's built-in `mine()` (single local email);
     /// [`JjRunner::set_identity`] widens it to all of your identities.
     owned_revset: String,
+    /// Stale bookmarks already warned about. `watch` lists bookmarks on
+    /// every poll with the same runner, and repeating the same warning
+    /// each time buried the output that mattered.
+    warned_stale: Mutex<HashSet<String>>,
 }
 
 impl JjRunner {
@@ -32,7 +38,32 @@ impl JjRunner {
         Ok(Self {
             repo_path,
             owned_revset: "mine()".to_string(),
+            warned_stale: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Warn once per stale bookmark for the life of this runner. Returns
+    /// the names warned about on this call, so a repeat is observable.
+    ///
+    /// The hint is `jj bookmark forget` on its own: it touches one local
+    /// bookmark and pushes nothing. `jj git push --deleted` would push
+    /// every pending deletion in the repo, including ones the user never
+    /// meant to publish.
+    fn warn_stale_bookmarks(&self, warnings: Vec<String>) -> Vec<String> {
+        let mut warned = self.warned_stale.lock().expect("poisoned");
+        let mut fresh = Vec::new();
+        for name in warnings {
+            if !warned.insert(name.clone()) {
+                continue;
+            }
+            eprintln!(
+                "  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)"
+            );
+            eprintln!("    To clean up the stale local bookmark:");
+            eprintln!("      jj bookmark forget {name}");
+            fresh.push(name);
+        }
+        fresh
     }
 
     /// Widen ownership discovery to every identity in `identity` (multiple
@@ -132,13 +163,7 @@ impl Jj for JjRunner {
             BOOKMARK_TEMPLATE,
         ])?;
         let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
-        for name in warnings {
-            eprintln!(
-                "  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)"
-            );
-            eprintln!("    To clean up the stale local bookmark:");
-            eprintln!("      jj bookmark forget {name} && jj git push --deleted");
-        }
+        self.warn_stale_bookmarks(warnings);
         Ok(bookmarks)
     }
 
@@ -161,13 +186,7 @@ impl Jj for JjRunner {
             BOOKMARK_TEMPLATE,
         ])?;
         let (bookmarks, warnings) = templates::parse_bookmark_output(&output)?;
-        for name in warnings {
-            eprintln!(
-                "  Warning: skipping '{name}' (points to a missing or conflicted commit, typically after a squash merge on the forge)"
-            );
-            eprintln!("    To clean up the stale local bookmark:");
-            eprintln!("      jj bookmark forget {name} && jj git push --deleted");
-        }
+        self.warn_stale_bookmarks(warnings);
         Ok(bookmarks)
     }
 
@@ -350,6 +369,24 @@ mod tests {
             .current_dir(path)
             .output()
             .expect("failed to init jj repo");
+    }
+
+    #[test]
+    fn test_stale_bookmark_warning_prints_once_per_runner() {
+        if !jj_available() {
+            return;
+        }
+
+        let temp = tempfile::TempDir::new().unwrap();
+        init_jj_repo(temp.path());
+        let runner = JjRunner::new(temp.path().to_path_buf()).unwrap();
+
+        let first = runner.warn_stale_bookmarks(vec!["stale".to_string(), "other".to_string()]);
+        assert_eq!(first, vec!["stale", "other"]);
+
+        // The same names on the next poll are silent; a new one still prints.
+        let second = runner.warn_stale_bookmarks(vec!["stale".to_string(), "third".to_string()]);
+        assert_eq!(second, vec!["third"]);
     }
 
     #[test]

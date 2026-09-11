@@ -29,8 +29,13 @@ commit was rewritten. The warning includes the cleanup command:
 
 ```
 jj bookmark forget <name>
-jj git push --deleted
 ```
+
+`forget` drops the local bookmark without queuing a deletion to push,
+so it cannot touch the remote. jjpr does not suggest `jj git push
+--deleted` here, because that pushes every pending deletion in the
+repo, not just this one. In `watch`, the warning prints once per run
+rather than on every poll.
 
 After cleanup, re-run jjpr.
 
