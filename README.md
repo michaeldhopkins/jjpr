@@ -33,8 +33,8 @@ quickstart, per-command reference, configuration, forge support, and
 troubleshooting.
 
 The doc sources are in [`docs/src/`](docs/src/) and are hand-edited.
-Run `./generate-docs.sh` to rebuild the site and mirror it into the
-`michaeldhopkins.com` repo.
+Run `./generate-docs.sh` to build the book locally; each release
+publishes it to the site.
 
 ## Development
 

@@ -1,14 +1,14 @@
 #!/bin/bash
-# Build the jjpr docs site and deploy it into michaeldhopkins.com.
+# Build the jjpr docs book into docs/book/.
 #
 # Steps:
 #   1. Regenerate docs/src/version-footer.js from Cargo.toml.
 #   2. Build the mdbook in docs/book/.
-#   3. Mirror docs/book/ into ~/projects/michaeldhopkins.com/public/docs/jjpr/
-#      with rsync --delete (removes stale files).
+#   3. If SITE_DIR is set, mirror docs/book/ into it with rsync --delete.
+#      Only the release workflow sets it, so local runs never touch
+#      michaeldhopkins.com; each release publishes the book there.
 #
-# Run this whenever you update the docs. Commit changes in jjpr (docs/
-# sources) and michaeldhopkins.com (public/docs/jjpr/) separately.
+# Run this whenever you update the docs, to check the book builds.
 
 set -euo pipefail
 
@@ -45,14 +45,10 @@ echo "Wrote docs/src/version-footer.js ($version)"
 mdbook build docs/
 echo "Built book in docs/book/"
 
-# 3. Deploy to michaeldhopkins.com.
-# CI overrides SITE_DIR to point at a checkout of michaeldhopkins.com; the
-# missing-checkout skip below only applies to the default local path.
-site_dir="${SITE_DIR:-$HOME/projects/michaeldhopkins.com/public/docs/jjpr}"
-if [[ -z "${SITE_DIR:-}" && ! -d "$HOME/projects/michaeldhopkins.com" ]]; then
-    echo "warn: $HOME/projects/michaeldhopkins.com not found — skipping deploy" >&2
+# 3. Publish into a site checkout (release workflow only).
+if [[ -z "${SITE_DIR:-}" ]]; then
     exit 0
 fi
-mkdir -p "$site_dir"
-rsync -a --delete docs/book/ "$site_dir/"
-echo "Deployed to $site_dir"
+mkdir -p "$SITE_DIR"
+rsync -a --delete docs/book/ "$SITE_DIR/"
+echo "Deployed to $SITE_DIR"
