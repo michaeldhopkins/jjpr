@@ -1,7 +1,7 @@
 # Forge support
 
 jjpr auto-detects the forge from your remote URL and talks directly to
-the forge's API over HTTP. Neither `gh` nor `glab` is required, but
+the forge's API. Neither `gh` nor `glab` is required, but
 jjpr picks up their stored credentials when they're present.
 
 | Forge | Token env var | CLI fallback |
