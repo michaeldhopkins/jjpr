@@ -107,7 +107,7 @@ pub fn execute_submission_plan(
                 );
                 eprintln!("    This means the bookmark's changes are already in the base branch.");
                 eprintln!(
-                    "    hint: jj bookmark delete {} && jj git push --deleted",
+                    "    hint: jj bookmark delete {0} && jj git push --bookmark {0}",
                     bookmark.name
                 );
             }
