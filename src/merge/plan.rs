@@ -484,6 +484,9 @@ mod tests {
         fn create_comment(&self, o: &str, r: &str, n: u64, b: &str) -> Result<IssueComment> {
             self.inner.create_comment(o, r, n, b)
         }
+        fn delete_comment(&self, o: &str, r: &str, c: u64) -> Result<()> {
+            self.inner.delete_comment(o, r, c)
+        }
         fn update_comment(&self, o: &str, r: &str, c: u64, b: &str) -> Result<()> {
             self.inner.update_comment(o, r, c, b)
         }
@@ -902,6 +905,9 @@ mod tests {
             unimplemented!()
         }
         fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> {
+            unimplemented!()
+        }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
             unimplemented!()
         }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
@@ -1543,6 +1549,9 @@ mod tests {
                 _i: u64,
                 _b: &str,
             ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {

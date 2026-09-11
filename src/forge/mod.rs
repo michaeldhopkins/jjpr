@@ -193,6 +193,10 @@ pub trait Forge: Send + Sync {
 
     fn update_comment(&self, owner: &str, repo: &str, comment_id: u64, body: &str) -> Result<()>;
 
+    /// Remove a comment jjpr wrote. Used when a PR leaves its stack and the
+    /// navigation comment would otherwise describe a stack of one.
+    fn delete_comment(&self, owner: &str, repo: &str, comment_id: u64) -> Result<()>;
+
     fn update_pr_body(&self, owner: &str, repo: &str, number: u64, body: &str) -> Result<()>;
 
     fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()>;

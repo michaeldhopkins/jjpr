@@ -168,6 +168,11 @@ impl Forge for ForgejoForge {
         Ok(())
     }
 
+    fn delete_comment(&self, owner: &str, repo: &str, comment_id: u64) -> Result<()> {
+        let path = format!("repos/{owner}/{repo}/issues/comments/{comment_id}");
+        self.client.delete(&path)
+    }
+
     fn update_pr_body(&self, owner: &str, repo: &str, number: u64, body: &str) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
         let json_body = serde_json::json!({ "body": body });

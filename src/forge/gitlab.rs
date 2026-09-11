@@ -23,6 +23,37 @@ impl GitLabForge {
     fn encode_project(owner: &str, repo: &str) -> String {
         format!("{owner}/{repo}").replace('/', "%2F")
     }
+
+    /// Run `op` against the note path of whichever MR owns `comment_id`.
+    ///
+    /// GitLab's note endpoints need the MR iid in the path
+    /// (`/projects/:id/merge_requests/:iid/notes/:note_id`), but the Forge
+    /// trait only carries the note id. We try each MR (all states) until one
+    /// accepts the request. In practice stacks are small (2-5 MRs).
+    fn on_note_owner(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        op: impl Fn(&str) -> Result<()>,
+    ) -> Result<()> {
+        let project = Self::encode_project(owner, repo);
+        let mrs_path = format!("projects/{project}/merge_requests?state=all&per_page=100");
+        let mrs = self.client.get_paginated(&mrs_path)?;
+
+        for mr in &mrs {
+            let iid = mr["iid"].as_u64().unwrap_or(0);
+            if iid == 0 {
+                continue;
+            }
+            let note_path = format!("projects/{project}/merge_requests/{iid}/notes/{comment_id}");
+            if op(&note_path).is_ok() {
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("could not find note {comment_id} on any MR in project")
+    }
 }
 
 /// Parse a single GitLab MR JSON value into our `PullRequest` type.
@@ -264,29 +295,17 @@ impl Forge for GitLabForge {
     }
 
     fn update_comment(&self, owner: &str, repo: &str, comment_id: u64, body: &str) -> Result<()> {
-        // GitLab's note update API requires the MR iid in the path:
-        //   PUT /projects/:id/merge_requests/:iid/notes/:note_id
-        // but the Forge trait only passes comment_id. We scan MRs (all states)
-        // to find which one owns this note. In practice stacks are small (2-5 MRs).
-        let project = Self::encode_project(owner, repo);
-        let mrs_path = format!("projects/{project}/merge_requests?state=all&per_page=100");
-        let mrs = self.client.get_paginated(&mrs_path)?;
+        self.on_note_owner(owner, repo, comment_id, |note_path| {
+            self.client
+                .put(note_path, &serde_json::json!({ "body": body }))
+                .map(|_| ())
+        })
+    }
 
-        for mr in &mrs {
-            let iid = mr["iid"].as_u64().unwrap_or(0);
-            if iid == 0 {
-                continue;
-            }
-            let note_path = format!("projects/{project}/merge_requests/{iid}/notes/{comment_id}");
-            let result = self
-                .client
-                .put(&note_path, &serde_json::json!({ "body": body }));
-            if result.is_ok() {
-                return Ok(());
-            }
-        }
-
-        anyhow::bail!("could not find note {comment_id} on any MR in project")
+    fn delete_comment(&self, owner: &str, repo: &str, comment_id: u64) -> Result<()> {
+        self.on_note_owner(owner, repo, comment_id, |note_path| {
+            self.client.delete(note_path)
+        })
     }
 
     fn update_pr_body(&self, owner: &str, repo: &str, number: u64, body: &str) -> Result<()> {

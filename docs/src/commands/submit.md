@@ -259,4 +259,15 @@ submit to inherit fossil metadata (PR numbers, merge timestamps) for
 PRs whose local bookmarks have been cleaned up. Don't edit it; jjpr
 rewrites the whole comment on every submit.
 
+A PR that leaves the stack is not history. If a bookmark from the
+previous comment is gone from the local graph, jjpr asks the forge
+whether its PR is still open before filing it under closed/merged.
+An open PR was rebased out of the stack, so it simply drops off the
+list. When that leaves a single live PR with no history, jjpr deletes
+the comment (or strips the section from the description in
+`stack_nav = "description"` mode), so an unstacked PR looks like any
+other PR again. Submit only touches the PRs in the stack it was given,
+so after splitting a stack into independent PRs, submit each one to
+clean up its comment.
+
 Single-PR stacks don't get a comment.
