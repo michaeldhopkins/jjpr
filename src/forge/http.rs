@@ -542,6 +542,7 @@ fn extract_next_link(resp: &http::Response<ureq::Body>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::forge::test_server::{StubServer, route};
 
     #[test]
     fn connection_pool_is_sized_to_the_fan_out() {
@@ -842,5 +843,44 @@ mod tests {
         let (name, value) = client.auth_header();
         assert_eq!(name, "Authorization");
         assert_eq!(value, "token tok_abc");
+    }
+
+    fn stub_client(server: &StubServer) -> ForgeClient {
+        ForgeClient::new(
+            server.base_url(),
+            "tok".to_string(),
+            AuthScheme::Bearer,
+            PaginationStyle::LinkHeader,
+        )
+    }
+
+    #[test]
+    fn delete_sends_delete_and_accepts_no_content() {
+        let server = StubServer::start(vec![route("DELETE", "/things/7", 204, "")]);
+        let client = stub_client(&server);
+
+        client.delete("things/7").expect("204 is success");
+
+        assert_eq!(server.request_lines(), vec!["DELETE /things/7"]);
+    }
+
+    #[test]
+    fn delete_surfaces_the_status_of_a_rejected_request() {
+        let server = StubServer::start(vec![route(
+            "DELETE",
+            "/things/7",
+            403,
+            r#"{"message":"Must have admin rights"}"#,
+        )]);
+        let client = stub_client(&server);
+
+        let err = client.delete("things/7").expect_err("403 is an error");
+        let http = err
+            .downcast_ref::<HttpError>()
+            .expect("preserves the status for callers to match on");
+        assert_eq!(http.status, 403);
+        assert_eq!(http.method, "DELETE");
+        assert_eq!(http.path, "things/7");
+        assert!(http.body.contains("admin rights"), "{}", http.body);
     }
 }

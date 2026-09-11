@@ -1638,22 +1638,40 @@ mod tests {
         }
     }
 
+    fn nav_entry(name: &str, number: u64, is_merged: bool) -> comment::StackEntry {
+        comment::StackEntry {
+            bookmark_name: name.to_string(),
+            pr_url: Some(format!("https://github.com/o/r/pull/{number}")),
+            pr_number: Some(number),
+            is_current: false,
+            is_merged,
+            closed_at: None,
+        }
+    }
+
     /// A stack comment as jjpr wrote it while `entries` were all open.
     fn stack_comment(id: u64, entries: &[(&str, u64)]) -> IssueComment {
+        stack_comment_with_history(id, entries, &[])
+    }
+
+    /// A stack comment whose `history` entries were already recorded as
+    /// merged when it was written.
+    fn stack_comment_with_history(
+        id: u64,
+        entries: &[(&str, u64)],
+        history: &[(&str, u64)],
+    ) -> IssueComment {
         let live: Vec<comment::StackEntry> = entries
             .iter()
-            .map(|(name, number)| comment::StackEntry {
-                bookmark_name: name.to_string(),
-                pr_url: Some(format!("https://github.com/o/r/pull/{number}")),
-                pr_number: Some(*number),
-                is_current: false,
-                is_merged: false,
-                closed_at: None,
-            })
+            .map(|(name, number)| nav_entry(name, *number, false))
+            .collect();
+        let fossils: Vec<comment::StackEntry> = history
+            .iter()
+            .map(|(name, number)| nav_entry(name, *number, true))
             .collect();
         IssueComment {
             id,
-            body: Some(comment::generate_comment_body(&live, &[])),
+            body: Some(comment::generate_comment_body(&live, &fossils)),
         }
     }
 
@@ -1744,6 +1762,66 @@ mod tests {
         assert!(update.contains("1 earlier closed/merged PR"), "{update}");
         assert!(update.contains("~~[`profile`]"), "{update}");
         assert!(!calls.iter().any(|c| c.starts_with("delete_comment")));
+    }
+
+    /// Entries still in the stack, and entries the comment already records
+    /// as merged, need no lookup. The forge has no state for any of them
+    /// here, so a lookup would fail and print a warning per PR.
+    #[test]
+    fn test_settled_and_current_entries_are_not_looked_up() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment_with_history(
+                99,
+                &[("auth", 10), ("profile", 11)],
+                &[("old", 5)],
+            )],
+            HashMap::new(),
+        );
+        let plan = nav_only_plan(
+            &[("auth", 10), ("profile", 11)],
+            crate::config::StackNavMode::Comment,
+        );
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("get_pr_state")),
+            "nothing here needed the forge: {calls:?}"
+        );
+        let update = calls
+            .iter()
+            .find(|c| c.starts_with("update_comment:99:"))
+            .unwrap_or_else(|| panic!("expected a rewrite: {calls:?}"));
+        assert!(update.contains("~~[`old`]"), "history is kept: {update}");
+    }
+
+    /// Closed without merging is history too, and GitLab reports a merged
+    /// MR with state "merged" rather than "closed". Both stay as fossils.
+    #[test]
+    fn test_closed_and_gitlab_merged_states_both_become_fossils() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(
+                99,
+                &[("auth", 10), ("profile", 11), ("settings", 12)],
+            )],
+            HashMap::from([
+                (11, pr_state("closed", false)),
+                (12, pr_state("merged", true)),
+            ]),
+        );
+        let plan = nav_only_plan(&[("auth", 10)], crate::config::StackNavMode::Comment);
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        let update = calls
+            .iter()
+            .find(|c| c.starts_with("update_comment:99:"))
+            .unwrap_or_else(|| panic!("expected a rewrite: {calls:?}"));
+        assert!(update.contains("2 earlier closed/merged PRs"), "{update}");
+        assert!(update.contains("~~[`profile`]"), "{update}");
+        assert!(update.contains("~~[`settings`]"), "{update}");
     }
 
     /// A forge error on the state lookup keeps the old behaviour rather
