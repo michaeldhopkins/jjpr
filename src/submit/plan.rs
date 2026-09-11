@@ -774,6 +774,9 @@ mod tests {
         fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> {
             unimplemented!()
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            unimplemented!()
+        }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
             unimplemented!()
         }
@@ -1521,6 +1524,9 @@ mod tests {
                 unimplemented!()
             }
             fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
@@ -2275,6 +2281,9 @@ mod tests {
             ) -> Result<IssueComment> {
                 unimplemented!()
             }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                unimplemented!()
+            }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
                 unimplemented!()
             }
@@ -2415,6 +2424,9 @@ mod tests {
                 _i: u64,
                 _b: &str,
             ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
@@ -2579,6 +2591,9 @@ mod tests {
             ) -> Result<IssueComment> {
                 unimplemented!()
             }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                unimplemented!()
+            }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
                 unimplemented!()
             }
@@ -2697,6 +2712,9 @@ mod tests {
                 _i: u64,
                 _b: &str,
             ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
@@ -2829,6 +2847,9 @@ mod tests {
                 _i: u64,
                 _b: &str,
             ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
@@ -3181,6 +3202,9 @@ mod tests {
             ) -> Result<IssueComment> {
                 unimplemented!()
             }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                unimplemented!()
+            }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
                 unimplemented!()
             }
@@ -3281,6 +3305,9 @@ mod tests {
                 _i: u64,
                 _b: &str,
             ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {

@@ -2279,6 +2279,9 @@ mod tests {
         ) -> Result<jjpr::forge::types::IssueComment> {
             unimplemented!()
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            unimplemented!()
+        }
         fn update_comment(&self, _o: &str, _r: &str, _c: u64, _b: &str) -> Result<()> {
             unimplemented!()
         }

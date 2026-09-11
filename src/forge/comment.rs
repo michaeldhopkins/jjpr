@@ -161,6 +161,13 @@ pub fn find_stack_comment(comments: &[IssueComment]) -> Option<&IssueComment> {
     })
 }
 
+/// Whether `(live, fossils)` describe anything worth navigating. A single
+/// live PR with no merged history is an ordinary PR, and its nav is removed
+/// rather than rendered.
+pub fn has_navigation(live: &[StackEntry], fossils: &[StackEntry]) -> bool {
+    live.len() > 1 || !fossils.is_empty()
+}
+
 /// Callback signature for `StackNav::update`. Given the previous comment's
 /// data (if any), produce `(live, fossils)` for rendering.
 pub type BuildEntriesFn<'a> =
@@ -229,8 +236,14 @@ impl StackNav for CommentNav {
             .and_then(parse_comment_data);
 
         let (live, fossils) = build_entries(previous_data.as_ref());
-        if live.is_empty() && fossils.is_empty() {
-            return Ok(false);
+        if !has_navigation(&live, &fossils) {
+            // A stack of one with no history is not a stack. Leaving the
+            // comment up tells reviewers to look for PRs that are not there.
+            let Some(existing_comment) = existing else {
+                return Ok(false);
+            };
+            forge.delete_comment(owner, repo, existing_comment.id)?;
+            return Ok(true);
         }
         let body = generate_comment_body(&live, &fossils);
 
@@ -283,6 +296,26 @@ impl DescriptionNav {
     fn wrap_section(content: &str) -> String {
         format!("{NAV_START}\n{content}{NAV_END}")
     }
+
+    /// Remove the nav section, leaving the rest of the description as it
+    /// was. A body with no section comes back unchanged.
+    fn strip_section(body: &str) -> String {
+        let Some(start_idx) = body.find(NAV_START) else {
+            return body.to_string();
+        };
+        let Some(end_tag_start) = body[start_idx..].find(NAV_END) else {
+            return body.to_string();
+        };
+        let end_idx = start_idx + end_tag_start + NAV_END.len();
+        let before = body[..start_idx].trim_end();
+        let after = body[end_idx..].trim_start();
+        match (before.is_empty(), after.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => after.to_string(),
+            (false, true) => format!("{before}\n"),
+            (false, false) => format!("{before}\n\n{after}"),
+        }
+    }
 }
 
 impl StackNav for DescriptionNav {
@@ -309,14 +342,12 @@ impl StackNav for DescriptionNav {
         let previous_data = Self::extract_section(current_body).and_then(parse_comment_data);
 
         let (live, fossils) = build_entries(previous_data.as_ref());
-        if live.is_empty() && fossils.is_empty() {
-            return Ok(false);
-        }
-
-        let nav_content = generate_comment_body(&live, &fossils);
-        let new_section = Self::wrap_section(&nav_content);
-
-        let new_body = Self::splice_section(current_body, &new_section);
+        let new_body = if has_navigation(&live, &fossils) {
+            let nav_content = generate_comment_body(&live, &fossils);
+            Self::splice_section(current_body, &Self::wrap_section(&nav_content))
+        } else {
+            Self::strip_section(current_body)
+        };
 
         if new_body.trim() == current_body.trim() {
             return Ok(false);
@@ -729,6 +760,37 @@ mod tests {
         let data = parse_comment_data(&section).unwrap();
         assert_eq!(data.stack.len(), 2);
         assert_eq!(data.stack[0].bookmark_name, "auth");
+    }
+
+    #[test]
+    fn test_has_navigation_needs_two_live_or_any_fossil() {
+        let live = sample_live();
+        assert!(has_navigation(&live, &[]));
+        assert!(has_navigation(&live[..1], &live[1..]));
+        assert!(!has_navigation(&live[..1], &[]));
+        assert!(!has_navigation(&[], &[]));
+    }
+
+    #[test]
+    fn test_description_nav_strip_section_keeps_surrounding_text() {
+        let body = format!("before\n\n{NAV_START}\nold nav\n{NAV_END}\n\nafter\n");
+        assert_eq!(DescriptionNav::strip_section(&body), "before\n\nafter\n");
+    }
+
+    #[test]
+    fn test_description_nav_strip_section_only_nav_leaves_empty_body() {
+        let body = format!("{NAV_START}\nold nav\n{NAV_END}\n");
+        assert_eq!(DescriptionNav::strip_section(&body), "");
+    }
+
+    #[test]
+    fn test_description_nav_strip_section_without_nav_is_unchanged() {
+        assert_eq!(
+            DescriptionNav::strip_section("plain body\n"),
+            "plain body\n"
+        );
+        let unterminated = format!("text\n{NAV_START}\nno end tag");
+        assert_eq!(DescriptionNav::strip_section(&unterminated), unterminated);
     }
 
     #[test]

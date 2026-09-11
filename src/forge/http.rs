@@ -147,6 +147,35 @@ impl ForgeClient {
             .with_context(|| format!("failed to parse JSON from GET {path}"))
     }
 
+    /// DELETE a resource. Success bodies are discarded; forges answer 204.
+    pub fn delete(&self, path: &str) -> Result<()> {
+        let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let (header, value) = self.auth_header();
+        let mut resp = self
+            .agent
+            .delete(&url)
+            .header(header, &value)
+            .header("Accept", "application/json")
+            .call()
+            .with_context(|| format!("DELETE {url}"))?;
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp
+                .body_mut()
+                .read_to_string()
+                .unwrap_or_else(|_| String::from("<unreadable>"));
+            return Err(HttpError {
+                status,
+                method: "DELETE".to_string(),
+                path: path.to_string(),
+                body,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     /// POST with a JSON body, return the response JSON.
     pub fn post(&self, path: &str, body: &impl Serialize) -> Result<serde_json::Value> {
         self.request_with_body("POST", path, body)

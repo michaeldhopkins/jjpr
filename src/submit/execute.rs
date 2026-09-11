@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -563,6 +564,52 @@ fn classify_stack_entries(
     (live, fossils)
 }
 
+/// Drop previous-comment entries whose PR is still open but no longer in
+/// the local stack. `classify_stack_entries` fossilizes every entry it
+/// does not recognise, on the theory that a bookmark gone from the graph
+/// was merged, but a PR that was rebased out of the stack is gone too.
+/// Rendering it as "earlier closed/merged" told reviewers a live PR had
+/// landed. Entries already recorded as merged, or still in the stack, are
+/// kept without a lookup. A forge error keeps the entry, so a failed
+/// lookup cannot erase real history.
+///
+/// `settled` caches lookups across the PRs of one submission: every PR's
+/// comment names the same missing bookmark, and asking once per PR would
+/// also print the same warning once per PR.
+fn retain_settled_previous(
+    forge: &dyn Forge,
+    owner: &str,
+    repo: &str,
+    current: &[EntryData],
+    previous: &[comment::StackCommentItem],
+    settled: &RefCell<HashMap<u64, bool>>,
+) -> Vec<comment::StackCommentItem> {
+    previous
+        .iter()
+        .filter(|prev| {
+            if prev.is_merged || current.iter().any(|c| c.name == prev.bookmark_name) {
+                return true;
+            }
+            if let Some(&known) = settled.borrow().get(&prev.pr_number) {
+                return known;
+            }
+            let keep = match forge.get_pr_state(owner, repo, prev.pr_number) {
+                Ok(state) => state.merged || state.state == "closed",
+                Err(e) => {
+                    eprintln!(
+                        "  Warning: could not check whether #{} is still open: {e}",
+                        prev.pr_number
+                    );
+                    true
+                }
+            };
+            settled.borrow_mut().insert(prev.pr_number, keep);
+            keep
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) fn update_stack_comments(
     forge: &dyn Forge,
     nav: &dyn comment::StackNav,
@@ -572,6 +619,7 @@ pub(crate) fn update_stack_comments(
     let owner = &plan.repo_info.owner;
     let repo = &plan.repo_info.repo;
     let mut updated = 0;
+    let settled: RefCell<HashMap<u64, bool>> = RefCell::new(HashMap::new());
 
     // Count bookmarks in the stack (excluding default branch) — skip stack nav
     // for single-bookmark stacks so they look like normal PRs to reviewers.
@@ -641,7 +689,16 @@ pub(crate) fn update_stack_comments(
             let previous_items = previous_data
                 .map(|d| d.stack.as_slice())
                 .unwrap_or_default();
-            let (live_data, fossil_data) = classify_stack_entries(&current_entries, previous_items);
+            let previous_items = retain_settled_previous(
+                forge,
+                owner,
+                repo,
+                &current_entries,
+                previous_items,
+                &settled,
+            );
+            let (live_data, fossil_data) =
+                classify_stack_entries(&current_entries, &previous_items);
             let live = live_data
                 .iter()
                 .map(|e| StackEntry {
@@ -796,6 +853,13 @@ mod tests {
                 id: 100,
                 body: Some("comment".to_string()),
             })
+        }
+        fn delete_comment(&self, _o: &str, _r: &str, id: u64) -> Result<()> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("delete_comment:{id}"));
+            Ok(())
         }
         fn update_comment(&self, _o: &str, _r: &str, id: u64, _b: &str) -> Result<()> {
             self.calls
@@ -1322,6 +1386,13 @@ mod tests {
             ) -> Result<IssueComment> {
                 panic!("should update, not create");
             }
+            fn delete_comment(&self, _o: &str, _r: &str, id: u64) -> Result<()> {
+                self.calls
+                    .lock()
+                    .expect("poisoned")
+                    .push(format!("delete_comment:{id}"));
+                Ok(())
+            }
             fn update_comment(&self, _o: &str, _r: &str, id: u64, _b: &str) -> Result<()> {
                 self.calls
                     .lock()
@@ -1417,9 +1488,366 @@ mod tests {
 
         execute_submission_plan(&jj, &github, &plan).unwrap();
 
+        // A lone PR with a leftover stack comment and no history: the
+        // comment describes a stack of one, so it is removed, not rewritten.
         let calls = github.calls.lock().expect("poisoned");
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0], "update_comment:99");
+        assert_eq!(calls[0], "delete_comment:99");
+    }
+
+    /// A forge whose comments and PR states are fixed per test, recording
+    /// every write so the stack-comment lifecycle can be asserted on.
+    struct CommentScenarioForge {
+        comments: Vec<IssueComment>,
+        pr_states: HashMap<u64, PrState>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl CommentScenarioForge {
+        fn new(comments: Vec<IssueComment>, pr_states: HashMap<u64, PrState>) -> Self {
+            Self {
+                comments,
+                pr_states,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("poisoned").clone()
+        }
+    }
+
+    impl Forge for CommentScenarioForge {
+        fn list_open_prs(&self, _o: &str, _r: &str) -> Result<Vec<PullRequest>> {
+            Ok(vec![])
+        }
+        fn create_pr(
+            &self,
+            _o: &str,
+            _r: &str,
+            _t: &str,
+            _b: &str,
+            _h: &str,
+            _ba: &str,
+            _draft: bool,
+        ) -> Result<PullRequest> {
+            unimplemented!()
+        }
+        fn update_pr_base(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn request_reviewers(&self, _o: &str, _r: &str, _n: u64, _v: &[String]) -> Result<()> {
+            unimplemented!()
+        }
+        fn list_comments(&self, _o: &str, _r: &str, _n: u64) -> Result<Vec<IssueComment>> {
+            Ok(self.comments.clone())
+        }
+        fn create_comment(&self, _o: &str, _r: &str, n: u64, body: &str) -> Result<IssueComment> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("create_comment:#{n}:{body}"));
+            Ok(IssueComment {
+                id: 1,
+                body: Some(body.to_string()),
+            })
+        }
+        fn update_comment(&self, _o: &str, _r: &str, id: u64, body: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("update_comment:{id}:{body}"));
+            Ok(())
+        }
+        fn delete_comment(&self, _o: &str, _r: &str, id: u64) -> Result<()> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("delete_comment:{id}"));
+            Ok(())
+        }
+        fn update_pr_body(&self, _o: &str, _r: &str, n: u64, body: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("update_pr_body:#{n}:{body}"));
+            Ok(())
+        }
+        fn mark_pr_ready(&self, _o: &str, _r: &str, _n: u64) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_authenticated_user(&self) -> Result<String> {
+            Ok("user".to_string())
+        }
+        fn find_merged_pr(&self, _o: &str, _r: &str, _h: &str) -> Result<Option<PullRequest>> {
+            Ok(None)
+        }
+        fn merge_pr(&self, _o: &str, _r: &str, _n: u64, _m: MergeMethod) -> Result<()> {
+            unimplemented!()
+        }
+        fn get_pr_checks_status(&self, _o: &str, _r: &str, _h: &str) -> Result<ChecksStatus> {
+            unimplemented!()
+        }
+        fn get_pr_reviews(&self, _o: &str, _r: &str, _n: u64) -> Result<ReviewSummary> {
+            unimplemented!()
+        }
+        fn get_pr_mergeability(&self, _o: &str, _r: &str, _n: u64) -> Result<PrMergeability> {
+            unimplemented!()
+        }
+        fn get_pr_state(&self, _o: &str, _r: &str, n: u64) -> Result<PrState> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("get_pr_state:#{n}"));
+            self.pr_states
+                .get(&n)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no state for #{n}"))
+        }
+    }
+
+    fn open_pr(number: u64, head: &str, body: Option<&str>) -> PullRequest {
+        PullRequest {
+            number,
+            html_url: format!("https://github.com/o/r/pull/{number}"),
+            title: format!("PR {head}"),
+            body: body.map(str::to_string),
+            base: PullRequestRef {
+                ref_name: "main".to_string(),
+                label: String::new(),
+                sha: String::new(),
+            },
+            head: PullRequestRef {
+                ref_name: head.to_string(),
+                label: String::new(),
+                sha: String::new(),
+            },
+            draft: false,
+            node_id: String::new(),
+            merged_at: None,
+            requested_reviewers: vec![],
+            author: String::new(),
+            stack: None,
+        }
+    }
+
+    fn pr_state(state: &str, merged: bool) -> PrState {
+        PrState {
+            merged,
+            state: state.to_string(),
+        }
+    }
+
+    /// A stack comment as jjpr wrote it while `entries` were all open.
+    fn stack_comment(id: u64, entries: &[(&str, u64)]) -> IssueComment {
+        let live: Vec<comment::StackEntry> = entries
+            .iter()
+            .map(|(name, number)| comment::StackEntry {
+                bookmark_name: name.to_string(),
+                pr_url: Some(format!("https://github.com/o/r/pull/{number}")),
+                pr_number: Some(*number),
+                is_current: false,
+                is_merged: false,
+                closed_at: None,
+            })
+            .collect();
+        IssueComment {
+            id,
+            body: Some(comment::generate_comment_body(&live, &[])),
+        }
+    }
+
+    /// A plan that only touches stack navigation: `bookmarks` are the
+    /// current local stack, all with existing open PRs.
+    fn nav_only_plan(
+        bookmarks: &[(&str, u64)],
+        stack_nav: crate::config::StackNavMode,
+    ) -> SubmissionPlan {
+        let existing_prs = bookmarks
+            .iter()
+            .map(|(name, number)| (name.to_string(), open_pr(*number, name, None)))
+            .collect();
+        SubmissionPlan {
+            bookmarks_needing_push: vec![],
+            native_stack_base_conflicts: vec![],
+            divergent_changes: vec![],
+            bookmarks_needing_pr: vec![],
+            bookmarks_needing_base_update: vec![],
+            bookmarks_needing_body_update: vec![],
+            bookmarks_needing_ready: vec![],
+            bookmarks_needing_reviewers: vec![],
+            bookmarks_with_title_drift: vec![],
+            bookmarks_with_body_conflict: vec![],
+            bookmarks_already_merged: vec![],
+            existing_prs,
+            remote_name: "origin".to_string(),
+            repo_info: RepoInfo {
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+            },
+            forge_kind: ForgeKind::GitHub,
+            all_bookmarks: bookmarks.iter().map(|(n, _)| make_bookmark(n)).collect(),
+            default_branch: "main".to_string(),
+            draft: false,
+            stack_nav,
+            reviewers: Vec::new(),
+            dry_run: false,
+        }
+    }
+
+    /// The OmniFocus-reported case: two PRs were stacked, then rebased to
+    /// be independent, and each re-submitted alone. The other PR is still
+    /// open, so it is not history. The comment must go, not claim the
+    /// other PR merged.
+    #[test]
+    fn test_unstacked_open_pr_is_not_fossilized_and_comment_is_removed() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(99, &[("auth", 10), ("profile", 11)])],
+            HashMap::from([(11, pr_state("open", false))]),
+        );
+        let plan = nav_only_plan(&[("auth", 10)], crate::config::StackNavMode::Comment);
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        assert!(
+            calls.contains(&"get_pr_state:#11".to_string()),
+            "must ask the forge before treating a missing bookmark as merged: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"delete_comment:99".to_string()),
+            "a stack of one has no navigation to show: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("update_comment")),
+            "must not rewrite the comment to claim #11 merged: {calls:?}"
+        );
+    }
+
+    /// Same shape, but the missing PR really did merge. The comment stays
+    /// and shows it as history, exactly as before.
+    #[test]
+    fn test_merged_previous_entry_still_becomes_fossil() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(99, &[("auth", 10), ("profile", 11)])],
+            HashMap::from([(11, pr_state("closed", true))]),
+        );
+        let plan = nav_only_plan(&[("auth", 10)], crate::config::StackNavMode::Comment);
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        let update = calls
+            .iter()
+            .find(|c| c.starts_with("update_comment:99:"))
+            .unwrap_or_else(|| panic!("expected an update: {calls:?}"));
+        assert!(update.contains("1 earlier closed/merged PR"), "{update}");
+        assert!(update.contains("~~[`profile`]"), "{update}");
+        assert!(!calls.iter().any(|c| c.starts_with("delete_comment")));
+    }
+
+    /// A forge error on the state lookup keeps the old behaviour rather
+    /// than silently dropping history.
+    #[test]
+    fn test_state_lookup_failure_keeps_previous_entry() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(99, &[("auth", 10), ("profile", 11)])],
+            HashMap::new(),
+        );
+        let plan = nav_only_plan(&[("auth", 10)], crate::config::StackNavMode::Comment);
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        assert!(
+            calls.iter().any(|c| c.starts_with("update_comment:99:")),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|c| c.starts_with("delete_comment")));
+    }
+
+    /// In a stack that is still a stack, an unstacked open PR simply
+    /// disappears from the list instead of moving to the history block.
+    #[test]
+    fn test_unstacked_open_pr_leaves_multi_pr_comment() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(
+                99,
+                &[("auth", 10), ("profile", 11), ("settings", 12)],
+            )],
+            HashMap::from([(12, pr_state("open", false))]),
+        );
+        let plan = nav_only_plan(
+            &[("auth", 10), ("profile", 11)],
+            crate::config::StackNavMode::Comment,
+        );
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        let updates: Vec<&String> = calls
+            .iter()
+            .filter(|c| c.starts_with("update_comment:99:"))
+            .collect();
+        assert_eq!(
+            updates.len(),
+            2,
+            "one rewrite per PR in the stack: {calls:?}"
+        );
+        for update in updates {
+            assert!(!update.contains("settings"), "{update}");
+            assert!(!update.contains("earlier closed/merged"), "{update}");
+        }
+        assert_eq!(
+            calls.iter().filter(|c| *c == "get_pr_state:#12").count(),
+            1,
+            "the lookup is shared across the stack's PRs: {calls:?}"
+        );
+    }
+
+    /// Description mode: the nav section is stripped from the body when
+    /// the PR leaves its stack, and the rest of the description survives.
+    #[test]
+    fn test_unstacked_pr_strips_description_nav_section() {
+        let previous = comment::generate_comment_body(
+            &[
+                comment::StackEntry {
+                    bookmark_name: "auth".to_string(),
+                    pr_url: Some("https://github.com/o/r/pull/10".to_string()),
+                    pr_number: Some(10),
+                    is_current: true,
+                    is_merged: false,
+                    closed_at: None,
+                },
+                comment::StackEntry {
+                    bookmark_name: "profile".to_string(),
+                    pr_url: Some("https://github.com/o/r/pull/11".to_string()),
+                    pr_number: Some(11),
+                    is_current: false,
+                    is_merged: false,
+                    closed_at: None,
+                },
+            ],
+            &[],
+        );
+        let body = format!(
+            "Fix the login flow.\n\n<!-- jjpr:stack-nav -->\n{previous}<!-- /jjpr:stack-nav -->\n"
+        );
+        let github =
+            CommentScenarioForge::new(vec![], HashMap::from([(11, pr_state("open", false))]));
+        let mut plan = nav_only_plan(&[("auth", 10)], crate::config::StackNavMode::Description);
+        plan.existing_prs
+            .insert("auth".to_string(), open_pr(10, "auth", Some(&body)));
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        let update = calls
+            .iter()
+            .find(|c| c.starts_with("update_pr_body:#10:"))
+            .unwrap_or_else(|| panic!("expected a body rewrite: {calls:?}"));
+        let new_body = update.trim_start_matches("update_pr_body:#10:");
+        assert_eq!(new_body, "Fix the login flow.\n");
     }
 
     #[test]
@@ -2334,6 +2762,9 @@ mod tests {
                     body: Some(body.to_string()),
                 })
             }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                Ok(())
+            }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
                 Ok(())
             }
@@ -2532,6 +2963,9 @@ mod tests {
                     body: Some(body.to_string()),
                 })
             }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+                Ok(())
+            }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
                 Ok(())
             }
@@ -2706,6 +3140,9 @@ mod tests {
                 _i: u64,
                 _b: &str,
             ) -> Result<IssueComment> {
+                unimplemented!()
+            }
+            fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
                 unimplemented!()
             }
             fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {

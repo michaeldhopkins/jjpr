@@ -243,6 +243,9 @@ mod tests {
         fn create_comment(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<IssueComment> {
             unimplemented!()
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            unimplemented!()
+        }
         fn update_comment(&self, _o: &str, _r: &str, _c: u64, _b: &str) -> Result<()> {
             unimplemented!()
         }

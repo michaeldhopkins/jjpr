@@ -1441,6 +1441,9 @@ mod tests {
         fn create_comment(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<IssueComment> {
             unimplemented!()
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
+        }
         fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
             Ok(())
         }
@@ -1995,6 +1998,9 @@ mod tests {
         fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> {
             unimplemented!()
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
+        }
         fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
             Ok(())
         }
@@ -2221,6 +2227,9 @@ mod tests {
         fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> {
             unimplemented!()
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
+        }
         fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
             Ok(())
         }
@@ -2343,6 +2352,9 @@ mod tests {
         }
         fn create_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<IssueComment> {
             unimplemented!()
+        }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
         }
         fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
             Ok(())
@@ -3309,6 +3321,9 @@ mod tests {
                 body: Some(body.to_string()),
             })
         }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
+        }
         fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
             Ok(())
         }
@@ -3416,6 +3431,9 @@ mod tests {
                 id: 1,
                 body: Some(body.to_string()),
             })
+        }
+        fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
+            Ok(())
         }
         fn update_comment(&self, _: &str, _: &str, _: u64, _: &str) -> Result<()> {
             Ok(())
