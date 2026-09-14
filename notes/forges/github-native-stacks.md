@@ -1652,7 +1652,7 @@ in `michaeldhopkins/forge-e2e-sandbox`.
   scoped to a preview-enabled repo (none on hand — the tested PAT reaches only
   personal repos, and `acme` requires org-approved access).
 - Added a reusable read-only probe at
-  `~/.runner-scripts/github/stacks-pat-probe.sh` (reads `STACKS_PAT`, never
+  `~/runner-scripts/github/stacks-pat-probe.sh` (reads `STACKS_PAT`, never
   prints it).
 
 ### 2026-07-21 — Live API probe + jjpr read-only prototype
