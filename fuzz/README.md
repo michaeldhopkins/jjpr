@@ -68,7 +68,7 @@ Read the artifact kind before assuming a bug: `crash-*` is a panic/abort and is 
 
 ## Corpus and seeds
 
-The canonical corpus lives in the nightly's Actions cache, not in git. Only `seed-*`
+The canonical corpus lives in the Actions cache that `fuzz.yml` writes, not in git. Only `seed-*`
 files are committed — they are what a fresh clone and a cold cache fuzz from. Shrink an
 overgrown local corpus with `cargo +nightly fuzz cmin <target>`.
 
@@ -84,13 +84,12 @@ grep -oE '"[a-zA-Z]+":' src/jj/templates.rs | sort -u | sed 's/"/\\"/g; s/^/"/; 
 
 - `.github/workflows/fuzz-replay.yml` — every push/PR. Replays each target's corpus
   (`-runs=0`). Deterministic, minutes, read-only on the corpus cache.
-- `.github/workflows/fuzz.yml` — nightly. Builds once, fans out to shards, merges each
-  target's corpus back, then reports coverage. Budget is 15 min/shard (cut from 4h on
-  2026-09-04: GitHub reclaimed runners under the long jobs, and the corpora were at
-  saturation anyway). Its main job now is keeping the corpus cache alive — GitHub
-  deletes entries untouched for 7 days, and only this workflow writes it — while the
-  replay reads it. A cancelled job swallows the crash signal, so the budget stays well
-  under the job timeout.
+- `.github/workflows/fuzz.yml` — each push to `main`, and on dispatch. Not a gate.
+  Builds once, then one job per target fuzzes ~180s in a single process (the dispatch
+  input `max_total_time` sets a longer run), merges its finds into the corpus and saves
+  it to the cache; coverage for three targets follows. It replaced a nightly on
+  2026-09-26 (see AGENTS.md). Runs queue rather than cancel, since a cancelled job
+  swallows the crash signal.
 
 ## Reproducibility
 
