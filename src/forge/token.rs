@@ -106,20 +106,20 @@ fn gh_auth_token() -> Option<String> {
 /// glab has no `auth token` command, so its human-readable status output is
 /// the only interface. See `parse_glab_status_token` for the formats handled.
 fn glab_auth_token(host: Option<&str>) -> Option<String> {
-    glab_auth_token_from("glab", host)
+    glab_auth_token_with(|| Command::new("glab"), host)
 }
 
-fn glab_auth_token_from(program: &str, host: Option<&str>) -> Option<String> {
+fn glab_auth_token_with(glab: impl Fn() -> Command, host: Option<&str>) -> Option<String> {
     // glab prints the stored token before its own API call refreshes an
     // expired OAuth token, so a single `--show-token` run can hand back a
     // token GitLab rejects with 401 (seen with glab 1.117). The first run
     // does the refresh; its output is ignored, and so is its exit status,
     // since the read below reports whatever state it left behind.
-    let _ = Command::new(program).args(glab_status_args(host)).output();
+    let _ = glab().args(glab_status_args(host)).output();
 
     let mut args = glab_status_args(host);
     args.push("--show-token");
-    let output = Command::new(program).args(args).output().ok()?;
+    let output = glab().args(args).output().ok()?;
     parse_glab_status_token(&String::from_utf8_lossy(&output.stderr))
 }
 
@@ -365,16 +365,19 @@ mod tests {
     /// - its stored OAuth token is expired, and `--show-token` prints the
     ///   stored value before the status call refreshes it, so only a run
     ///   that follows an earlier status call sees the fresh token.
+    ///
+    /// It is run as `sh <script>` rather than exec'd. Writing an executable
+    /// and exec'ing it at once fails intermittently on Linux with ETXTBSY,
+    /// because a process forked by another test thread can inherit the
+    /// still-open write handle.
     #[cfg(unix)]
-    fn stub_glab(dir: &std::path::Path) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("glab");
+    fn stub_glab(dir: &std::path::Path) -> impl Fn() -> Command {
+        let script = dir.join("glab.sh");
         let state = dir.join("refreshed");
         std::fs::write(
-            &path,
+            &script,
             format!(
-                r#"#!/bin/sh
-if [ -e "{state}" ]; then age=fresh; else age=stale; fi
+                r#"if [ -e "{state}" ]; then age=fresh; else age=stale; fi
 touch "{state}"
 case "$*" in
   "auth status --hostname gitlab.example.com --show-token")
@@ -396,17 +399,19 @@ esac
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        move || {
+            let mut cmd = Command::new("sh");
+            cmd.arg(&script);
+            cmd
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn test_glab_auth_token_passes_hostname() {
         let dir = tempfile::tempdir().unwrap();
-        let glab = stub_glab(dir.path());
         assert_eq!(
-            glab_auth_token_from(glab.to_str().unwrap(), Some("gitlab.example.com")).as_deref(),
+            glab_auth_token_with(stub_glab(dir.path()), Some("gitlab.example.com")).as_deref(),
             Some("tok-example-fresh")
         );
     }
@@ -415,9 +420,8 @@ esac
     #[test]
     fn test_glab_auth_token_without_host_takes_first() {
         let dir = tempfile::tempdir().unwrap();
-        let glab = stub_glab(dir.path());
         assert_eq!(
-            glab_auth_token_from(glab.to_str().unwrap(), None).as_deref(),
+            glab_auth_token_with(stub_glab(dir.path()), None).as_deref(),
             Some("tok-gitlab-com-fresh")
         );
     }
@@ -425,7 +429,10 @@ esac
     #[test]
     fn test_glab_auth_token_missing_binary_is_none() {
         assert_eq!(
-            glab_auth_token_from("/nonexistent/jjpr-test/glab", Some("gitlab.com")),
+            glab_auth_token_with(
+                || Command::new("/nonexistent/jjpr-test/glab"),
+                Some("gitlab.com")
+            ),
             None
         );
     }
