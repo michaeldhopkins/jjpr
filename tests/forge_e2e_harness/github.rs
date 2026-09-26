@@ -214,7 +214,7 @@ impl ForgeTestDriver for GitHubDriver {
     fn jjpr_forge(&self) -> Box<dyn jjpr::forge::Forge> {
         use jjpr::forge::{AuthScheme, ForgeClient, ForgeKind, GitHubForge, PaginationStyle};
         let token =
-            jjpr::forge::token::resolve_token(ForgeKind::GitHub, None).expect("github token");
+            jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None).expect("github token");
         let client = ForgeClient::new(
             "https://api.github.com",
             token,

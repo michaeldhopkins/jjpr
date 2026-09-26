@@ -1747,7 +1747,7 @@ fn build_forge(
 ) -> Result<Box<dyn Forge>> {
     let token = match token {
         Some(t) => t,
-        None => forge_token::resolve_token(kind, token_env)?,
+        None => forge_token::resolve_token(kind, host, token_env)?,
     };
     match kind {
         ForgeKind::GitHub => {

@@ -179,8 +179,8 @@ impl ForgeTestDriver for GitLabDriver {
 
     fn jjpr_forge(&self) -> Box<dyn jjpr::forge::Forge> {
         use jjpr::forge::{AuthScheme, ForgeClient, ForgeKind, GitLabForge, PaginationStyle};
-        let token =
-            jjpr::forge::token::resolve_token(ForgeKind::GitLab, None).expect("gitlab token");
+        let token = jjpr::forge::token::resolve_token(ForgeKind::GitLab, Some("gitlab.com"), None)
+            .expect("gitlab token");
         let client = ForgeClient::new(
             "https://gitlab.com/api/v4",
             token,
