@@ -12,15 +12,19 @@ name: Fuzz
 # fuzzed the day it lands. AGENTS.md has the history.
 #
 # Shape: build every target once, then one job per target that restores the canonical
-# corpus, fuzzes ~180s in a single process, merges its finds back and saves the result
-# under a fresh key. Coverage then reports what the merged corpus reaches.
+# corpus, runs fuzz/burst.sh (~180s of mutation counted from the end of corpus loading,
+# in a single process, then a merge of its finds) and saves the result under a fresh
+# key. Coverage then reports what the merged corpus reaches.
 on:
   push:
     branches: [main]
+    # Nothing fuzzed reads Markdown or the mdbook sources (no include_str! of either),
+    # so a docs-only push has no new code to explore.
+    paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
     inputs:
       max_total_time:
-        description: "Fuzz duration in seconds, per target (default 180). Keep under ~2400: the job times out at 60 min."
+        description: "Mutation seconds per target, counted after the corpus loads (default 180). Keep under ~2400: the job times out at 60 min."
         default: "180"
 
 # Never cancel a running burst: a cancelled job swallows a failing crash check. GitHub
@@ -33,6 +37,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   TRIPLE: x86_64-unknown-linux-gnu
+  BUDGET: ${{ github.event.inputs.max_total_time || '180' }}
 
 jobs:
   build:
@@ -115,51 +120,26 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-
           restore-keys: fuzz-corpus-${{ matrix.target }}-
 
-      # One process, not fork mode: fork mode reloads the whole corpus in every child,
-      # and on a short budget the loading is most of the run. A single process stops at
-      # its first crash, which for a burst is the right outcome.
+      # fuzz/burst.sh: one process, not fork mode (fork mode reloads the whole corpus in
+      # every child, and on a short budget the loading is most of the run). The budget
+      # clock starts once the corpus has loaded, since libFuzzer's -max_total_time counts
+      # the load and a large corpus can take longer to load than the whole budget. New
+      # units go to fuzz/new/<target>, then `-merge=1` folds [restored corpus + seeds,
+      # new] into a minimized union. The merge runs after a crash too (the crashing input
+      # is in fuzz/artifacts, not a corpus dir, so it is not merged); a successful one
+      # sets `merged=true`.
       #
-      # libFuzzer writes new units only to the FIRST corpus dir, so `new/` holds exactly
-      # what this run discovered and the merge below reads the restored corpus once.
-      - name: Fuzz
-        run: |
-          set -euo pipefail
-          T=${{ matrix.target }}
-          mkdir -p fuzz/corpus/$T fuzz/corpus/new fuzz/artifacts/$T
-          DICT=""
-          [ -f "fuzz/dict/$T.dict" ] && DICT="-dict=fuzz/dict/$T.dict"
-          ./bin/$T \
-            $DICT \
-            -max_total_time=${{ github.event.inputs.max_total_time || '180' }} \
-            -timeout=25 \
-            -rss_limit_mb=4096 \
-            -print_final_stats=1 \
-            -artifact_prefix=fuzz/artifacts/$T/ \
-            fuzz/corpus/new fuzz/corpus/$T
-
-      # Runs after a crash too: whatever the burst found before it stopped is still
-      # coverage worth keeping. The crashing input is in fuzz/artifacts, not a corpus
-      # dir, so it is not merged.
-      #
-      # `-merge=1 DST SRC...` unions and minimizes in one step: starting from an empty
-      # DST over [restored corpus + committed seeds, this run's finds] yields exactly
-      # the minimized union.
-      - name: Merge
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          T=${{ matrix.target }}
-          mkdir -p minimized
-          echo "Restored corpus + seeds: $(find fuzz/corpus/$T -type f | wc -l) inputs"
-          echo "New this run: $(find fuzz/corpus/new -type f | wc -l)"
-          ./bin/$T -merge=1 minimized fuzz/corpus/$T fuzz/corpus/new
-          rm -rf fuzz/corpus/$T
-          mv minimized fuzz/corpus/$T
-          echo "Merged corpus: $(find fuzz/corpus/$T -type f | wc -l) inputs"
+      # `continue-on-error` so the save and upload still run after a find; "Fail on
+      # crashes" turns the job red.
+      - name: Fuzz and merge
+        id: fuzz
+        continue-on-error: true
+        run: bash fuzz/burst.sh "./bin/${{ matrix.target }}" "${{ matrix.target }}" "$BUDGET"
 
       # A unique (always-miss) key, so the next restore's prefix match pulls this one.
+      # Only a completed merge is saved, so a half-merged corpus never becomes canonical.
       - name: Save corpus
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.fuzz.outputs.merged == 'true' }}
         uses: actions/cache/save@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}
@@ -174,13 +154,21 @@ jobs:
           if-no-files-found: ignore
 
       # slow-unit is uploaded for triage but is not fatal: it is contention-sensitive.
+      # A burst that failed with NO artifact (missing binary, leak report, failed merge)
+      # is red too, or continue-on-error would turn a broken burst green.
       - name: Fail on crashes
         if: always()
+        env:
+          FUZZ_OUTCOME: ${{ steps.fuzz.outcome }}
         run: |
           hits=$(find fuzz/artifacts -type f \( -name 'crash-*' -o -name 'timeout-*' -o -name 'oom-*' \) 2>/dev/null || true)
           if [ -n "$hits" ]; then
             echo "::error::fuzzing saved crash/timeout artifacts for ${{ matrix.target }}"
             printf '%s\n' "$hits"
+            exit 1
+          fi
+          if [ "$FUZZ_OUTCOME" != success ]; then
+            echo "::error::the Fuzz and merge step ended '$FUZZ_OUTCOME' without a crash/timeout/oom artifact; read its log"
             exit 1
           fi
           echo "no crash/timeout/oom artifacts"

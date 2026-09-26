@@ -18,12 +18,13 @@
 /mutants-selected.txt
 /mutants.diff
 
-# Fuzzing. The canonical corpus lives in the nightly's GitHub Actions cache, not in
+# Fuzzing. The canonical corpus lives in the burst's GitHub Actions cache, not in
 # git — it grows without bound and is regenerable, so committing it would add
-# megabytes per night for nothing. What IS committed is the hand-written `seed-*`
+# megabytes a month for nothing. What IS committed is the hand-written `seed-*`
 # inputs, which are the starting points a fresh clone (or a cold cache) fuzzes from.
 /fuzz/target/
 /fuzz/artifacts/
+/fuzz/new/
 /fuzz/coverage/
 /fuzz/corpus/*/*
 !/fuzz/corpus/*/seed-*
