@@ -260,7 +260,7 @@ fn test_batch_refills_checks_beyond_the_graphql_page_cap() {
     // denoland/deno #31518 carried 136 check contexts when this was written.
     let (owner, repo, pr_number) = ("denoland", "deno", 31518u64);
 
-    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let client = ForgeClient::new(
         "https://api.github.com",
@@ -284,7 +284,7 @@ fn test_batch_refills_checks_beyond_the_graphql_page_cap() {
     // 100-node page, the test would still pass without ever touching the refill.
     // Count the raw check-runs the same way the fix does, and skip loudly if the
     // PR no longer exceeds the cap.
-    let count_token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let count_token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let counter = ForgeClient::new(
         "https://api.github.com",
@@ -357,7 +357,7 @@ fn test_submit_creates_stacked_prs() {
 
     // Build graph and submit
     let jj = ctx.runner();
-    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let client = ForgeClient::new(
         "https://api.github.com",
@@ -470,7 +470,7 @@ fn test_submit_preserves_hand_edited_description() {
     ctx.set_bookmark(&name);
 
     let jj = ctx.runner();
-    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let github = || {
         let client = ForgeClient::new(
@@ -585,7 +585,7 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
     ctx.set_bookmark(&top_name);
 
     let jj = ctx.runner();
-    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let github = || {
         let client = ForgeClient::new(
@@ -744,7 +744,7 @@ fn test_watch_target_findable_through_bottom_squash_merge() {
     ctx.set_bookmark(&top_name);
 
     let jj = ctx.runner();
-    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let github = || {
         let client = ForgeClient::new(
@@ -831,7 +831,7 @@ fn test_watch_target_findable_through_bottom_squash_merge() {
 }
 
 fn github_forge() -> GitHubForge {
-    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None)
+    let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
         .expect("GitHub token required for E2E tests");
     let client = ForgeClient::new(
         "https://api.github.com",

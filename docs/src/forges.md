@@ -45,8 +45,11 @@ nothing in jjpr changes for them.
 
 ## GitLab
 
-If you use `glab`, jjpr picks up your credentials. Otherwise, export
-`GITLAB_TOKEN` with `api` scope.
+If you use `glab`, jjpr picks up your credentials. It asks glab for the
+token of the host in your remote URL, so if you are logged in to more
+than one GitLab instance, it uses the one the repo lives on. For a
+self-hosted instance, log in with `glab auth login --hostname <host>`.
+Otherwise, export `GITLAB_TOKEN` with `api` scope.
 
 Self-hosted GitLab is auto-detected from the host. No extra config is
 needed for gitlab.com or for any GitLab instance with a recognizable
