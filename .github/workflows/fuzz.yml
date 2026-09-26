@@ -1,38 +1,34 @@
 name: Fuzz
 
-# Overnight coverage-guided fuzzing. Runs on nightly Rust (cargo-fuzz needs
-# -Zsanitizer); the fuzz crate is a standalone workspace, so this never touches the
-# stable CI in ci.yml.
+# The mutation half of the fuzzing program: a short burst on every push to main.
+# `fuzz-replay.yml` is the gate; this is not, and nothing depends on it, so a random
+# find turns this workflow red rather than the push. Runs on nightly Rust (cargo-fuzz
+# needs -Zsanitizer); the fuzz crate is a standalone workspace, so this never touches
+# the stable CI in ci.yml.
 #
-# Shape: build every target ONCE, fan out to parallel shards that fuzz independently
-# from the same restored corpus, then a per-target merge job unions + minimizes the
-# shard corpora back into one canonical corpus for the next night to build on. Parallel
-# shards multiply crash-finding; the merge is what makes their coverage compound instead
-# of being dropped, since only one cache entry is ever restored. A coverage job then
-# measures which parts of jjpr the corpus actually reaches.
+# Replaced a 07:00 UTC nightly (12 shards x 15 min) on 2026-09-26. The nightly's last
+# real find was 2026-08-03 and it found nothing in the seven weeks after; the finds all
+# came in a target's first days. A burst per push follows the code instead: new code is
+# fuzzed the day it lands. AGENTS.md has the history.
 #
-# Cost: this repo is public, so GitHub-hosted runners are free and unmetered, but the
-# budget is deliberately SMALL — 15 minutes per shard since 2026-09-04, down from 4h.
-# Two things drove that. Twelve 4h shards took ~48 runner-hours a night, more than a
-# repo this size should take from a free pool. And GitHub reclaims hosted runners
-# mid-job as background attrition: two consecutive nights lost one shard each, more
-# than two hours in, with no crash artifact and no status-page incident ("runner has
-# received a shutdown signal", then "lost communication with the server"). Nothing in
-# a job survives its runner dying, so a long job is mostly a long exposure to that.
-#
-# Fifteen minutes is enough for what the nightly is FOR now: keep the corpus cache
-# alive (GitHub deletes entries untouched for 7 days, and only the merge job here
-# writes it) and keep compounding coverage a little each night. The corpora were at
-# saturation by 2026-08-01 anyway — see the baseline in AGENTS.md — so the marginal
-# hour was buying very little.
+# Shape: build every target once, then one job per target that restores the canonical
+# corpus, fuzzes ~180s in a single process, merges its finds back and saves the result
+# under a fresh key. Coverage then reports what the merged corpus reaches.
 on:
-  schedule:
-    - cron: "0 7 * * *" # ~07:00 UTC nightly
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       max_total_time:
-        description: "Fuzz duration in seconds, per shard (default 15 min)."
-        default: "900"
+        description: "Fuzz duration in seconds, per target (default 180). Keep under ~2400: the job times out at 60 min."
+        default: "180"
+
+# Never cancel a running burst: a cancelled job swallows a failing crash check. GitHub
+# keeps one pending run per group, so pushes landing mid-burst collapse into the newest,
+# which fuzzes the latest code anyway.
+concurrency:
+  group: fuzz-burst
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -66,10 +62,9 @@ jobs:
       - name: Build all targets
         run: cargo +nightly fuzz build --target "$TRIPLE"
 
-      # `cargo fuzz run` and `-merge=1` would each rebuild; building once here and
-      # handing the binaries to every downstream job avoids recompiling per shard. The
-      # cargo-fuzz output is a standalone libFuzzer executable, so shards and merge can
-      # exec it directly with the flags cargo-fuzz would have passed.
+      # `cargo fuzz run` and `-merge=1` would each rebuild. The cargo-fuzz output is a
+      # standalone libFuzzer executable, so the per-target jobs exec it directly with
+      # the flags cargo-fuzz would have passed.
       - name: Upload fuzz binaries
         uses: actions/upload-artifact@v4
         with:
@@ -84,15 +79,12 @@ jobs:
           if-no-files-found: error
 
   fuzz:
-    name: Fuzz ${{ matrix.target }} shard ${{ matrix.shard }}
+    name: Fuzz ${{ matrix.target }}
     needs: build
     runs-on: ubuntu-latest
-    # A job cancelled by a timeout shows as "cancelled" and SWALLOWS the "Fail on
-    # crashes" red signal, so the budget must be comfortably under this backstop so
-    # the job COMPLETES. 60 leaves a wide margin over 15 min of fuzzing plus setup.
     timeout-minutes: 60
     strategy:
-      fail-fast: false # one shard finding a crash must not cancel the others or the merge
+      fail-fast: false # one target finding a crash must not cancel the others
       matrix:
         target:
           - jj_output
@@ -101,7 +93,6 @@ jobs:
           - forge_payload
           - config_load
           - graph_invariants
-        shard: [1, 2]
     steps:
       - uses: actions/checkout@v5
 
@@ -115,9 +106,8 @@ jobs:
       - name: Make executable
         run: chmod +x bin/*
 
-      # Every shard restores the same canonical corpus, then diverges (libFuzzer seeds
-      # its RNG randomly). Restore-only: shards hand findings to the merge job as
-      # artifacts, they never write the cache themselves.
+      # The same key scheme fuzz-replay.yml restores: a prefix match on
+      # `fuzz-corpus-<target>-` pulls the newest entry this workflow saved.
       - name: Restore corpus
         uses: actions/cache/restore@v4
         with:
@@ -125,14 +115,12 @@ jobs:
           key: fuzz-corpus-${{ matrix.target }}-
           restore-keys: fuzz-corpus-${{ matrix.target }}-
 
-      # Fork mode + -ignore_crashes: a crash or timeout kills only the child, so the
-      # parent keeps fuzzing to -max_total_time and SAVES every finding rather than
-      # aborting on the first. Without it every shard trips the same shallow bug from
-      # the shared corpus and exits minutes in, wasting the parallelism.
+      # One process, not fork mode: fork mode reloads the whole corpus in every child,
+      # and on a short budget the loading is most of the run. A single process stops at
+      # its first crash, which for a burst is the right outcome.
       #
-      # Two corpus dirs: libFuzzer WRITES new units only to the FIRST, so the shard
-      # uploads only what it DISCOVERED rather than a copy of everything it restored.
-      # That keeps the merge's incoming set scaling with discovery, not with shard count.
+      # libFuzzer writes new units only to the FIRST corpus dir, so `new/` holds exactly
+      # what this run discovered and the merge below reads the restored corpus once.
       - name: Fuzz
         run: |
           set -euo pipefail
@@ -141,33 +129,51 @@ jobs:
           DICT=""
           [ -f "fuzz/dict/$T.dict" ] && DICT="-dict=fuzz/dict/$T.dict"
           ./bin/$T \
-            -fork=1 -ignore_crashes=1 \
             $DICT \
-            -max_total_time=${{ github.event.inputs.max_total_time || '900' }} \
+            -max_total_time=${{ github.event.inputs.max_total_time || '180' }} \
             -timeout=25 \
             -rss_limit_mb=4096 \
+            -print_final_stats=1 \
             -artifact_prefix=fuzz/artifacts/$T/ \
             fuzz/corpus/new fuzz/corpus/$T
 
-      - name: Upload shard finds
-        if: always()
-        uses: actions/upload-artifact@v4
+      # Runs after a crash too: whatever the burst found before it stopped is still
+      # coverage worth keeping. The crashing input is in fuzz/artifacts, not a corpus
+      # dir, so it is not merged.
+      #
+      # `-merge=1 DST SRC...` unions and minimizes in one step: starting from an empty
+      # DST over [restored corpus + committed seeds, this run's finds] yields exactly
+      # the minimized union.
+      - name: Merge
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          T=${{ matrix.target }}
+          mkdir -p minimized
+          echo "Restored corpus + seeds: $(find fuzz/corpus/$T -type f | wc -l) inputs"
+          echo "New this run: $(find fuzz/corpus/new -type f | wc -l)"
+          ./bin/$T -merge=1 minimized fuzz/corpus/$T fuzz/corpus/new
+          rm -rf fuzz/corpus/$T
+          mv minimized fuzz/corpus/$T
+          echo "Merged corpus: $(find fuzz/corpus/$T -type f | wc -l) inputs"
+
+      # A unique (always-miss) key, so the next restore's prefix match pulls this one.
+      - name: Save corpus
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
         with:
-          name: corpus-${{ matrix.target }}-shard-${{ matrix.shard }}
-          path: fuzz/corpus/new
-          if-no-files-found: ignore
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload crash artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-crashes-${{ matrix.target }}-shard-${{ matrix.shard }}
+          name: fuzz-crashes-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
-      # Fork mode swallows the non-zero exit, so surface findings explicitly or a
-      # regression hides behind a green run. slow-unit is uploaded for triage but is
-      # not fatal on its own.
+      # slow-unit is uploaded for triage but is not fatal: it is contention-sensitive.
       - name: Fail on crashes
         if: always()
         run: |
@@ -179,83 +185,15 @@ jobs:
           fi
           echo "no crash/timeout/oom artifacts"
 
-  merge:
-    name: Merge ${{ matrix.target }} corpus
-    needs: [build, fuzz]
-    # Merge even when a shard went RED on a crash — its corpus is still worth keeping —
-    # but not when the build failed, since there would be no binary to merge with.
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - jj_output
-          - remote_url
-          - comment_roundtrip
-          - forge_payload
-          - config_load
-          - graph_invariants
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Download fuzz binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: fuzz-binaries
-          path: bin
-
-      - name: Make executable
-        run: chmod +x bin/*
-
-      - name: Restore prior corpus
-        uses: actions/cache/restore@v4
-        with:
-          path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-
-          restore-keys: fuzz-corpus-${{ matrix.target }}-
-
-      - name: Download shard finds
-        uses: actions/download-artifact@v4
-        with:
-          pattern: corpus-${{ matrix.target }}-shard-*
-          path: incoming
-
-      # `-merge=1 DST SRC...` unions and minimizes in ONE step: libFuzzer copies into
-      # DST only inputs that add coverage, so starting from an empty DST over
-      # [prior corpus + committed seeds, every shard's finds] yields exactly the
-      # minimized union — no separate copy-then-cmin pass and no rebuild.
-      - name: Union and minimize
-        run: |
-          set -euo pipefail
-          T=${{ matrix.target }}
-          mkdir -p fuzz/corpus/$T minimized
-          echo "Prior corpus + seeds: $(find fuzz/corpus/$T -type f | wc -l) inputs"
-          echo "Incoming shard finds: $(find incoming -type f 2>/dev/null | wc -l)"
-          # Unquoted on purpose: each shard dir is a separate SRC argument.
-          shards=$(find incoming -mindepth 1 -maxdepth 1 -type d 2>/dev/null || true)
-          ./bin/$T -merge=1 minimized fuzz/corpus/$T $shards
-          rm -rf fuzz/corpus/$T
-          mv minimized fuzz/corpus/$T
-          echo "Minimized corpus size: $(find fuzz/corpus/$T -type f | wc -l) inputs"
-
-      # Save under a unique (always-miss) key so the merged corpus becomes the newest
-      # entry the next run's restore-keys prefix match will pull.
-      - name: Save merged corpus
-        uses: actions/cache/save@v4
-        with:
-          path: fuzz/corpus/${{ matrix.target }}
-          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
-
-  # What the crash signal CANNOT tell you: which parts of jjpr the corpus never reaches.
-  # A green night only means "no panic in the region explored" — this job measures that
-  # region. Informational: it gates nothing, but it is the input to deciding where the
-  # next target or seed should go.
+  # What the crash signal cannot tell you: which parts of jjpr the corpus never reaches.
+  # Informational only; it is the input to deciding where the next target or seed goes.
+  # About 2 minutes per target, in parallel, after the burst.
   coverage:
     name: Coverage ${{ matrix.target }}
-    needs: merge
-    if: ${{ !cancelled() }}
+    needs: [build, fuzz]
+    # Runs after a red burst too (the merged corpus was still saved), but not after a
+    # failed build, when there is nothing new to measure.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
