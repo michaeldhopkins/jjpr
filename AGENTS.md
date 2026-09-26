@@ -19,6 +19,7 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 - Test stubs use `Mutex<Vec<String>>` for recording calls (traits require Send + Sync)
 - Forge backends (`github.rs`, `gitlab.rs`, `forgejo.rs`) and `ForgeClient` are tested against `src/forge/test_server.rs`, a `cfg(test)` stub HTTP server on loopback (standard library only). Route the verb and path, assert on `request_lines()` and the recorded body. Any new backend method gets a test there; the e2e suite does not count for mutation testing (below)
 - Co-located `#[cfg(test)] mod tests` in every module
+- A file under `src/` holds at most 400 production lines (inline test items do not count), enforced by `tests/file_length.rs`. The nine files over it when the gate went in (2026-09-26) are pinned at their size: they may shrink, never grow, and a shrink lowers the pin in the same change. New code goes in a new module, never into a pinned file
 - jj templates produce line-delimited JSON; `escape_json()` includes surrounding quotes
 - Edition 2024 with let-chains for collapsible if-let patterns
 - Requires jj 0.36+ (bookmark auto-tracking on push)

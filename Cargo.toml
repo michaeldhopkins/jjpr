@@ -36,6 +36,11 @@ clap_complete = "4"
 clap_mangen = "0.2"
 # openpty, for the TTY-countdown integration test (tests/tty_watch.rs)
 libc = "0.2.183"
+# syn + proc-macro2: tests/file_length.rs parses the source rather than scanning its text, so a
+# test module between functions or a `}` in a string cannot fool the count. `span-locations`
+# gives it real line numbers.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [lints.clippy]
 # Enforce enums over boolean state flags
