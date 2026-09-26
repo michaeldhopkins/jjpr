@@ -13,9 +13,13 @@ name: Fuzz replay
 # eviction window between bursts. On a cache miss the replay still runs the committed
 # `seed-*` inputs, so a fresh branch is never blocked.
 on:
+  # A docs-only change cannot change what a target does: nothing fuzzed reads Markdown or
+  # the mdbook sources. No branch rule requires this check, so a skipped run blocks nothing.
   push:
     branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**"]
   workflow_dispatch:
 
 env:

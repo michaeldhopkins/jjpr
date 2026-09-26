@@ -32,6 +32,16 @@ cargo +nightly fuzz run jj_output -- -max_total_time=600
 cargo +nightly fuzz run jj_output -- -dict=fuzz/dict/jj_output.dict
 ```
 
+A burst exactly as CI runs one: mutate for the budget (timed from when the corpus has
+loaded, not from process start), then fold the finds into `fuzz/corpus/<target>` as a
+minimized union. It exits non-zero on a crash, leaving the input in
+`fuzz/artifacts/<target>/`.
+
+```sh
+cargo +nightly fuzz build jj_output
+fuzz/burst.sh fuzz/target/aarch64-apple-darwin/release/jj_output jj_output 60
+```
+
 Replay the saved corpus without mutating — the deterministic regression gate CI runs on
 every push:
 
@@ -85,9 +95,10 @@ grep -oE '"[a-zA-Z]+":' src/jj/templates.rs | sort -u | sed 's/"/\\"/g; s/^/"/; 
 - `.github/workflows/fuzz-replay.yml` — every push/PR. Replays each target's corpus
   (`-runs=0`). Deterministic, minutes, read-only on the corpus cache.
 - `.github/workflows/fuzz.yml` — each push to `main`, and on dispatch. Not a gate.
-  Builds once, then one job per target fuzzes ~180s in a single process (the dispatch
-  input `max_total_time` sets a longer run), merges its finds into the corpus and saves
-  it to the cache; coverage for three targets follows. It replaced a nightly on
+  Builds once, then one job per target runs `fuzz/burst.sh`: ~180s of mutation in a
+  single process, counted from the end of corpus loading (the dispatch input
+  `max_total_time` sets a longer run), then a merge of its finds into the corpus, which
+  is saved to the cache; coverage for three targets follows. It replaced a nightly on
   2026-09-26 (see AGENTS.md). Runs queue rather than cancel, since a cancelled job
   swallows the crash signal.
 
