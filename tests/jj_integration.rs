@@ -246,7 +246,18 @@ fn a_divergent_rebase_root_is_only_screenable_via_change_id() {
     repo.run_jj(&["status"]);
 
     // Build a segment on one copy, so the divergent change is its rebase root.
-    repo.run_jj(&["new", &format!("{a}/0"), "-m", "B"]);
+    // By commit id: the `<change>/0` offset syntax only exists from jj 0.37.
+    let copy = repo.run_jj(&[
+        "--ignore-working-copy",
+        "log",
+        "-r",
+        &format!("change_id({a})"),
+        "--no-graph",
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ]);
+    let copy = copy.lines().next().expect("a copy of A").trim().to_string();
+    repo.run_jj(&["new", &copy, "-m", "B"]);
     repo.run_jj(&["bookmark", "create", "feat", "-r", "@"]);
 
     let jj = repo.runner();
@@ -323,10 +334,11 @@ fn real_divergent_change_in_one_chain_stays_two_segments() {
         "--ignore-working-copy",
         "log",
         "-r",
-        "divergent()",
+        "all()",
         "--no-graph",
         "-T",
-        "commit_id.short() ++ \"\\n\"",
+        // Not the divergent() revset, which jj only has from 0.38.
+        "if(divergent, commit_id.short() ++ \"\\n\")",
     ]);
     let copies: Vec<&str> = divergent
         .lines()
@@ -344,8 +356,8 @@ fn real_divergent_change_in_one_chain_stays_two_segments() {
     // The rebase gave the moved copy a new commit id; find it as the divergent
     // descendant of the one that stayed put.
     let upper = one(
-        &format!("divergent() & (descendants({c}) ~ {c})", c = copies[1]),
-        "commit_id.short() ++ \"\\n\"",
+        &format!("descendants({c}) ~ {c}", c = copies[1]),
+        "if(divergent, commit_id.short() ++ \"\\n\")",
     );
     let upper = upper
         .lines()
