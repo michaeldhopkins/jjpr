@@ -183,13 +183,21 @@ pub const TRUNK_BOOKMARKS_TEMPLATE: &str = r#"remote_bookmarks.map(|b| b.name())
 
 /// The default branch's name from [`TRUNK_BOOKMARKS_TEMPLATE`] output, or `None`
 /// when trunk carries no remote bookmark.
+///
+/// jj lists the names alphabetically, so a branch that shares trunk's commit (a
+/// fast-forwarded PR branch not yet deleted, `landed`) comes before `main`. The
+/// names jj's built-in `trunk()` looks for win, in its order; otherwise the first.
 pub fn parse_default_branch(output: &str) -> Option<String> {
-    output
+    let names: Vec<&str> = output
         .trim()
         .split(',')
-        .next()
         .map(str::trim)
         .filter(|b| !b.is_empty())
+        .collect();
+    ["main", "master", "trunk"]
+        .into_iter()
+        .find(|preferred| names.contains(preferred))
+        .or_else(|| names.first().copied())
         .map(str::to_string)
 }
 
@@ -569,7 +577,17 @@ mod tests {
             Some("develop".to_string())
         );
         assert_eq!(parse_default_branch(""), None);
-        assert_eq!(parse_default_branch(",main"), None);
+        assert_eq!(parse_default_branch(",main"), Some("main".to_string()));
+        // Captured on jj 0.33 through 0.45: a second branch on trunk's commit sorts
+        // first, and used to be taken for the default branch.
+        assert_eq!(
+            parse_default_branch("landed,landed,main,main"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            parse_default_branch("a,master,trunk"),
+            Some("master".to_string())
+        );
     }
 
     #[test]
