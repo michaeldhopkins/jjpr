@@ -1,0 +1,10 @@
+{"name":"conflicted","remote":null,"commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"remoteRefs":[<Error: No Commit available>]}
+{"name":"conflicted","remote":"git","commitId":"8de02172ef76","changeId":"rullonkwkwru","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"feature","remote":null,"commitId":"350134ef44f2","changeId":"zqxvzkunutwy","remoteRefs":[["feature","git"]]}
+{"name":"feature","remote":"origin","commitId":"8de02172ef76","changeId":"rullonkwkwru","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"local-only","remote":null,"commitId":"8de02172ef76","changeId":"rullonkwkwru","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"synced","remote":null,"commitId":"5eb9ebba3561","changeId":"urwoykqmqzsq","remoteRefs":[["feat@v2","origin"],["synced","git"],["synced","origin"]]}
+@@
+{"commitId":"350134ef44f2","changeId":"zqxvzkunutwy","authorName":"Test User","authorEmail":"test@example.com","description":"stack C: rename\n","descriptionFirstLine":"stack C: rename","parents":["8de02172ef76"],"localBookmarks":["feature"],"remoteBookmarks":["feature@git"],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"8de02172ef76","changeId":"rullonkwkwru","authorName":"Test User","authorEmail":"test@example.com","description":"stack B\n","descriptionFirstLine":"stack B","parents":["5eb9ebba3561"],"localBookmarks":["conflicted","local-only"],"remoteBookmarks":["conflicted@git","feature@origin","local-only@git"],"isWorkingCopy":"false","conflict":"false","empty":"false"}
+{"commitId":"5eb9ebba3561","changeId":"urwoykqmqzsq","authorName":"Test User","authorEmail":"test@example.com","description":"stack A\n\nsecond line\n","descriptionFirstLine":"stack A","parents":["d1a03ddec409"],"localBookmarks":["synced"],"remoteBookmarks":["\"feat@v2\"@origin","synced@git","synced@origin"],"isWorkingCopy":"false","conflict":"false","empty":"false"}
