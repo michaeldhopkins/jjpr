@@ -122,8 +122,9 @@ fn test_push_after_squash() {
 
     let jj = repo.runner();
 
-    // First push
+    // First push: a bookmark the remote does not have yet.
     jj.push_bookmark("feature", "origin").unwrap();
+    assert_pushed_and_synced(&jj, "feature");
 
     // Amend via squash: write new content in working copy, then squash into feature
     repo.write_file("feature.rs", "// v2 amended\n");
@@ -131,6 +132,21 @@ fn test_push_after_squash() {
 
     // Second push should succeed (jj force-pushes diverged bookmarks by design)
     jj.push_bookmark("feature", "origin").unwrap();
+    assert_pushed_and_synced(&jj, "feature");
+}
+
+/// The push reached the remote: the bookmark has a remote, on its own commit.
+fn assert_pushed_and_synced(jj: &impl Jj, name: &str) {
+    let bookmark = jj
+        .get_my_bookmarks()
+        .unwrap()
+        .into_iter()
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("{name} listed"));
+    assert!(
+        bookmark.has_remote && bookmark.is_synced,
+        "{name} was pushed: {bookmark:?}"
+    );
 }
 
 /// `is_conflicted` must answer "does ANY commit in this revset conflict",

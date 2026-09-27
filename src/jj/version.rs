@@ -118,4 +118,17 @@ mod tests {
             );
         }
     }
+
+    /// The version jjpr acts on is the one `jj --version` on PATH reports. With
+    /// `None` the push still works (the setting is harmless from 0.38), so only
+    /// comparing against the real binary shows the lookup is actually done.
+    #[test]
+    fn installed_version_is_the_jj_on_path() {
+        let Ok(out) = std::process::Command::new("jj").arg("--version").output() else {
+            return;
+        };
+        let expected = parse_jj_version(&String::from_utf8_lossy(&out.stdout));
+        assert!(expected.is_some(), "jj --version is parseable");
+        assert_eq!(installed_jj_version(), expected);
+    }
 }
