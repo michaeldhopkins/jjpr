@@ -109,9 +109,45 @@ jobs:
           path: target/assets/
           retention-days: 1
 
+  # jjpr supports jj 0.36 and later. The job above pins one release; this one runs
+  # every test that shells out to jj against the floor, the releases where a
+  # spelling jjpr depends on changed (0.37: `<change>/N`; 0.38: `divergent()`, a new
+  # bookmark pushed without a setting, `all:` removed), and the newest captured in
+  # tests/fixtures/jj, so a jj-version regression names the version. The parsers'
+  # per-version fixtures (tests/jj_compat.rs) run in the job above.
+  jj-versions:
+    name: Test with jj ${{ matrix.jj }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        jj: ["0.36.0", "0.37.0", "0.38.0", "0.40.0", "0.45.1"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install jj ${{ matrix.jj }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/jj-vcs/jj/releases/download/v${{ matrix.jj }}/jj-v${{ matrix.jj }}-x86_64-unknown-linux-musl.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" | tar xz -C "$tmp"
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Confirm the jj under test
+        run: jj --version | grep -F "jj ${{ matrix.jj }}"
+
+      - name: cargo test
+        run: cargo test --locked
+
   build:
     name: Build ${{ matrix.target }}
-    needs: ci
+    needs: [ci, jj-versions]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
