@@ -1,6 +1,7 @@
 pub mod runner;
 pub mod templates;
 pub mod types;
+pub mod version;
 
 pub use runner::JjRunner;
 pub use types::*;

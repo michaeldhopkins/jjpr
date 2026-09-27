@@ -11,6 +11,7 @@ use vcs_runner::{
 use super::Jj;
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
+use super::version;
 
 /// Real jj implementation that shells out to the jj binary.
 pub struct JjRunner {
@@ -252,7 +253,10 @@ impl Jj for JjRunner {
     }
 
     fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
-        self.run_jj(&["git", "push", "--remote", remote, "--bookmark", name])?;
+        // A never-pushed bookmark needs a setting on jj 0.36/0.37 (see version.rs).
+        let mut args = version::push_new_bookmark_args(version::installed_jj_version()).to_vec();
+        args.extend(["git", "push", "--remote", remote, "--bookmark", name]);
+        self.run_jj(&args)?;
         Ok(())
     }
 

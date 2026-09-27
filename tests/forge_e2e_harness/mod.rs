@@ -180,13 +180,13 @@ impl ForgeE2eContext {
 
     /// Push a prefixed bookmark to the remote.
     pub fn push(&self, bookmark: &str) {
-        self.run_jj(&[
-            "git",
-            "push",
-            "--bookmark",
-            &self.prefixed(bookmark),
-            "--allow-new",
-        ]);
+        // `--allow-new` is gone from jj 0.36 on; see jjpr::jj::version.
+        let name = self.prefixed(bookmark);
+        let mut args =
+            jjpr::jj::version::push_new_bookmark_args(jjpr::jj::version::installed_jj_version())
+                .to_vec();
+        args.extend(["git", "push", "--bookmark", &name]);
+        self.run_jj(&args);
     }
 
     /// Run the `jjpr` binary in this clone. Inherits the environment so the
