@@ -428,6 +428,48 @@ mod tests {
         assert!(warnings.is_empty());
     }
 
+    // Colocation's `@git` ref is not a remote. jj prints its own line for it when
+    // it differs from the local target (a conflicted bookmark's does), rendered or
+    // not; neither may make a synced bookmark unsynced, or give a never-pushed
+    // bookmark a remote.
+    #[test]
+    fn a_git_ref_line_is_not_a_remote() {
+        for git_line in [
+            remote("feature", "git", "elsewhere", &[("feature", "git")]),
+            unrenderable("feature", Some("git")),
+        ] {
+            let output = [
+                local("feature", "c", &[("feature", "origin")]),
+                git_line.clone(),
+            ];
+            let (bookmarks, warnings) = parse(&output);
+            assert_eq!(status(&bookmarks[0]), ("feature", true, true), "{git_line}");
+            assert!(warnings.is_empty(), "{git_line}: {warnings:?}");
+
+            let output = [local("feature", "c", &[]), git_line.clone()];
+            let (bookmarks, _) = parse(&output);
+            assert_eq!(
+                status(&bookmarks[0]),
+                ("feature", false, false),
+                "{git_line}"
+            );
+        }
+    }
+
+    // A local line with no name cannot be named in a warning. It is dropped with
+    // the generic "unparseable entry" notice rather than warned about as "".
+    #[test]
+    fn a_nameless_unreadable_local_line_is_not_warned_by_name() {
+        for line in [
+            r#"{"name":"","remote":null,"commitId":"","changeId":"","remoteRefs":[]}"#.to_string(),
+            unrenderable("", None),
+        ] {
+            let (bookmarks, warnings) = parse_bookmark_output(&line).unwrap();
+            assert!(bookmarks.is_empty(), "{line}");
+            assert!(warnings.is_empty(), "{line}: {warnings:?}");
+        }
+    }
+
     #[test]
     fn a_remote_line_on_the_local_target_counts_as_synced() {
         // `--all-remotes` style: the remote ref listed although it matches.
