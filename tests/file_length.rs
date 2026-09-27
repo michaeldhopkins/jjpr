@@ -38,7 +38,7 @@ fn pinned() -> HashMap<&'static str, usize> {
         ("src/merge/execute.rs", 1086),
         ("src/submit/execute.rs", 736),
         ("src/submit/plan.rs", 735),
-        ("src/watch.rs", 1300),
+        ("src/watch.rs", 1198),
     ])
 }
 

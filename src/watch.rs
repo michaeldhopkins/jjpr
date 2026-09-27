@@ -10,8 +10,8 @@ use crate::graph::change_graph;
 use crate::jj::Jj;
 use crate::jj::types::NarrowedSegment;
 use crate::merge::execute::{
-    BlockedPr, DivergenceKind, MergeResult, MergedPr, ReconcileState, SkippedMergedPr,
-    format_block_reason, merge_with_retry, rebase_root, reconcile_after_merge,
+    BlockedPr, MergeResult, MergedPr, ReconcileState, SkippedMergedPr, format_block_reason,
+    merge_with_retry, reconcile_after_merge,
 };
 use crate::merge::plan::{BlockReason, MergeOptions, PrMergeStatus, evaluate_segment};
 use crate::merge::watch::{
@@ -19,6 +19,8 @@ use crate::merge::watch::{
     refresh_pr_map, report_status_changes, should_print_heartbeat, spinner_sleep,
 };
 use crate::submit::{analyze, execute, plan, resolve};
+
+mod report;
 
 /// Submit-phase options for the watch loop. Mirrors the relevant
 /// surface of `submit::plan::SubmitOptions` so watch and submit can't
@@ -932,13 +934,13 @@ pub fn run_watch_loop(
                 prev_reconcile_block = None;
             }
             PostMergeAction::NewFailure => {
-                report_reconcile_failure(
+                report::reconcile_failure(
+                    &mut std::io::stdout(),
                     &state,
                     &segments,
                     &merged,
                     &skipped_merged,
-                    stack_base,
-                    default_branch,
+                    stack_base.unwrap_or(default_branch),
                     forge_kind,
                 );
                 prev_reconcile_block = Some(state.block_reasons());
@@ -1018,9 +1020,9 @@ pub fn run_watch_loop(
 
     // local_warnings reflects only the LAST iteration's warnings, because
     // state.reset() at the top of each iteration wipes earlier ones. Earlier
-    // failures were already announced inline by report_reconcile_failure;
+    // failures were already announced inline by report::reconcile_failure;
     // the summary should not double-print them. If an exit condition fires
-    // outside of report_reconcile_failure (timeout, shutdown, no_progress)
+    // outside of report::reconcile_failure (timeout, shutdown, no_progress)
     // and state is currently degraded, those warnings surface in the summary.
     Ok(WatchResult {
         prs_created: all_created,
@@ -1103,118 +1105,14 @@ fn report_orphaned_prs(
     let Ok(my_bookmarks) = jj.get_my_bookmarks() else {
         return;
     };
-    let orphaned: Vec<_> = my_bookmarks
-        .iter()
-        .filter(|b| pr_map.contains_key(&b.name))
-        .filter(|b| !merged.iter().any(|m| m.bookmark_name == b.name))
-        .filter(|b| !skipped.iter().any(|s| s.bookmark_name == b.name))
-        .collect();
-    if orphaned.is_empty() {
-        return;
-    }
-    let plural = if orphaned.len() == 1 { "" } else { "s" };
-    println!(
-        "\n  Note: {} open PR{plural} still exist for your bookmarks:",
-        orphaned.len()
+    report::orphaned_prs(
+        &mut std::io::stdout(),
+        &my_bookmarks,
+        &pr_map,
+        merged,
+        skipped,
+        fk,
     );
-    for b in &orphaned {
-        if let Some(pr) = pr_map.get(&b.name) {
-            println!("    - '{}' ({})", b.name, fk.format_ref(pr.number));
-        }
-    }
-    println!("  These may need manual attention.");
-}
-
-/// Print the warnings and recovery hints when reconcile fails inside a
-/// watch iteration. Mirrors `print_local_warnings` but tailored for the
-/// inline "watch is going to keep trying" context.
-fn report_reconcile_failure(
-    state: &ReconcileState,
-    segments: &[NarrowedSegment],
-    merged: &[MergedPr],
-    skipped: &[SkippedMergedPr],
-    stack_base: Option<&str>,
-    default_branch: &str,
-    fk: ForgeKind,
-) {
-    let merged_names: std::collections::HashSet<&str> = merged
-        .iter()
-        .map(|m| m.bookmark_name.as_str())
-        .chain(skipped.iter().map(|s| s.bookmark_name.as_str()))
-        .collect();
-    let next_unmerged = segments
-        .iter()
-        .find(|s| !merged_names.contains(s.bookmark.name.as_str()));
-
-    let pr_label = next_unmerged
-        .map(|s| format!(" '{}'", s.bookmark.name))
-        .unwrap_or_default();
-
-    let reasons = state.block_reasons();
-    println!();
-    println!("  Stopped before merging next PR{pr_label}:");
-    for reason in &reasons {
-        println!(
-            "    - {}",
-            crate::merge::execute::format_block_reason(reason, fk)
-        );
-    }
-
-    if state.has_concurrent() {
-        println!();
-        println!("  Concurrent modification:");
-        for w in state
-            .warnings
-            .iter()
-            .filter(|w| w.kind == DivergenceKind::Concurrent)
-        {
-            println!("    {}", w.message);
-        }
-        // No manual-fix hint: the warning already states that both sides' work
-        // is preserved and watch retries next poll. Recovery never discards work,
-        // so there's nothing for the user to restore.
-    }
-
-    if state.local_failed {
-        println!();
-        println!("  Local sync warnings:");
-        for w in state
-            .warnings
-            .iter()
-            .filter(|w| w.kind == DivergenceKind::Local)
-        {
-            println!("    {}", w.message);
-        }
-        if let Some(seg) = next_unmerged {
-            println!();
-            println!("  To fix locally and continue (watch will resume on the next poll):");
-            let base = stack_base.unwrap_or(default_branch);
-            // rebase_root: oldest commit in the segment so multi-commit
-            // segments don't strand earlier commits.
-            println!(
-                "    jj git fetch && jj rebase -s {} -d {base}",
-                rebase_root(seg)
-            );
-            println!("  Or to accept the forge state:");
-            println!("    jj git fetch");
-            println!("    jj bookmark set {0} -r {0}@origin", seg.bookmark.name);
-        }
-    }
-
-    if state.forge_failed {
-        println!();
-        println!("  Forge reconcile warnings:");
-        for w in state
-            .warnings
-            .iter()
-            .filter(|w| w.kind == DivergenceKind::Forge)
-        {
-            println!("    {}", w.message);
-        }
-        println!();
-        println!("  Watch will retry on the next poll. Persistent failures may indicate");
-        println!("  a network or forge-permission issue.");
-    }
 }
 
 /// Re-discover segments by rebuilding the change graph.
@@ -3707,5 +3605,107 @@ mod tests {
             result.merge_result.merged.is_empty(),
             "nothing can merge when the graph never scans"
         );
+    }
+
+    /// HealthyJj that records every push, so a test can tell whether the
+    /// submit phase acted or returned early.
+    #[derive(Default)]
+    struct PushRecordingJj {
+        pushes: Mutex<Vec<String>>,
+    }
+    impl Jj for PushRecordingJj {
+        fn git_fetch(&self) -> Result<()> {
+            HealthyJj.git_fetch()
+        }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            HealthyJj.get_my_bookmarks()
+        }
+        fn get_changes_to_commit(&self, to: &str) -> Result<Vec<LogEntry>> {
+            HealthyJj.get_changes_to_commit(to)
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            HealthyJj.get_git_remotes()
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            HealthyJj.get_default_branch()
+        }
+        fn push_bookmark(&self, name: &str, _: &str) -> Result<()> {
+            self.pushes.lock().expect("poisoned").push(name.to_string());
+            Ok(())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            HealthyJj.get_working_copy_commit_id()
+        }
+        fn rebase_onto(&self, s: &str, d: &str) -> Result<()> {
+            HealthyJj.rebase_onto(s, d)
+        }
+        fn merge_into(&self, b: &str, d: &str) -> Result<()> {
+            HealthyJj.merge_into(b, d)
+        }
+        fn resolve_change_id(&self, c: &str) -> Result<Vec<String>> {
+            HealthyJj.resolve_change_id(c)
+        }
+        fn is_conflicted(&self, r: &str) -> Result<bool> {
+            HealthyJj.is_conflicted(r)
+        }
+    }
+
+    /// Runs the submit phase over one segment "a" that already has a PR. The
+    /// segment carries a non-empty change: planning skips all-empty segments,
+    /// which would make both tests below pass vacuously.
+    fn submit_once(jj: &PushRecordingJj, mut segment: NarrowedSegment) -> Vec<String> {
+        segment.changes = vec![LogEntry {
+            commit_id: "commit_a".into(),
+            change_id: "change_a".into(),
+            author_name: "Test".into(),
+            author_email: "test@test.com".into(),
+            description: "a".into(),
+            description_first_line: "a".into(),
+            parents: vec![],
+            local_bookmarks: vec!["a".into()],
+            remote_bookmarks: vec![],
+            is_working_copy: false,
+            conflict: false,
+            empty: false,
+        }];
+        let forge = PromotionForge::new().with_pr(make_pr("a", 1, true), ChecksStatus::Pass);
+        run_submit_phase(
+            jj,
+            &forge,
+            &[segment],
+            "origin",
+            &repo_info(),
+            ForgeKind::GitHub,
+            "main",
+            None,
+            crate::config::StackNavMode::Description,
+            &WatchSubmitOptions::default(),
+        )
+        .expect("submit phase")
+    }
+
+    /// A plan with work to do must be executed. Pins the early-return guard in
+    /// `run_submit_phase`: negating `has_actions()` or loosening `&&` to `||`
+    /// both make watch skip a push it owes.
+    #[test]
+    fn submit_phase_pushes_an_unsynced_bookmark() {
+        let jj = PushRecordingJj::default();
+        let mut segment = make_segment("a");
+        segment.bookmark.is_synced = false;
+
+        submit_once(&jj, segment);
+
+        assert_eq!(*jj.pushes.lock().expect("poisoned"), ["a"]);
+    }
+
+    /// A synced bookmark is not pushed again.
+    #[test]
+    fn submit_phase_does_not_push_a_synced_bookmark() {
+        let jj = PushRecordingJj::default();
+
+        let created = submit_once(&jj, make_segment("a"));
+
+        assert!(created.is_empty());
+        assert!(jj.pushes.lock().expect("poisoned").is_empty());
     }
 }
