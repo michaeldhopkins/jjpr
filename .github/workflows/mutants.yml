@@ -297,3 +297,89 @@ jobs:
           name: mutants-in-diff
           path: mutants.out
           if-no-files-found: ignore
+
+  # Old code nobody touches is never selected by --in-diff, so each push to main
+  # also runs one rotating slice of the whole tree: shard k of N, k advancing
+  # with the run number. Every N pushes the tree has been looked at once, and no
+  # job ever runs long. The tree changes between slices, so the coverage is
+  # approximate, which is fine. N is in AGENTS.md with how it was chosen.
+  slice:
+    name: Mutants, rotating slice
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SLICES: 48
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      # Same reason and same pin as the in-diff job: without jj, 31 tests skip
+      # silently and their mutants come back MISSED.
+      - name: Install jj
+        env:
+          JJ_VERSION: v0.39.0
+        run: |
+          set -euo pipefail
+          url="https://github.com/jj-vcs/jj/releases/download/${JJ_VERSION}/jj-${JJ_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "$url" | tar xz -C "$tmp"
+          mkdir -p "$HOME/.local/bin"
+          install -m755 "$tmp/jj" "$HOME/.local/bin/jj"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/jj" --version
+
+      - name: Mutants
+        run: |
+          set -euo pipefail
+          k=$(( ${{ github.run_number }} % SLICES ))
+          echo "$k" > mutants-slice.txt
+          echo "Slice $k of $SLICES"
+          cargo mutants --no-shuffle -vV --shard "$k/$SLICES"
+
+      - name: Summarise
+        if: always()
+        run: |
+          set -euo pipefail
+          k="$(cat mutants-slice.txt 2>/dev/null || echo '?')"
+          {
+            echo "## Mutants, slice $k of $SLICES"
+            echo
+            if [ ! -d mutants.out ]; then
+              echo 'No results directory: the run failed before reporting.'
+              echo '**Treat this as no coverage, not as a pass.**'
+              exit 0
+            fi
+            for kind in missed caught unviable timeout; do
+              f="mutants.out/$kind.txt"
+              n=0
+              [ -f "$f" ] && n=$(wc -l < "$f" | tr -d ' ')
+              echo "- **$kind**: $n"
+            done
+            if [ -s mutants.out/missed.txt ]; then
+              echo
+              echo '### Missed in this slice'
+              echo
+              echo '```'
+              cat mutants.out/missed.txt
+              echo '```'
+              echo
+              echo 'Old code, not this push: give each a test or an exclusion'
+              echo 'with its reason, as for any other miss.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Archive mutants.out
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-slice
+          path: mutants.out
+          if-no-files-found: ignore

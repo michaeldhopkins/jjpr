@@ -85,9 +85,13 @@ Three things worth carrying forward. The identical bug existed a second time in 
 
 General method is in the **`rust-mutation-testing` skill**. This section is only what is true of jjpr, and most of it exists because a first attempt was measured and found wrong.
 
-**What runs:** `.github/workflows/mutants.yml` on PRs and pushes to main, restricted to mutants overlapping the diff (`--in-diff`), not gating. Nothing runs on a schedule, and nothing should: the per-change run is where the findings come from (0.40.2's diff: five survivors in new code in 13 minutes, all killed by `test(jj): kill the mutants 0.40.2's diff left alive`), and a nightly whole-tree sweep would mostly re-check code nobody changed.
+**What runs:** `.github/workflows/mutants.yml`, never gating and never on a schedule.
 
-**The whole tree has never been swept.** The sweeps that exist:
+- **PRs and pushes to main:** mutants overlapping the diff (`--in-diff`). This is where most findings come from: 0.40.2's diff had five survivors in new code, found in 13 minutes and all killed by `test(jj): kill the mutants 0.40.2's diff left alive`.
+- **Pushes to main only:** one rotating slice of the whole tree, `--shard k/48` with `k = run_number % 48`, `timeout-minutes: 20`, `mutants.out` uploaded as `mutants-slice`. Every 48 runs the tree has been looked at once. **N = 48, chosen by arithmetic, not yet measured:** 1331 mutants on 2026-09-27 at the ~20s/mutant CI delivers gives N ≈ 44 for 10 minutes of mutants; 48 leaves room for the job's own baseline build and test run (~28 mutants, ~9 minutes of mutants). Re-set N from the first completed slice's wall-clock; the denominator also drifts as the tree grows.
+- **A MISSED mutant from a slice is old code, not the push's.** It still gets a test, or an exclusion with its reason, like any other miss; record slice findings here.
+
+There is no whole-tree sweep and none is planned; the slice replaces it. A local sweep would take ~30 hours at the rate measured below. Partial runs so far:
 
 | Date | Scope | Result |
 |---|---|---|
@@ -95,7 +99,7 @@ General method is in the **`rust-mutation-testing` skill**. This section is only
 | 2026-08-02 | `src/forge/remote.rs` | 39 caught / 2 missed / 15 unviable, 95%; both misses killed |
 | 2026-08-03 | `src/watch.rs` | 102 of 105: 38%, then 61% after five tests; remaining misses in TODO.md |
 
-So there is no adoption baseline: the per-change run started over an unknown backlog, and a miss in a touched-but-old function is not necessarily new. A local sweep is not feasible (~30 hours at the measured rate). **Proposed, not yet added:** a `mutants-sweep.yml` on `workflow_dispatch` only (no schedule), in the skill's *Sharding* shape: a baseline job running the suite with jj installed, then a 16-shard matrix that `needs:` it, running `--shard k/16 --baseline=skip --in-place` with `fail-fast: false`, each shard uploading `mutants.out` `if: always()`. At CI's ~20s/mutant that is about 7 runner-hours, roughly 30 minutes wall-clock, on free public runners. Run it once to set the baseline, burn down its missed list, record the result in this table, and again only after a large rewrite.
+So the backlog in untouched code is unknown until the slices have gone round once, and a miss in a touched-but-old function is not necessarily new.
 
 **Measured 2026-08-02**, so nobody re-derives it:
 
