@@ -207,18 +207,7 @@ impl Jj for JjRunner {
 
     fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
         let output = self.run_jj(&["git", "remote", "list"])?;
-        Ok(output
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.splitn(2, ' ');
-                let name = parts.next()?.trim().to_string();
-                let url = parts.next()?.trim().to_string();
-                if name.is_empty() {
-                    return None;
-                }
-                Some(GitRemote { name, url })
-            })
-            .collect())
+        Ok(templates::parse_remote_list(&output))
     }
 
     fn get_default_branch(&self) -> Result<String> {
@@ -232,7 +221,6 @@ impl Jj for JjRunner {
             }
         }
 
-        let template = r#"remote_bookmarks.map(|b| b.name()).join(",")"#;
         let output = self.run_jj(&[
             "log",
             "--revisions",
@@ -241,14 +229,10 @@ impl Jj for JjRunner {
             "--limit",
             "1",
             "--template",
-            template,
+            templates::TRUNK_BOOKMARKS_TEMPLATE,
         ])?;
 
-        let bookmarks: Vec<&str> = output.trim().split(',').collect();
-        bookmarks
-            .first()
-            .filter(|b| !b.trim().is_empty())
-            .map(|b| b.trim().to_string())
+        templates::parse_default_branch(&output)
             .ok_or_else(|| anyhow::anyhow!("could not determine default branch"))
     }
 
