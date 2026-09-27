@@ -36,6 +36,9 @@ BIN="$1"; T="$2"; BUDGET="$3"
 case "$BUDGET" in
   '' | *[!0-9]*) echo "budget must be whole seconds, got '$BUDGET'" >&2; exit 64 ;;
 esac
+# Base 10 explicitly: in $((...)) bash reads a leading zero as octal, so a budget of 08 or 09 is
+# an arithmetic error and 010 would be eight seconds.
+BUDGET=$((10#$BUDGET))
 LOAD_CAP=3600
 
 CORPUS="fuzz/corpus/$T"
