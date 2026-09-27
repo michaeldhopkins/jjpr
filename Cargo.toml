@@ -23,7 +23,7 @@ dialoguer = "0.11"
 toml = "0.8"
 percent-encoding = "2"
 ureq = { version = "3", features = ["json"] }
-vcs-runner = { version = "0.15.0", default-features = false }
+vcs-runner = { version = "0.18.0", default-features = false }
 ctrlc = "3"
 libc = "0.2.183"
 

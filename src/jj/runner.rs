@@ -346,9 +346,11 @@ impl Jj for JjRunner {
     }
 
     fn divergent_change_ids(&self) -> Result<Vec<String>> {
-        // vcs-runner 0.15 reads this working-copy-agnostically (it must stay
+        // vcs-runner reads this working-copy-agnostically (it must stay
         // readable when a concurrent writer left the working copy stale — the
         // exact situation this signal detects) and dedups to distinct changes.
+        // From 0.18 it also works on jj 0.36/0.37, which have no `divergent()`
+        // revset: 0.15 spelled the query with it, so every call failed there.
         Ok(jj_divergent_change_ids(&self.repo_path)?)
     }
 
