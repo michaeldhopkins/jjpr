@@ -270,6 +270,22 @@ fn a_divergent_rebase_root_is_only_screenable_via_change_id() {
         jj.is_conflicted(&format!("change_id({a})::feat")).is_ok(),
         "the change_id() form must resolve despite the divergence"
     );
+
+    // The merge reconcile's divergence check before `jj rebase -s` counts copies
+    // with `resolve_change_id`. It used `all:<id>`, which fails on a divergent id
+    // on every jj from 0.33 (and is a parse error from 0.38), and the caller
+    // ignores errors, so the check never fired.
+    assert_eq!(
+        jj.resolve_change_id(&a).unwrap().len(),
+        2,
+        "a divergent change resolves to both copies"
+    );
+    let b = short("feat");
+    assert_eq!(jj.resolve_change_id(&b).unwrap().len(), 1);
+    assert!(
+        jj.resolve_change_id("kkkkkkkkkkkk").unwrap().is_empty(),
+        "an unknown change id is an empty list, not an error"
+    );
 }
 
 /// End-to-end over REAL jj: a divergent change with both copies in one ancestry
