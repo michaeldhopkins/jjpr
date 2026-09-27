@@ -76,11 +76,11 @@ impl JjTestRepo {
         std::fs::write(repo.join("README.md"), "test repo\n").expect("write");
         run_cmd("jj", &["commit", "-m", "initial commit"], repo);
         run_cmd("jj", &["bookmark", "set", "main", "-r", "@-"], repo);
-        run_cmd(
-            "jj",
-            &["git", "push", "--remote", "origin", "--bookmark", "main"],
-            repo,
-        );
+        let mut push =
+            jjpr::jj::version::push_new_bookmark_args(jjpr::jj::version::installed_jj_version())
+                .to_vec();
+        push.extend(["git", "push", "--remote", "origin", "--bookmark", "main"]);
+        run_cmd("jj", &push, repo);
 
         Self {
             _origin_dir: origin_dir,
