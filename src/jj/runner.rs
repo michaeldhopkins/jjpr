@@ -291,7 +291,11 @@ impl Jj for JjRunner {
     }
 
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>> {
-        let revset = format!("all:{change_id}");
+        // `change_id()`, not the bare id: a bare change id is a symbol, and jj refuses
+        // to resolve a divergent symbol ("Change ID <x> is divergent"), which is
+        // exactly the case this exists to count. The `all:` prefix jjpr used before
+        // did not help (it only lifted the one-revision limit) and jj 0.38 removed it.
+        let revset = format!("change_id({change_id})");
         let output = self.run_jj(&[
             "log",
             "-r",
