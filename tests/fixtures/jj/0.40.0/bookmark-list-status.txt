@@ -1,0 +1,6 @@
+{"name":"conflicted","remote":null,"commitId":<Error: No Commit available>,"changeId":<Error: No Commit available>,"remoteRefs":[<Error: No Commit available>]}
+{"name":"conflicted","remote":"git","commitId":"5b3a655a6958","changeId":"vovporpqrzkp","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"feature","remote":null,"commitId":"e5b4f9d0bb24","changeId":"rzkzwvorwxzv","remoteRefs":[["feature","git"]]}
+{"name":"feature","remote":"origin","commitId":"5b3a655a6958","changeId":"vovporpqrzkp","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"local-only","remote":null,"commitId":"5b3a655a6958","changeId":"vovporpqrzkp","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"synced","remote":null,"commitId":"2eada0ce545b","changeId":"xzzqpqyzsoqo","remoteRefs":[["feat@v2","origin"],["synced","git"],["synced","origin"]]}
