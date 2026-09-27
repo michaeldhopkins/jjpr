@@ -85,7 +85,17 @@ Three things worth carrying forward. The identical bug existed a second time in 
 
 General method is in the **`rust-mutation-testing` skill**. This section is only what is true of jjpr, and most of it exists because a first attempt was measured and found wrong.
 
-**What runs:** `.github/workflows/mutants.yml` on PRs and pushes to main, restricted to mutants overlapping the diff (`--in-diff`). Nothing runs a full tree in CI yet.
+**What runs:** `.github/workflows/mutants.yml` on PRs and pushes to main, restricted to mutants overlapping the diff (`--in-diff`), not gating. Nothing runs on a schedule, and nothing should: the per-change run is where the findings come from (0.40.2's diff: five survivors in new code in 13 minutes, all killed by `test(jj): kill the mutants 0.40.2's diff left alive`), and a nightly whole-tree sweep would mostly re-check code nobody changed.
+
+**The whole tree has never been swept.** The sweeps that exist:
+
+| Date | Scope | Result |
+|---|---|---|
+| 2026-08-02 | whole tree, stopped | 163 of 1246 mutants in 3h22m (~88s/mutant), all in `main.rs`: 77 caught |
+| 2026-08-02 | `src/forge/remote.rs` | 39 caught / 2 missed / 15 unviable, 95%; both misses killed |
+| 2026-08-03 | `src/watch.rs` | 102 of 105: 38%, then 61% after five tests; remaining misses in TODO.md |
+
+So there is no adoption baseline: the per-change run started over an unknown backlog, and a miss in a touched-but-old function is not necessarily new. A local sweep is not feasible (~30 hours at the measured rate). **Proposed, not yet added:** a `mutants-sweep.yml` on `workflow_dispatch` only (no schedule), in the skill's *Sharding* shape: a baseline job running the suite with jj installed, then a 16-shard matrix that `needs:` it, running `--shard k/16 --baseline=skip --in-place` with `fail-fast: false`, each shard uploading `mutants.out` `if: always()`. At CI's ~20s/mutant that is about 7 runner-hours, roughly 30 minutes wall-clock, on free public runners. Run it once to set the baseline, burn down its missed list, record the result in this table, and again only after a large rewrite.
 
 **Measured 2026-08-02**, so nobody re-derives it:
 
@@ -145,9 +155,6 @@ The full runner is a **planning** activity, not a gate. It found nothing by itse
 The distribution mattered more than the total. 24 of the 52 misses sit inside `run_watch_loop` and another 10 in `run_merge_phase`, and they are the retry counters, their give-up thresholds, and the negated guards — `+=` survives `-=`, `>=` survives `<`, `delete !` survives. So watch's error-handling state machine is unverified, and any refactor of it is unguarded. Full detail and the sequencing that follows from it are in TODO.md; the general lesson is that **a MISSED cluster inside one function is a stronger signal than the file's score**, because it says which change you cannot safely make.
 
 Also worth knowing before running one: a whole-file run is long enough that it will outlive a session. This one was stopped before finishing, but `mutants.out/{caught,missed,unviable,timeout}.txt` are written incrementally, so the partial results were complete enough to act on. Read those files rather than relying on the command's final summary line.
-
-**Not done yet:** a completed full-tree run. At ~88s/mutant that needs sharding across machines, and its missed list — not an estimate — is what should decide whether a nightly gate is worth adding.
-
 ## After every code change
 
 Three things, every time — not at the end of a branch, not before pushing:

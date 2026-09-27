@@ -4,9 +4,9 @@ name: Mutants
 #
 # `cargo mutants` generates plausible bugs and reports the ones the tests fail to
 # notice. A full-tree run on jjpr is ~1246 mutants at roughly 88s each — hours, and
-# build-bound rather than test-bound, so it belongs on a schedule and across
-# machines, not here. `--in-diff` restricts it to mutants overlapping the changed
-# regions, which is minutes and puts a finding in the review conversation where it
+# build-bound rather than test-bound, so it belongs in a one-off sharded sweep
+# (see AGENTS.md), never here and never on a schedule. `--in-diff` restricts it
+# to mutants overlapping the changed regions, which is minutes and puts a finding in the review conversation where it
 # is cheapest to act on.
 #
 # General method is in the `rust-mutation-testing` skill; jjpr's specifics are in
