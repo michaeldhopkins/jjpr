@@ -1,5 +1,23 @@
 # jjpr TODO
 
+## Bookmark names that need revset quoting are unsupported (found 2026-09-26)
+
+jj accepts a bookmark named `feat@v2` when it is created quoted (`jj bookmark set '"feat@v2"'`),
+but jjpr passes bookmark names raw everywhere:
+
+- `push_bookmark` hands the name to `jj git push --bookmark`, which reads it as a string
+  pattern: `feat@v2` is a parse error ("Invalid string expression"), and a glob
+  metacharacter would match other bookmarks. `exact:"<escaped>"` would fix it; check
+  which spelling 0.36 accepts first (the capture in `tests/jj_compat.rs` tries both).
+- Revsets built from names (`change_id(x)::name`, `children(name)`, `bookmark set name`)
+  read `feat@v2` as the remote bookmark `feat` on remote `v2`.
+- `LOG_TEMPLATE`'s `remoteBookmarks` renders it as `"feat@v2"@origin`, so traversal's
+  foreign-base check strips `@origin`, gets `"feat@v2"` with its quotes, finds no such
+  bookmark and cuts the stack there. Emitting raw `[name, remote]` pairs, as
+  `BOOKMARK_TEMPLATE` now does, fixes that part.
+
+Seen only in the fixture capture, never from a user. Fix all three together or not at all.
+
 ## Fixed: watch never gave up on a failing submit, refresh, or merge (2026-08-03)
 
 Found while writing tests for the mutation misses below. Measured, not theorised:
