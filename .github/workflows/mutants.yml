@@ -193,7 +193,7 @@ jobs:
           #   2  a mutant was MISSED — the finding; write a test or justify it
           #   3  a mutant TIMED OUT — usually an injected infinite loop, which is
           #      also a real result: the code is only safe because of the guard
-          #      that was mutated
+          #      that was mutated. Counted as caught: the step passes on 3
           #   5  the diff's new side does not match the tree — a harness bug in
           #      the "Compute diff" step above, NOT a problem with the code
           #   6  the diff is malformed — likewise a harness bug
@@ -208,7 +208,13 @@ jobs:
           # both Summarise and Archive still ran and succeeded, so a timed-out run
           # does report its partial results. The reason to avoid hitting the
           # timeout is the wasted 45 minutes, not a lost report.
-          cargo mutants --no-shuffle -vV --in-diff mutants.diff
+          rc=0
+          cargo mutants --no-shuffle -vV --in-diff mutants.diff || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
+            rc=0
+          fi
+          exit "$rc"
 
       # Put the finding in the run summary so a reviewer sees it without
       # downloading an artifact. `missed.txt` is the actual deliverable.
@@ -342,7 +348,13 @@ jobs:
           k=$(( ${{ github.run_number }} % SLICES ))
           echo "$k" > mutants-slice.txt
           echo "Slice $k of $SLICES"
-          cargo mutants --no-shuffle -vV --shard "$k/$SLICES"
+          rc=0
+          cargo mutants --no-shuffle -vV --shard "$k/$SLICES" || rc=$?
+          if [ "$rc" -eq 3 ]; then
+            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
+            rc=0
+          fi
+          exit "$rc"
 
       - name: Summarise
         if: always()
