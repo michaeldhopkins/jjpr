@@ -1256,6 +1256,20 @@ mod tests {
         );
     }
 
+    /// A pending commit status must not read as a failure; the only other
+    /// pending case above comes from a check run.
+    #[test]
+    fn test_parse_checks_pending_commit_status_is_pending() {
+        let check_runs = serde_json::json!({"check_runs": []});
+        let status = serde_json::json!({
+            "statuses": [{"state": "success"}, {"state": "pending"}]
+        });
+        assert_eq!(
+            parse_checks_status(&check_runs, &status),
+            ChecksStatus::Pending
+        );
+    }
+
     #[test]
     fn test_parse_checks_neutral_passes() {
         let check_runs = serde_json::json!({
