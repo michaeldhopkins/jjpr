@@ -228,15 +228,13 @@ impl Forge for ForgejoForge {
         // paginate and scan. Cap at 5 pages (250 PRs) to avoid runaway requests
         // on repos with many closed PRs.
         let base_path = format!("repos/{owner}/{repo}/pulls?state=closed");
-        let max_pages = 5u32;
-        let mut hit_cap = false;
-        for page in 1..=max_pages {
+        for page in 1..=5u32 {
             let paged = format!("{base_path}&page={page}&limit=50");
             let body = self.client.get(&paged)?;
             let prs: Vec<PullRequest> =
                 serde_json::from_value(body).context("failed to parse closed PR list response")?;
             if prs.is_empty() {
-                break;
+                return Ok(None);
             }
             if let Some(pr) = prs
                 .into_iter()
@@ -244,16 +242,13 @@ impl Forge for ForgejoForge {
             {
                 return Ok(Some(pr));
             }
-            if page == max_pages {
-                hit_cap = true;
-            }
         }
-        if hit_cap {
-            eprintln!(
-                "warning: scanned 250 closed PRs without finding a merged PR for '{head}'; \
-                 result may be incomplete on repos with many closed PRs"
-            );
-        }
+        // Only reached when every page was full: the scan stopped at the cap,
+        // not at the end of the list.
+        eprintln!(
+            "warning: scanned 250 closed PRs without finding a merged PR for '{head}'; \
+             result may be incomplete on repos with many closed PRs"
+        );
         Ok(None)
     }
 
@@ -561,18 +556,6 @@ mod tests {
         assert_eq!(result.mergeable_state, "unknown");
     }
 
-    #[test]
-    fn test_merge_method_do_field() {
-        let squash = serde_json::json!({ "Do": "squash" });
-        assert_eq!(squash["Do"].as_str().unwrap(), "squash");
-
-        let merge = serde_json::json!({ "Do": "merge" });
-        assert_eq!(merge["Do"].as_str().unwrap(), "merge");
-
-        let rebase = serde_json::json!({ "Do": "rebase" });
-        assert_eq!(rebase["Do"].as_str().unwrap(), "rebase");
-    }
-
     fn stub_forge(server: &StubServer) -> ForgejoForge {
         ForgejoForge::new(ForgeClient::new(
             server.base_url(),
@@ -609,5 +592,219 @@ mod tests {
             .delete_comment("o", "r", 99)
             .expect_err("a 404 must not read as deleted");
         assert!(err.to_string().contains("HTTP 404"), "{err}");
+    }
+
+    /// The one request the server saw, with its JSON body parsed.
+    fn only_request(server: &StubServer) -> (String, serde_json::Value) {
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        let r = &requests[0];
+        let body = serde_json::from_str(&r.body).expect("JSON body");
+        (format!("{} {}", r.method, r.target), body)
+    }
+
+    #[test]
+    fn update_pr_body_patches_the_pull_body() {
+        let server = StubServer::start(vec![route("PATCH", "/repos/o/r/pulls/7", 200, "{}")]);
+
+        stub_forge(&server)
+            .update_pr_body("o", "r", 7, "new body")
+            .expect("200 is success");
+
+        assert_eq!(
+            only_request(&server),
+            (
+                "PATCH /repos/o/r/pulls/7".to_string(),
+                serde_json::json!({ "body": "new body" })
+            )
+        );
+    }
+
+    #[test]
+    fn mark_pr_ready_clears_the_draft_flag() {
+        let server = StubServer::start(vec![route("PATCH", "/repos/o/r/pulls/7", 200, "{}")]);
+
+        stub_forge(&server)
+            .mark_pr_ready("o", "r", 7)
+            .expect("200 is success");
+
+        assert_eq!(
+            only_request(&server),
+            (
+                "PATCH /repos/o/r/pulls/7".to_string(),
+                serde_json::json!({ "draft": false })
+            )
+        );
+    }
+
+    #[test]
+    fn get_authenticated_user_reads_the_login() {
+        let server = StubServer::start(vec![route(
+            "GET",
+            "/user",
+            200,
+            r#"{"login":"alice","id":3}"#,
+        )]);
+
+        let login = stub_forge(&server).get_authenticated_user().expect("login");
+
+        assert_eq!(login, "alice");
+        assert_eq!(server.request_lines(), vec!["GET /user"]);
+    }
+
+    #[test]
+    fn get_authenticated_emails_returns_the_verified_ones() {
+        let server = StubServer::start(vec![route(
+            "GET",
+            "/user/emails",
+            200,
+            r#"[{"email":"a@x.org","verified":true},
+                {"email":"b@x.org","verified":false},
+                {"email":"c@x.org","verified":true}]"#,
+        )]);
+
+        let emails = stub_forge(&server)
+            .get_authenticated_emails()
+            .expect("emails");
+
+        assert_eq!(emails, vec!["a@x.org", "c@x.org"]);
+        assert_eq!(server.request_lines(), vec!["GET /user/emails"]);
+    }
+
+    fn dismisses(status: u16, body: &str) -> (Option<bool>, Vec<String>) {
+        let server = StubServer::start(vec![route(
+            "GET",
+            "/repos/o/r/branch_protections/release%2F1",
+            status,
+            body,
+        )]);
+        let answer = stub_forge(&server)
+            .base_dismisses_stale_approvals("o", "r", "release/1")
+            .expect("never an error");
+        (answer, server.request_lines())
+    }
+
+    #[test]
+    fn base_dismisses_stale_approvals_reads_the_branch_rule() {
+        let (on, lines) = dismisses(200, r#"{"dismiss_stale_approvals":true}"#);
+        assert_eq!(on, Some(true));
+        assert_eq!(
+            lines,
+            vec!["GET /repos/o/r/branch_protections/release%2F1"],
+            "the branch name is percent-encoded into one path segment"
+        );
+
+        let (off, _) = dismisses(200, r#"{"dismiss_stale_approvals":false}"#);
+        assert_eq!(off, Some(false));
+    }
+
+    #[test]
+    fn base_dismisses_stale_approvals_reads_404_as_unprotected() {
+        assert_eq!(dismisses(404, r#"{"message":"Not Found"}"#).0, Some(false));
+    }
+
+    #[test]
+    fn base_dismisses_stale_approvals_cannot_tell_on_other_errors() {
+        assert_eq!(dismisses(403, r#"{"message":"Forbidden"}"#).0, None);
+    }
+
+    fn closed_pr(number: u64, head: &str, merged: bool) -> serde_json::Value {
+        serde_json::json!({
+            "number": number,
+            "html_url": format!("https://codeberg.org/o/r/pulls/{number}"),
+            "title": "t",
+            "body": null,
+            "base": { "ref": "main", "label": "o:main" },
+            "head": { "ref": head, "label": format!("o:{head}") },
+            "draft": false,
+            "merged_at": if merged { serde_json::json!("2024-06-15T10:30:00Z") } else { serde_json::Value::Null },
+        })
+    }
+
+    fn closed_page(page: u32) -> String {
+        format!("/repos/o/r/pulls?state=closed&page={page}&limit=50")
+    }
+
+    #[test]
+    fn find_merged_pr_needs_both_the_head_and_a_merge() {
+        // Page 1 holds a closed-unmerged PR for the head and a merged PR for
+        // another head; neither is the answer. The merged one is on page 2.
+        let page1 = serde_json::json!([closed_pr(1, "feat", false), closed_pr(2, "other", true)]);
+        let page2 = serde_json::json!([closed_pr(3, "feat", true)]);
+        let server = StubServer::start(vec![
+            route("GET", &closed_page(1), 200, &page1.to_string()),
+            route("GET", &closed_page(2), 200, &page2.to_string()),
+        ]);
+
+        let pr = stub_forge(&server)
+            .find_merged_pr("o", "r", "feat")
+            .expect("scan")
+            .expect("PR 3 was merged from feat");
+
+        assert_eq!(pr.number, 3);
+        assert_eq!(
+            server.request_lines(),
+            vec![
+                format!("GET {}", closed_page(1)),
+                format!("GET {}", closed_page(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn find_merged_pr_stops_at_the_first_empty_page() {
+        let page1 = serde_json::json!([closed_pr(1, "other", true)]);
+        let server = StubServer::start(vec![
+            route("GET", &closed_page(1), 200, &page1.to_string()),
+            route("GET", &closed_page(2), 200, "[]"),
+        ]);
+
+        let found = stub_forge(&server)
+            .find_merged_pr("o", "r", "feat")
+            .expect("scan");
+
+        assert!(found.is_none());
+        assert_eq!(server.request_lines().len(), 2);
+    }
+
+    #[test]
+    fn find_merged_pr_gives_up_after_five_full_pages() {
+        let page = serde_json::json!([closed_pr(1, "other", true)]).to_string();
+        let routes = (1..=6)
+            .map(|p| route("GET", &closed_page(p), 200, &page))
+            .collect();
+        let server = StubServer::start(routes);
+
+        let found = stub_forge(&server)
+            .find_merged_pr("o", "r", "feat")
+            .expect("scan");
+
+        assert!(found.is_none());
+        assert_eq!(server.request_lines().len(), 5);
+    }
+
+    #[test]
+    fn merge_pr_posts_the_forgejo_merge_style() {
+        for (method, expected) in [
+            (MergeMethod::Squash, "squash"),
+            (MergeMethod::Merge, "merge"),
+            (MergeMethod::Rebase, "rebase"),
+        ] {
+            let server =
+                StubServer::start(vec![route("POST", "/repos/o/r/pulls/7/merge", 200, "{}")]);
+
+            stub_forge(&server)
+                .merge_pr("o", "r", 7, method)
+                .expect("200 is success");
+
+            assert_eq!(
+                only_request(&server),
+                (
+                    "POST /repos/o/r/pulls/7/merge".to_string(),
+                    serde_json::json!({ "Do": expected })
+                ),
+                "{method:?}"
+            );
+        }
     }
 }
