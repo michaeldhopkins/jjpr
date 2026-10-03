@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # nightly + rust-src: cargo-fuzz builds std with the sanitizer instrumented.
       - uses: dtolnay/rust-toolchain@nightly
@@ -71,7 +71,7 @@ jobs:
       # standalone libFuzzer executable, so the per-target jobs exec it directly with
       # the flags cargo-fuzz would have passed.
       - name: Upload fuzz binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-binaries
           path: |
@@ -99,10 +99,10 @@ jobs:
           - config_load
           - graph_invariants
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download fuzz binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: fuzz-binaries
           path: bin
@@ -114,7 +114,7 @@ jobs:
       # The same key scheme fuzz-replay.yml restores: a prefix match on
       # `fuzz-corpus-<target>-` pulls the newest entry this workflow saved.
       - name: Restore corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-
@@ -140,14 +140,14 @@ jobs:
       # Only a completed merge is saved, so a half-merged corpus never becomes canonical.
       - name: Save corpus
         if: ${{ !cancelled() && steps.fuzz.outputs.merged == 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload crash artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes-${{ matrix.target }}
           path: fuzz/artifacts/
@@ -189,7 +189,7 @@ jobs:
       matrix:
         target: [jj_output, graph_invariants, remote_url]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # llvm-tools-preview is REQUIRED: without it `cargo fuzz coverage` replays the
       # corpus fine and then dies at "Merging raw coverage data", because llvm-profdata
@@ -207,7 +207,7 @@ jobs:
           tool: cargo-fuzz
 
       - name: Restore merged corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-
@@ -256,7 +256,7 @@ jobs:
 
       - name: Upload HTML coverage
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-coverage-html-${{ matrix.target }}
           path: coverage-html
