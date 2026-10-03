@@ -18,7 +18,7 @@ jobs:
       should_release: ${{ steps.check.outputs.should_release }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           fetch-tags: true
@@ -42,7 +42,7 @@ jobs:
     if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -103,7 +103,7 @@ jobs:
         run: cargo run --locked --example generate_assets
 
       - name: Upload distribution assets
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: dist-assets
           path: target/assets/
@@ -123,7 +123,7 @@ jobs:
       matrix:
         jj: ["0.36.0", "0.37.0", "0.38.0", "0.40.0", "0.45.1"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -153,11 +153,11 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive: jjpr-x86_64-apple-darwin.tar.gz
             is_macos: true
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive: jjpr-aarch64-apple-darwin.tar.gz
             is_macos: true
           - target: x86_64-unknown-linux-gnu
@@ -170,7 +170,7 @@ jobs:
             runner: windows-latest
             archive: jjpr-x86_64-pc-windows-msvc.zip
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -241,7 +241,7 @@ jobs:
           rm "$RUNNER_TEMP/jjpr.zip"
 
       - name: Download distribution assets
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: dist-assets
           path: dist-assets
@@ -264,7 +264,7 @@ jobs:
           Compress-Archive -Path "target/${{ matrix.target }}/release/jjpr.exe" -DestinationPath "${{ matrix.archive }}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.archive }}
           path: ${{ matrix.archive }}
@@ -279,7 +279,7 @@ jobs:
     needs: [check-version, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -291,7 +291,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -353,14 +353,14 @@ jobs:
     if: vars.SITE_DOCS_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # jjpr's book is pure mdbook — the version footer comes from Cargo.toml,
       # so no Rust toolchain is needed here.
       - uses: taiki-e/install-action@mdbook
 
       - name: Check out michaeldhopkins.com
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: michaeldhopkins/michaeldhopkins.com
           token: ${{ secrets.SITE_GITHUB_TOKEN }}
@@ -419,10 +419,10 @@ jobs:
       matrix:
         package: [jjpr, jjpr-bin]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download checksums
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -452,7 +452,7 @@ jobs:
           cat "$PKGBUILD"
 
       - name: Publish to AUR
-        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        uses: KSXGitHub/github-actions-deploy-aur@v4
         with:
           pkgname: ${{ matrix.package }}
           pkgbuild: packaging/aur/${{ matrix.package }}/PKGBUILD

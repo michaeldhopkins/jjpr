@@ -42,7 +42,7 @@ jobs:
           - config_load
           - graph_invariants
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -66,7 +66,7 @@ jobs:
       # prefix match restores the newest. Caches written on main are readable from PR
       # branches.
       - name: Restore corpus
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-
@@ -92,7 +92,7 @@ jobs:
 
       - name: Upload findings
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-replay-findings-${{ matrix.target }}
           path: fuzz/artifacts/

@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # Need history to diff against the base ref (PR) or the previous
           # commit (push). A shallow clone has neither.
@@ -298,7 +298,7 @@ jobs:
 
       - name: Archive mutants.out
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-in-diff
           path: mutants.out
@@ -317,7 +317,7 @@ jobs:
     env:
       SLICES: 48
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -390,7 +390,7 @@ jobs:
 
       - name: Archive mutants.out
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-slice
           path: mutants.out
