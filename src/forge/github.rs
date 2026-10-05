@@ -1547,4 +1547,70 @@ mod tests {
             .expect_err("a 404 must not read as deleted");
         assert!(err.to_string().contains("HTTP 404"), "{err}");
     }
+
+    #[test]
+    fn get_stack_returns_the_parsed_stack() {
+        let server =
+            StubServer::start(vec![route("GET", "/repos/o/r/stacks/355", 200, STACK_JSON)]);
+
+        let stack = stub_forge(&server)
+            .get_stack("o", "r", 355)
+            .expect("200 is success")
+            .expect("a visible stack");
+        assert_eq!(stack.number, 355);
+    }
+
+    #[test]
+    fn get_stack_reads_a_404_as_not_visible() {
+        let server = StubServer::start(vec![]);
+
+        let stack = stub_forge(&server)
+            .get_stack("o", "r", 355)
+            .expect("a 404 is not an error");
+        assert!(stack.is_none());
+        assert_eq!(server.request_lines(), vec!["GET /repos/o/r/stacks/355"]);
+    }
+
+    #[test]
+    fn get_stack_reports_any_other_failure_as_an_error() {
+        let server = StubServer::start(vec![route(
+            "GET",
+            "/repos/o/r/stacks/355",
+            403,
+            r#"{"message":"forbidden"}"#,
+        )]);
+
+        let err = stub_forge(&server)
+            .get_stack("o", "r", 355)
+            .expect_err("a 403 must not read as an invisible stack");
+        assert!(err.to_string().contains("HTTP 403"), "{err}");
+    }
+
+    // A PR whose reviews overflowed the GraphQL page but whose checks did not
+    // still has to be refilled from REST: either truncation alone is enough.
+    #[test]
+    fn batch_pr_status_refills_a_pr_whose_reviews_alone_were_truncated() {
+        let graphql = r#"{"data":{"repository":{"pr0":{
+            "mergeable":"MERGEABLE",
+            "reviews":{"totalCount":150,"nodes":[]},
+            "commits":{"nodes":[{"commit":{"statusCheckRollup":null}}]}
+        }}}}"#;
+        let server = StubServer::start(vec![
+            route("POST", "/graphql", 200, graphql),
+            route("GET", "/repos/o/r/pulls/7/reviews?per_page=100", 200, "[]"),
+        ]);
+
+        let map = stub_forge(&server)
+            .batch_pr_status("o", "r", &[(7, "feature".to_string())])
+            .expect("the batch succeeded");
+
+        assert!(map.contains_key(&7));
+        assert_eq!(
+            server.request_lines(),
+            vec![
+                "POST /graphql",
+                "GET /repos/o/r/pulls/7/reviews?per_page=100"
+            ]
+        );
+    }
 }
