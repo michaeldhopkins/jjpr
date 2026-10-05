@@ -1,10 +1,8 @@
 //! The file-length gate for `src/`.
 //!
-//! Copied from cmdproof's (`engine/tests/file_length.rs`), whose `production_lines` rule was
-//! corrected several times before it held and is reproduced here rather than re-derived; see the
-//! comment on it. Function-level lints (`too_many_lines`) never see a file growing one function
-//! at a time, which is how nine files here were over the limit when it went in, `main.rs` at 1,893
-//! production lines.
+//! Its `production_lines` rule is the subtle part; see the comment on it. Function-level lints
+//! (`too_many_lines`) never see a file growing one function at a time, which is how nine files
+//! here were over the limit when it went in, `main.rs` at 1,893 production lines.
 //!
 //! Two decisions make it useful rather than annoying:
 //!
@@ -95,11 +93,11 @@ impl<'a> Visit<'a> for TestItems {
 /// The file's lines outside its test-only items (`#[cfg(test)]` modules, helpers and impls,
 /// `#[test]` functions), wherever they sit: a module may keep test modules between its functions.
 ///
-/// Read from the parsed file, never the text. Every text rule this gate had was fooled by a
-/// shape of ordinary code: two drafts in `uptime-thing` took any `#[cfg(test)]` as the start of
-/// the tests and waved through arbitrarily large files, craton's stopped at the first test
-/// module (it measured `main.rs` at 74 lines of its 7,993), and cmdproof's own ended a module
-/// at the first `}` in column 0, which a fixture string holds as often as the module's end does.
+/// Read from the parsed file, never the text. Every text rule tried for this gate was fooled by a
+/// shape of ordinary code: taking any `#[cfg(test)]` as the start of the tests waved through
+/// arbitrarily large files, stopping at the first test module measured a 7,993-line file at 74,
+/// and ending a module at the first `}` in column 0 was fooled by fixture strings, which hold one
+/// as often as the module's end does.
 fn production_lines(source: &str) -> usize {
     let file = syn::parse_file(source).unwrap_or_else(|e| panic!("does not parse: {e}"));
     let mut tests = TestItems(Vec::new());

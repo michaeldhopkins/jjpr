@@ -244,8 +244,8 @@ Stack resource:
 
 ### Live verification (2026-07-21, read-only)
 
-Probed the live endpoints against a preview-enabled org (`example-org`,
-read-only GETs, no writes). Findings that the Pages docs don't state:
+Probed the live endpoints against a preview-enabled org (read-only GETs,
+no writes). Findings that the Pages docs don't state:
 
 - **Auth**: a standard OAuth token with the `repo` scope works (200). The
   response carries `X-Accepted-Oauth-Scopes:` **empty** — no stack-specific
@@ -266,7 +266,7 @@ read-only GETs, no writes). Findings that the Pages docs don't state:
   2022-11-28`; no special version header or `Accept` media type needed
   (`application/json` works; `github.v3` returned).
 - **Rate limit**: the ordinary `core` bucket (5000/hr) — no separate pool.
-- **Enablement granularity**: the entire `example-org` org returned
+- **Enablement granularity**: the entire preview-enabled org returned
   `200` (every repo probed), suggesting org-level, not per-repo, enablement
   in practice — though the roadmap still describes it as per-repo.
 - **404 body cites a canonical docs path**: a disabled repo returns
@@ -295,7 +295,7 @@ read-only GETs, no writes). Findings that the Pages docs don't state:
 ### Write endpoints — verified live (2026-07-21)
 
 Exercised the write side end-to-end in a dedicated preview-enabled sandbox
-(`example-org/stacks-sandbox`), building a linear 3–4 PR stack via the
+repository, building a linear 3–4 PR stack via the
 Git Data + Pulls APIs, then driving the stack endpoints. Request bodies and
 behaviors, all confirmed against live responses:
 
@@ -399,7 +399,7 @@ Two catches for a tool:
 
 ### Stack behaviors — verified live (2026-07-21, sandbox)
 
-Ran a batch of edge-case probes in `example-org/stacks-sandbox`. All
+Ran a batch of edge-case probes in the sandbox repository. All
 directly shape a jjpr integration:
 
 - **Force-push / commit rewrite is tracked — per branch.** Amended a member
@@ -1624,7 +1624,7 @@ in `michaeldhopkins/forge-e2e-sandbox`.
 ### 2026-07-21 — Write API exercised; API merge is blocked for stacked PRs
 
 - Built and drove a real stack in a preview-enabled sandbox
-  (`example-org/stacks-sandbox`). Verified request bodies:
+  repository. Verified request bodies:
   `POST /stacks` and `POST /stacks/{n}/add` take
   `{"pull_requests": [bottom→top]}`; create returns `201`, the stack number
   comes from the repo's PR sequence.
@@ -1650,9 +1650,8 @@ in `michaeldhopkins/forge-e2e-sandbox`.
   token path (ureq + `Bearer`).
 - Still pending: a literal 200 from `/stacks` with a PAT, which needs a PAT
   scoped to a preview-enabled repo (none on hand — the tested PAT reaches only
-  personal repos, and `acme` requires org-approved access).
-- Added a reusable read-only probe at
-  `~/runner-scripts/github/stacks-pat-probe.sh` (reads `STACKS_PAT`, never
+  personal repos, and the preview org requires org-approved access).
+- Added a reusable read-only probe script (reads `STACKS_PAT`, never
   prints it).
 
 ### 2026-07-21 — Live API probe + jjpr read-only prototype

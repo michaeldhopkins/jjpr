@@ -1,7 +1,7 @@
 # Spec: multi-identity ownership (lazy)
 
 Status: **Tier 1 shipped in 0.33.0** — the login match (fixes the reported
-status label with no `/user/emails` fetch, verified in acme-app) plus the
+status label with no `/user/emails` fetch, verified on a real repository) plus the
 `owned()` email union (Identity/JjRunner plumbing, config `[identity]`, seeded
 in status + submit + merge). Remaining: Tier 2 lazy `/user/emails`
 auto-augmentation on a discovery miss; seeding the `watch` flow; command-level
@@ -43,7 +43,7 @@ that information, and caches it for the run.
 1. Login reclassification (status): after building the view, if a segment is
    foreign-by-email AND has a PR, fetch the authenticated login once and
    reclassify segments whose `pr.author.login ∈ logins` as yours. All-local →
-   never fetched. (Fixes the acme-app case — the merged PR's `author.login`
+   never fetched. (Fixes the reported case — the merged PR's `author.login`
    is already in hand from `find_merged_pr`.)
 2. Email augmentation (submit/watch/merge): discover with `owned()` = local +
    config; if that owns nothing but `::@ ~ trunk()` is non-empty, fetch

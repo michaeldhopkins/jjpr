@@ -94,7 +94,7 @@ fn status_shows_foreign_stack_that_mine_scoping_hides() {
     repo.run(&["bookmark", "set", "coworker-feat", "-r", "@"]);
 
     // Sit directly on the coworker's branch with an empty, unbookmarked working
-    // copy — exactly the acme situation.
+    // copy — exactly the reported situation.
     repo.run(&["new", "coworker-feat", "-m", "my empty top"]);
 
     let runner = JjRunner::new(repo.path().to_path_buf()).expect("runner");

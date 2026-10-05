@@ -526,11 +526,11 @@ mod tests {
         assert_eq!(warnings, vec!["feat@v2".to_string()]);
     }
 
-    /// Regression test for a false-positive "skipping" warning observed on
-    /// example-org/acme-app PR #1875: the bookmark had a healthy local
-    /// target plus a stale `@origin` target whose commit had been abandoned. The
-    /// unrenderable remote line must neither warn nor drop the bookmark; it does
-    /// mean the remote is not where the local bookmark is.
+    /// Regression test for a false-positive "skipping" warning observed on a
+    /// real PR: the bookmark had a healthy local target plus a stale `@origin`
+    /// target whose commit had been abandoned. The unrenderable remote line
+    /// must neither warn nor drop the bookmark; it does mean the remote is not
+    /// where the local bookmark is.
     #[test]
     fn an_unrenderable_remote_line_keeps_the_bookmark_unsynced_and_unwarned() {
         for output in [

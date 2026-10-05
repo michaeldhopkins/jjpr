@@ -1713,7 +1713,7 @@ mod tests {
         }
     }
 
-    /// The OmniFocus-reported case: two PRs were stacked, then rebased to
+    /// A reported case: two PRs were stacked, then rebased to
     /// be independent, and each re-submitted alone. The other PR is still
     /// open, so it is not history. The comment must go, not claim the
     /// other PR merged.
@@ -3370,7 +3370,7 @@ mod tests {
 
     // -- Live ordering --
 
-    /// New bottom-of-stack PR (real-world acme-app #1875 scenario):
+    /// New bottom-of-stack PR (real-world scenario):
     /// must render at position 0, not appended.
     #[test]
     fn test_classify_inserts_new_bottom_at_position_zero() {
@@ -3408,7 +3408,7 @@ mod tests {
         assert_eq!(names(&live_out), vec!["A", "B", "C"]);
     }
 
-    /// acme-app PR #1864 bug — every PR's comment must agree on the
+    /// Real-world PR #1864 bug — every PR's comment must agree on the
     /// canonical base→top order regardless of its individual previous data.
     #[test]
     fn test_classify_real_world_pr_1864_scenario() {
@@ -3624,11 +3624,11 @@ mod tests {
         );
     }
 
-    /// acme-app PR #1862's stale comment listed a merged predecessor
+    /// Real-world PR #1862's stale comment listed a merged predecessor
     /// (#1861) and a new base (#1875). Live list must follow current;
     /// fossil list contains M only.
     #[test]
-    fn test_classify_acme_app_1862_full_scenario() {
+    fn test_classify_real_world_pr_1862_full_scenario() {
         let current = vec![
             live("X", 1875),
             live("A", 1864),

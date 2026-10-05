@@ -507,7 +507,7 @@ Decisions taken:
 Full spec: `docs-dev/identity-ownership.md`. Shipped: `owned()` email-union
 discovery (`Identity`, `JjRunner::set_identity`), config `[identity]`, seeded in
 status/submit/merge, the Tier-1 login match that fixes the reported status label
-(verified in acme-app) with no `/user/emails` call, and Tier-2 lazy
+(verified on a real repository) with no `/user/emails` call, and Tier-2 lazy
 augmentation in `resolve_stack` (on an inference/analyze miss, fetch
 `get_authenticated_emails`, extend, retry once) plus an `[identity]`-pointing
 hint when a bookmark is present but unowned. Note: Tier 2 auto-fetch needs the
