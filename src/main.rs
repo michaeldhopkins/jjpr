@@ -30,7 +30,7 @@ use jjpr::jj::types::{Bookmark, BookmarkSegment, BranchStack};
 use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
 use jjpr::parallel;
-use jjpr::submit::{analyze, execute, plan, resolve};
+use jjpr::submit::{analyze, execute, plan, resolve, restack};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -188,6 +188,7 @@ struct ResolvedStack {
     segments: Vec<jjpr::jj::types::NarrowedSegment>,
     target_bookmark: String,
     stack_base: Option<String>,
+    before_fetch: Option<Vec<Bookmark>>,
 }
 
 /// Resolve the target stack: find repo, infer bookmark, fetch, resolve forge,
@@ -225,6 +226,8 @@ fn resolve_stack(
     // no-bookmark case below should report "no bookmark", not a forge error.
     let remotes = jj.get_git_remotes()?;
     let forge_result = resolve_forge(&remotes, &cfg, preferred_remote);
+    // Your bookmarks before the fetch: one it deletes may have merged (#10).
+    let before_fetch = (!no_fetch).then(|| jj.get_my_bookmarks().unwrap_or_default());
     if !no_fetch {
         jj.set_fetch_remote(forge_result.as_ref().ok().map(|f| f.remote_name.clone()));
         eprintln!("Fetching remotes...");
@@ -311,6 +314,7 @@ fn resolve_stack(
         segments,
         target_bookmark,
         stack_base,
+        before_fetch,
     }))
 }
 
@@ -366,47 +370,42 @@ fn cmd_submit(opts: SubmitOptions<'_>) -> Result<()> {
         return Ok(());
     };
 
-    // Pre-flight: check for conflicted commits before attempting any pushes
-    let conflicted: Vec<_> = stack
-        .segments
-        .iter()
-        .flat_map(|seg| {
-            seg.changes.iter().filter(|c| c.conflict).map(|c| {
-                (
-                    seg.bookmark.name.as_str(),
-                    c.change_id.as_str(),
-                    c.description_first_line.as_str(),
-                )
-            })
-        })
-        .collect();
-    if !conflicted.is_empty() {
-        eprintln!("Error: cannot push; some commits have unresolved conflicts:\n");
-        for (bookmark, change_id, desc) in &conflicted {
-            eprintln!("  {change_id} ({bookmark}): {desc}");
-        }
-        eprintln!();
-        eprintln!("To resolve: jj edit <change_id>, fix the conflicts, then re-run jjpr submit.");
-        anyhow::bail!("unresolved conflicts in stack");
-    }
-
+    let mut segments = stack.segments.clone();
+    restack::refuse_conflicts(&segments)?;
     let stack_base_override = opts.base_override.or(stack.stack_base.as_deref());
-    let submission_plan = plan::create_submission_plan(
-        stack.forge.as_ref(),
-        &stack.segments,
-        &stack.remote_name,
-        &stack.repo_info,
-        stack.forge_kind,
-        &stack.default_branch,
-        &plan::SubmitOptions {
-            draft_mode: opts.draft_mode,
-            reviewers: opts.reviewers,
-            reviewer_scope: opts.reviewer_scope,
-            stack_base: stack_base_override,
-            stack_nav: stack.config.stack_nav,
-            dry_run: opts.dry_run,
-        },
-    )?;
+    let make_plan = |segments: &[jjpr::jj::types::NarrowedSegment]| {
+        plan::create_submission_plan(
+            stack.forge.as_ref(),
+            segments,
+            &stack.remote_name,
+            &stack.repo_info,
+            stack.forge_kind,
+            &stack.default_branch,
+            &plan::SubmitOptions {
+                draft_mode: opts.draft_mode,
+                reviewers: opts.reviewers,
+                reviewer_scope: opts.reviewer_scope,
+                stack_base: stack_base_override,
+                stack_nav: stack.config.stack_nav,
+                dry_run: opts.dry_run,
+            },
+        )
+    };
+    let mut submission_plan = make_plan(&segments)?;
+    let before_fetch = stack.before_fetch.as_deref().unwrap_or_default();
+    let (jj, forge) = (&stack.jj, stack.forge.as_ref());
+    let foreign_base = stack_base_override.is_some();
+    if restack::restack_merged_base(
+        jj,
+        forge,
+        &submission_plan,
+        &segments,
+        before_fetch,
+        foreign_base,
+    )? {
+        segments = restack::rebuild_segments(jj, &stack.target_bookmark, &segments)?;
+        submission_plan = make_plan(&segments)?;
+    }
 
     if opts.bookmark.is_some() {
         println!("Submitting stack for '{}'...\n", stack.target_bookmark);

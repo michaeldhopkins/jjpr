@@ -34,6 +34,26 @@ When no bookmark is specified, jjpr infers the target from the working
 copy's position. It finds which stack overlaps `trunk()..@` and
 submits up to the topmost bookmark.
 
+## When the bottom of the stack was merged
+
+A PR squash- or rebase-merged on the forge (in its web UI, say) never
+puts its own commits in trunk: trunk gets new commits with the same
+content. Pushed as it stands, the PR above it would carry the merged
+work again. Before pushing, submit rebases that PR onto trunk, as
+`merge` does after a merge, and says so:
+
+```
+Rebasing 'top' onto main ('bottom' below it was merged)...
+```
+
+This works whether the forge kept the merged branch or deleted it, as
+long as submit's own fetch is the one that removes the bookmark. If an
+earlier `jj git fetch` already deleted it, jjpr cannot tell those
+commits were merged; rebase by hand with `jj rebase -s <oldest commit
+above trunk> -d main --skip-emptied`. `--dry-run` reports the rebase
+without doing it, and a stack on a foreign base or with `--base` is
+left alone.
+
 If pushing new commits to an already-approved PR whose base resets
 approvals on push (GitHub's "dismiss stale reviews", GitLab's "reset
 approvals on push", Forgejo's "dismiss stale approvals"), jjpr reports

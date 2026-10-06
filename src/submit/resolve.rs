@@ -35,6 +35,33 @@ pub fn resolve_bookmark_selections(
         .collect()
 }
 
+/// Narrow `segments` again after the stack was rewritten, keeping the bookmark
+/// chosen for each segment the first time, so a restack never asks twice.
+/// A segment with none of the earlier choices takes its first bookmark.
+pub fn narrow_like(
+    segments: &[BookmarkSegment],
+    previous: &[NarrowedSegment],
+) -> Result<Vec<NarrowedSegment>> {
+    let chosen: std::collections::HashSet<&str> =
+        previous.iter().map(|s| s.bookmark.name.as_str()).collect();
+    segments
+        .iter()
+        .map(|segment| {
+            let bookmark = segment
+                .bookmarks
+                .iter()
+                .find(|b| chosen.contains(b.name.as_str()))
+                .or_else(|| segment.bookmarks.first())
+                .ok_or_else(|| anyhow::anyhow!("segment has no bookmarks (internal error)"))?;
+            Ok(NarrowedSegment {
+                bookmark: bookmark.clone(),
+                changes: segment.changes.clone(),
+                merge_source_names: segment.merge_source_names.clone(),
+            })
+        })
+        .collect()
+}
+
 fn select_bookmark_interactive(bookmarks: &[Bookmark]) -> Result<Bookmark> {
     let names: Vec<&str> = bookmarks.iter().map(|b| b.name.as_str()).collect();
 
@@ -120,5 +147,35 @@ mod tests {
             merge_source_names: vec![],
         }];
         assert!(resolve_bookmark_selections(&segments, false).is_err());
+    }
+
+    #[test]
+    fn narrow_like_keeps_the_earlier_choice_and_defaults_to_the_first() {
+        let previous = resolve_bookmark_selections(
+            &[
+                segment(vec![bookmark("a"), bookmark("b")]),
+                segment(vec![bookmark("c")]),
+            ],
+            false,
+        )
+        .unwrap();
+        let mut previous = previous;
+        previous[0].bookmark = bookmark("b");
+        let again = narrow_like(
+            &[
+                segment(vec![bookmark("a"), bookmark("b")]),
+                segment(vec![bookmark("x"), bookmark("y")]),
+            ],
+            &previous,
+        )
+        .unwrap();
+        let names: Vec<&str> = again.iter().map(|s| s.bookmark.name.as_str()).collect();
+        assert_eq!(names, vec!["b", "x"]);
+        let empty = BookmarkSegment {
+            bookmarks: vec![],
+            changes: vec![],
+            merge_source_names: vec![],
+        };
+        assert!(narrow_like(&[empty], &previous).is_err());
     }
 }

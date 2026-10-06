@@ -133,6 +133,11 @@ impl JjTestRepo {
     pub fn path(&self) -> &Path {
         self.repo_dir.path()
     }
+
+    /// The bare repository standing in for the forge's remote.
+    pub fn origin_path(&self) -> &Path {
+        self._origin_dir.path()
+    }
 }
 
 fn run_cmd(program: &str, args: &[&str], dir: &Path) {

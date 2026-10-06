@@ -39,6 +39,14 @@ pub trait Jj: Send + Sync {
     /// Rebase the subtree rooted at `source` onto `destination`.
     /// Runs `jj rebase -s <source> -d <destination>`.
     fn rebase_onto(&self, source: &str, destination: &str) -> Result<()>;
+    /// [`Jj::rebase_onto`] with `--skip-emptied`: a commit the rebase leaves
+    /// empty is abandoned. Restacking a survivor whose merged base was squashed
+    /// into trunk drops the merged commits this way. Stubs that never restack
+    /// need not implement it.
+    fn rebase_onto_skipping_emptied(&self, source: &str, destination: &str) -> Result<()> {
+        let _ = (source, destination);
+        anyhow::bail!("rebase_onto_skipping_emptied is not implemented here")
+    }
     /// Create a merge commit combining `bookmark` and `dest`, then move the
     /// bookmark to it. Used for merge-based reconciliation (avoids force pushes).
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()>;

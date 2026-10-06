@@ -291,6 +291,12 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn rebase_onto_skipping_emptied(&self, source: &str, destination: &str) -> Result<()> {
+        let args = ["rebase", "-s", source, "-d", destination, "--skip-emptied"];
+        self.run_stack_op(source, &args)?;
+        Ok(())
+    }
+
     fn is_rooted_in(&self, root: &str, base: &str) -> Result<bool> {
         // Parents of `root` that are NOT ancestors of `base`. Empty ⇒ every
         // parent is already under `base`, so the subtree sits cleanly on it.
