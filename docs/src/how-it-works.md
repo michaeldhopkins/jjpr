@@ -131,13 +131,16 @@ the fresher of the two.
 needs the other's answer. The stack graph waits for the fetch, because the
 fetch decides where trunk is.
 
-The fetch must reach the forge's remote: if that fails, the command stops.
-Every other remote is fetched separately, since trunk can live on one of
-them, but one that cannot be reached only prints a warning, so a mirror or
-backup remote that is offline does not stop a submit. When jjpr cannot tell
-which remote is the forge's (two forge remotes and no `--remote`), it
-fetches every remote at once and any failure stops it. `--no-fetch` skips
-the fetch entirely.
+```
+Fetching remotes...
+  Warning: could not fetch remote 'backup'; continuing without it.
+```
+
+jjpr fetches the forge's remote first and stops if that fails. It then
+fetches each other remote on its own, since trunk can live on one of them,
+and warns about any it cannot reach. When jjpr cannot tell which remote is
+the forge's (two forge remotes and no `--remote`), it fetches all remotes
+in one call and stops on any failure. `--no-fetch` skips the fetch.
 
 ## What jjpr never does
 

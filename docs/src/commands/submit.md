@@ -34,25 +34,24 @@ When no bookmark is specified, jjpr infers the target from the working
 copy's position. It finds which stack overlaps `trunk()..@` and
 submits up to the topmost bookmark.
 
-## When the bottom of the stack was merged
-
-A PR squash- or rebase-merged on the forge (in its web UI, say) never
-puts its own commits in trunk: trunk gets new commits with the same
-content. Pushed as it stands, the PR above it would carry the merged
-work again. Before pushing, submit rebases that PR onto trunk, as
-`merge` does after a merge, and says so:
+## PRs merged on the forge
 
 ```
 Rebasing 'top' onto main ('bottom' below it was merged)...
 ```
 
-This works whether the forge kept the merged branch or deleted it, as
-long as submit's own fetch is the one that removes the bookmark. If an
-earlier `jj git fetch` already deleted it, jjpr cannot tell those
-commits were merged; rebase by hand with `jj rebase -s <oldest commit
-above trunk> -d main --skip-emptied`. `--dry-run` reports the rebase
-without doing it, and a stack on a foreign base or with `--base` is
-left alone.
+When a PR in the stack was squash- or rebase-merged on the forge,
+submit rebases the PR above it onto trunk before pushing, so it does
+not carry the merged commits. This needs submit's own fetch to be the
+one that removes the merged bookmark; if a separate `jj git fetch`
+removed it first, rebase by hand:
+
+```
+jj rebase -s <oldest commit above trunk> -d main --skip-emptied
+```
+
+`--dry-run` reports the rebase without running it. A stack on a
+foreign base or given `--base` is not rebased.
 
 If pushing new commits to an already-approved PR whose base resets
 approvals on push (GitHub's "dismiss stale reviews", GitLab's "reset
@@ -279,14 +278,10 @@ submit to inherit fossil metadata (PR numbers, merge timestamps) for
 PRs whose local bookmarks have been cleaned up. Don't edit it; jjpr
 rewrites the whole comment on every submit.
 
-Only a merged PR is history. If a bookmark from the previous comment
-is gone from the local graph, jjpr asks the forge whether its PR
-merged before filing it under the history block. Any other PR drops
-off the list: an open one was rebased out of the stack, and one closed
-without merging was abandoned or folded into another PR, so a link to
-it would lead nowhere useful. When that leaves a single live PR with no
-history, jjpr deletes
-the comment (or strips the section from the description in
+When a bookmark from the previous comment is gone from the local
+graph, jjpr asks the forge whether its PR merged. A PR that did not
+merge (rebased out of the stack, or closed) drops off the list. When
+that leaves a single live PR with no history, jjpr deletes the comment (or strips the section from the description in
 `stack_nav = "description"` mode), so an unstacked PR looks like any
 other PR again. Submit only touches the PRs in the stack it was given,
 so after splitting a stack into independent PRs, submit each one to
