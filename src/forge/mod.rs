@@ -3,6 +3,7 @@ pub mod forgejo;
 pub mod github;
 pub mod gitlab;
 pub mod http;
+pub mod merged;
 pub mod remote;
 pub mod status;
 #[cfg(test)]
@@ -215,6 +216,14 @@ pub trait Forge: Send + Sync {
     }
 
     fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>>;
+
+    /// The most recently updated merged PRs, one page of them, newest first.
+    /// Submit matches their head commits against the commits below a stack to
+    /// find a merged base whose bookmark is already gone (see [`merged`]).
+    /// Defaults to none, so stubs need no override.
+    fn list_recently_merged_prs(&self, _owner: &str, _repo: &str) -> Result<Vec<PullRequest>> {
+        Ok(Vec::new())
+    }
 
     fn merge_pr(&self, owner: &str, repo: &str, number: u64, method: MergeMethod) -> Result<()>;
 

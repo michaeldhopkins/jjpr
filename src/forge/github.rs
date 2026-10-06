@@ -443,12 +443,10 @@ impl Forge for GitHubForge {
     }
 
     fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>> {
-        let encoded_head = super::http::url_encode(head);
-        let path = format!("repos/{owner}/{repo}/pulls?head={owner}:{encoded_head}&state=closed");
-        let output = self.client.get(&path)?;
-        let prs: Vec<PullRequest> =
-            serde_json::from_value(output).context("failed to parse closed PR list response")?;
-        Ok(prs.into_iter().find(|pr| pr.merged_at.is_some()))
+        super::merged::github_by_head(&self.client, owner, repo, head)
+    }
+    fn list_recently_merged_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>> {
+        super::merged::github(&self.client, owner, repo)
     }
 
     fn get_authenticated_user(&self) -> Result<String> {
@@ -1612,5 +1610,33 @@ mod tests {
                 "GET /repos/o/r/pulls/7/reviews?per_page=100"
             ]
         );
+    }
+
+    /// Issue #10: the merged PRs below a stack are found by head commit, so the
+    /// list is the newest closed PRs, one page, keeping only the merged ones.
+    #[test]
+    fn list_recently_merged_prs_keeps_the_merged_closed_prs_with_their_heads() {
+        let pr = |number: u64, sha: &str, merged: bool| {
+            serde_json::json!({
+                "number": number, "html_url": "", "title": "t", "body": null,
+                "base": {"ref": "main", "label": "o:main", "sha": "b"},
+                "head": {"ref": "feat", "label": "o:feat", "sha": sha},
+                "merged_at": if merged { serde_json::json!("2026-10-05T00:00:00Z") } else { serde_json::Value::Null },
+            })
+        };
+        let path = "/repos/o/r/pulls?state=closed&sort=updated&direction=desc&per_page=100";
+        let body = serde_json::json!([pr(1, "aaa", false), pr(2, "bbb", true)]);
+        let server = StubServer::start(vec![route("GET", path, 200, &body.to_string())]);
+
+        let prs = stub_forge(&server)
+            .list_recently_merged_prs("o", "r")
+            .expect("list");
+
+        let heads: Vec<(u64, &str)> = prs
+            .iter()
+            .map(|p| (p.number, p.head.sha.as_str()))
+            .collect();
+        assert_eq!(heads, vec![(2, "bbb")]);
+        assert_eq!(server.request_lines(), vec![format!("GET {path}")]);
     }
 }

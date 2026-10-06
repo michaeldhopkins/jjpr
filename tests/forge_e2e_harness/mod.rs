@@ -67,6 +67,10 @@ pub trait ForgeTestDriver: Send + Sync {
     /// Land the request, bypassing required reviews. `method` selects the
     /// merge strategy where the forge supports it.
     fn admin_merge(&self, number: u64, method: MergeMethod);
+    /// Squash-land the request and have the forge delete its branch, as its
+    /// "delete branch on merge" option does. That path matters: a forge may
+    /// retarget the PRs based on the branch only when the merge deletes it.
+    fn admin_squash_deleting_branch(&self, number: u64);
     /// Turn on "dismiss stale approvals on push" for `branch` (a prefixed,
     /// throwaway branch — never `main`). Must be paired with `remove_protection`
     /// in teardown so no standing protection is left on the shared repo.

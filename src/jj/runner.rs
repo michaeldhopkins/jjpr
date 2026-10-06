@@ -291,6 +291,11 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn abandon(&self, revset: &str) -> Result<()> {
+        self.run_stack_op(revset, &["abandon", revset])?;
+        Ok(())
+    }
+
     fn rebase_onto_skipping_emptied(&self, source: &str, destination: &str) -> Result<()> {
         let args = ["rebase", "-s", source, "-d", destination, "--skip-emptied"];
         self.run_stack_op(source, &args)?;

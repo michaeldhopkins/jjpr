@@ -23,9 +23,20 @@ use jjpr::jj::types::{Bookmark, NarrowedSegment};
 use jjpr::submit::{analyze, plan, resolve, restack};
 
 /// Reports the named branches as merged; every other branch has no PR.
+/// `recent` is what it lists as recently merged, and `None` makes that
+/// listing fail.
 struct MergedForge {
     merged: Vec<&'static str>,
     lookups: Mutex<Vec<String>>,
+    recent: Option<Vec<PullRequest>>,
+}
+
+/// A merged PR from `head` at commit `sha` into `base`.
+fn merged_at(head: &str, sha: &str, base: &str) -> PullRequest {
+    let mut merged = pr(1, head);
+    merged.head.sha = sha.to_string();
+    merged.base.ref_name = base.to_string();
+    merged
 }
 
 fn pr(number: u64, head: &str) -> PullRequest {
@@ -56,7 +67,18 @@ impl Forge for MergedForge {
     }
     fn find_merged_pr(&self, _: &str, _: &str, head: &str) -> Result<Option<PullRequest>> {
         self.lookups.lock().unwrap().push(head.to_string());
-        Ok(self.merged.contains(&head).then(|| pr(1, head)))
+        let known = self
+            .recent
+            .iter()
+            .flatten()
+            .find(|p| p.head.ref_name == head)
+            .cloned();
+        Ok(known.or_else(|| self.merged.contains(&head).then(|| pr(1, head))))
+    }
+    fn list_recently_merged_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
+        self.recent
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("HTTP 502 from the forge"))
     }
     fn create_pr(
         &self,
@@ -235,6 +257,7 @@ fn deleted_merged_bottom_is_dropped_from_the_survivor() {
     let forge = MergedForge {
         merged: vec!["bottom"],
         lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
     };
     let plan = plan_for(&forge, &segments, false);
     let rewrote =
@@ -278,6 +301,7 @@ fn kept_merged_bottom_rebases_the_survivor_onto_trunk() {
     let forge = MergedForge {
         merged: vec!["bottom"],
         lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
     };
     let plan = plan_for(&forge, &segments, false);
     assert_eq!(plan.bookmarks_already_merged.len(), 1);
@@ -310,10 +334,12 @@ fn restack_leaves_the_stack_alone_when_it_should() {
     let merged = MergedForge {
         merged: vec!["bottom"],
         lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
     };
     let unmerged = MergedForge {
         merged: vec![],
         lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
     };
 
     let dry = plan_for(&merged, &segments, true);
@@ -357,6 +383,7 @@ fn merge_commit_landing_needs_no_restack() {
     let forge = MergedForge {
         merged: vec!["bottom"],
         lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
     };
     let plan = plan_for(&forge, &segments, false);
     let names: Vec<&str> = segments.iter().map(|s| s.bookmark.name.as_str()).collect();
@@ -382,10 +409,246 @@ fn a_restack_that_conflicts_is_refused_before_pushing() {
     let forge = MergedForge {
         merged: vec!["bottom"],
         lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
     };
     let plan = plan_for(&forge, &segments, false);
 
     assert!(restack::restack_merged_base(&jj, &forge, &plan, &segments, &before, false).unwrap());
     let err = restack::rebuild_segments(&jj, "top", &segments).unwrap_err();
     assert!(err.to_string().contains("unresolved conflicts"), "{err}");
+}
+
+/// `bottom`'s full commit id, then a plain `jj git fetch` outside jjpr: the
+/// fetch deletes the bookmark, and submit's own fetch has nothing to notice.
+fn fetched_outside_jjpr(repo: &common::JjTestRepo) -> String {
+    let sha = repo.run_jj(&["log", "--no-graph", "-r", "bottom", "-T", "commit_id"]);
+    repo.run_jj(&["git", "fetch"]);
+    sha
+}
+
+/// Commits outside trunk, by description, so a leftover merged commit shows.
+fn off_trunk(repo: &common::JjTestRepo) -> String {
+    repo.run_jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "all() ~ ::trunk()",
+        "-T",
+        "description.first_line() ++ \"\\n\"",
+    ])
+}
+
+/// The owner's question on #10: an earlier `jj git fetch` already deleted
+/// `bottom`, so no bookmark vanished during submit. The forge still knows the
+/// merged PR's head commit, and that commit is below `top`.
+#[test]
+fn a_bookmark_deleted_by_an_earlier_fetch_is_found_by_its_head_commit() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = stack_with_squash_merged_bottom(true);
+    let sha = fetched_outside_jjpr(&repo);
+    let mut jj = repo.runner();
+    jj.set_fetch_remote(Some("origin".to_string()));
+    let before = jj.get_my_bookmarks().unwrap();
+    jj.git_fetch().unwrap();
+    let segments = segments_for(&jj, "top");
+    assert_eq!(
+        top_pr_commits(&repo),
+        vec!["Add top", "Add bottom"],
+        "the bug"
+    );
+    let forge = MergedForge {
+        merged: vec![],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
+    };
+    let plan = plan_for(&forge, &segments, false);
+
+    let rewrote =
+        restack::restack_merged_base(&jj, &forge, &plan, &segments, &before, false).unwrap();
+
+    assert!(rewrote);
+    assert_eq!(top_pr_commits(&repo), vec!["Add top"]);
+    let stray = off_trunk(&repo);
+    assert!(
+        !stray.contains("Add bottom\n"),
+        "merged commit abandoned: {stray}"
+    );
+    assert!(stray.contains("Add top"), "{stray}");
+    let rebuilt = restack::rebuild_segments(&jj, "top", &segments).unwrap();
+    assert_eq!(rebuilt[0].changes.len(), 1);
+}
+
+/// The forge squashed a different `bottom.rs` than was pushed (a reviewer's
+/// suggestion applied on merge). Knowing which commit merged, jjpr moves only
+/// `top`'s own commits, so nothing conflicts.
+#[test]
+fn a_merge_that_changed_the_content_still_restacks_cleanly_by_head_commit() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = squash_merged_stack(true, "// bottom, as reviewed\n");
+    let sha = fetched_outside_jjpr(&repo);
+    let jj = repo.runner();
+    let segments = segments_for(&jj, "top");
+    let forge = MergedForge {
+        merged: vec![],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
+    };
+    let plan = plan_for(&forge, &segments, false);
+
+    assert!(restack::restack_merged_base(&jj, &forge, &plan, &segments, &[], false).unwrap());
+
+    let rebuilt = restack::rebuild_segments(&jj, "top", &segments).expect("no conflict");
+    assert_eq!(rebuilt[0].changes.len(), 1);
+    assert_eq!(top_pr_commits(&repo), vec!["Add top"]);
+}
+
+/// Nothing to act on: the forge's listing fails, the head commit merged into
+/// another branch rather than trunk, or no merged PR has that head. Each leaves
+/// the stack as it was.
+#[test]
+fn an_unconfirmed_head_commit_leaves_the_stack_alone() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = stack_with_squash_merged_bottom(true);
+    let sha = fetched_outside_jjpr(&repo);
+    let jj = repo.runner();
+    let segments = segments_for(&jj, "top");
+    for recent in [
+        None,
+        Some(vec![merged_at("bottom", sha.trim(), "release")]),
+        Some(vec![merged_at("bottom", "0123456789ab", "main")]),
+    ] {
+        let forge = MergedForge {
+            merged: vec![],
+            lookups: Mutex::new(vec![]),
+            recent,
+        };
+        let plan = plan_for(&forge, &segments, false);
+        assert!(!restack::restack_merged_base(&jj, &forge, &plan, &segments, &[], false).unwrap());
+    }
+    assert_eq!(top_pr_commits(&repo), vec!["Add top", "Add bottom"]);
+}
+
+/// A dry run finds the merged head commit and reports, but rewrites nothing.
+#[test]
+fn a_dry_run_reports_a_merged_head_commit_without_rebasing() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = stack_with_squash_merged_bottom(true);
+    let sha = fetched_outside_jjpr(&repo);
+    let jj = repo.runner();
+    let segments = segments_for(&jj, "top");
+    let forge = MergedForge {
+        merged: vec![],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
+    };
+    let plan = plan_for(&forge, &segments, true);
+    assert!(!restack::restack_merged_base(&jj, &forge, &plan, &segments, &[], false).unwrap());
+    assert_eq!(top_pr_commits(&repo), vec!["Add top", "Add bottom"]);
+}
+
+/// Submit's own fetch deletes `bottom`, and the forge's merged PR for it has
+/// the pushed commit as its head: the same precise move as above, so a
+/// reviewed version landed on trunk does not conflict either.
+#[test]
+fn a_bookmark_submit_deleted_with_a_matching_head_restacks_without_conflict() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = squash_merged_stack(true, "// bottom, as reviewed\n");
+    let sha = repo.run_jj(&["log", "--no-graph", "-r", "bottom", "-T", "commit_id"]);
+    let mut jj = repo.runner();
+    jj.set_fetch_remote(Some("origin".to_string()));
+    let before = jj.get_my_bookmarks().unwrap();
+    jj.git_fetch().unwrap();
+    let segments = segments_for(&jj, "top");
+    let forge = MergedForge {
+        merged: vec![],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
+    };
+    let plan = plan_for(&forge, &segments, false);
+
+    assert!(restack::restack_merged_base(&jj, &forge, &plan, &segments, &before, false).unwrap());
+
+    assert!(
+        forge
+            .lookups
+            .lock()
+            .unwrap()
+            .contains(&"bottom".to_string())
+    );
+    restack::rebuild_segments(&jj, "top", &segments).expect("no conflict");
+    assert_eq!(top_pr_commits(&repo), vec!["Add top"]);
+    assert!(!off_trunk(&repo).contains("Add bottom\n"));
+}
+
+/// Three stacked PRs; the forge squash-merged the bottom two, keeping `a`'s
+/// branch and deleting `b`'s. A plain fetch then folds `b`'s commit into
+/// `c`'s segment. The kept `a` alone would move `c` from just above `a`,
+/// carrying `b` along, so the forge is asked about `b` too.
+#[test]
+fn a_deleted_merged_middle_above_a_kept_merged_bottom_is_dropped() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = common::JjTestRepo::new();
+    repo.commit_and_bookmark("a.rs", "// a\n", "Add a", "a");
+    repo.commit_and_bookmark("b.rs", "// b\n", "Add b", "b");
+    repo.commit_and_bookmark("c.rs", "// c\n", "Add c", "c");
+    let mut push =
+        jjpr::jj::version::push_new_bookmark_args(jjpr::jj::version::installed_jj_version())
+            .to_vec();
+    push.extend(["git", "push", "--remote", "origin"]);
+    push.extend(["--bookmark", "a", "--bookmark", "b", "--bookmark", "c"]);
+    repo.run_jj(&push);
+    let b_sha = repo.run_jj(&["log", "--no-graph", "-r", "b", "-T", "commit_id"]);
+
+    let forge_side = tempfile::TempDir::new().unwrap();
+    let origin = repo.origin_path().to_str().unwrap().to_string();
+    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
+    let clone = forge_side.path().join("clone");
+    run(
+        &clone,
+        "jj",
+        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
+    );
+    run(&clone, "jj", &["new", "main"]);
+    std::fs::write(clone.join("a.rs"), "// a\n").unwrap();
+    run(&clone, "jj", &["commit", "-m", "Add a (#1)"]);
+    std::fs::write(clone.join("b.rs"), "// b\n").unwrap();
+    run(&clone, "jj", &["commit", "-m", "Add b (#2)"]);
+    run(&clone, "jj", &["bookmark", "set", "main", "-r", "@-"]);
+    run(&clone, "jj", &["git", "push", "--bookmark", "main"]);
+    run(repo.origin_path(), "git", &["branch", "-D", "b"]);
+    repo.run_jj(&["git", "fetch"]);
+
+    let jj = repo.runner();
+    let segments = segments_for(&jj, "c");
+    let forge = MergedForge {
+        merged: vec!["a"],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![merged_at("b", b_sha.trim(), "main")]),
+    };
+    let plan = plan_for(&forge, &segments, false);
+    assert_eq!(plan.bookmarks_already_merged.len(), 1, "a is found by name");
+
+    assert!(restack::restack_merged_base(&jj, &forge, &plan, &segments, &[], false).unwrap());
+
+    let carried = repo.run_jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "trunk()..c",
+        "-T",
+        "description.first_line() ++ \"\\n\"",
+    ]);
+    assert_eq!(carried, "Add c\n");
 }

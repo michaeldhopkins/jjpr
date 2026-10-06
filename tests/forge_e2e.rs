@@ -484,3 +484,81 @@ fn divergent_change_refuses_before_pushing_all_forges() {
         eprintln!("=== {name}: divergence refusal OK ===");
     }
 }
+
+/// Issue #10 against each real forge: the bottom PR of a stack is squash-merged
+/// on the forge and its branch deleted, then a plain `jj git fetch` (not
+/// jjpr's) deletes the bookmark, leaving nothing local to say those commits
+/// merged. `jjpr submit` must still find the merged PR by its head commit,
+/// rebase the survivor onto trunk, and push it without the merged commits.
+#[test]
+fn out_of_band_squash_merge_restacks_after_a_plain_fetch_all_forges() {
+    let drivers = configured_drivers();
+    if drivers.is_empty() {
+        return;
+    }
+    if !forge_e2e_harness::tool_available("jj") {
+        return;
+    }
+
+    for driver in drivers {
+        let name = driver.name();
+        eprintln!("=== out-of-band squash: {name} ===");
+        let ctx = ForgeE2eContext::new(driver);
+        // Two commits in the bottom, so the squash rewrites history on every
+        // forge (a single-commit squash can fast-forward on GitLab and Forgejo).
+        let p = ctx.prefix.clone();
+        ctx.commit_bookmark("obbot", "ob1.txt", &format!("ob base one {p}"));
+        ctx.commit_bookmark("obbot", "ob2.txt", &format!("ob base two {p}"));
+        ctx.commit_bookmark("obtop", "obtop.txt", &format!("ob leaf {p}"));
+        let top = ctx.prefixed("obtop");
+        let out = ctx.run_jjpr(&["submit", &top]);
+        assert!(
+            out.status.success(),
+            "{name}: first submit: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bottom_pr = find_pr(&ctx, "obbot");
+        let top_pr = find_pr(&ctx, "obtop");
+        let pushed_top = ctx.driver.request_head_sha(top_pr);
+
+        ctx.driver.admin_squash_deleting_branch(bottom_pr);
+        assert_eq!(ctx.driver.request_state(bottom_pr), "merged", "{name}");
+        ctx.run_jj(&["git", "fetch"]);
+        let bottom = ctx.prefixed("obbot");
+        let left = ctx.run_jj(&["bookmark", "list", &bottom]);
+        assert!(
+            left.trim().is_empty(),
+            "{name}: the plain fetch deleted it: {left}"
+        );
+
+        let out = ctx.run_jjpr(&["submit", &top]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{name}: second submit: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stdout.contains(&format!("Rebasing '{top}' onto main")),
+            "{name}: {stdout}"
+        );
+        let carried = ctx.run_jj(&[
+            "log",
+            "--no-graph",
+            "-r",
+            &format!("trunk()..{top}"),
+            "-T",
+            "description.first_line() ++ \"\\n\"",
+        ]);
+        assert_eq!(carried.trim(), format!("ob leaf {p}"), "{name}");
+        let local = ctx.run_jj(&["log", "--no-graph", "-r", &top, "-T", "commit_id"]);
+        let open_top = find_pr(&ctx, "obtop");
+        let remote = poll_head_sha(&ctx, open_top, &pushed_top, true);
+        assert_eq!(
+            remote,
+            local.trim(),
+            "{name}: the survivor's PR got the rebase"
+        );
+        eprintln!("=== {name}: out-of-band squash OK ===");
+    }
+}

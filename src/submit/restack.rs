@@ -6,17 +6,22 @@
 //! whose diff re-includes the merged work. `merge` and `watch` rebase the
 //! survivor after merging; this gives `submit` the same step (issue #10).
 //!
-//! Two shapes reach submit:
+//! What says a commit below the survivor merged, strongest first:
 //!
-//! - The merged bookmark still exists (the forge kept the branch). The plan's
-//!   merged check finds it, and the first live segment is rebased onto trunk.
-//! - The fetch deleted the merged bookmark (the forge deleted the branch). Its
-//!   commits stay below the survivor, now unbookmarked, and would be pushed
-//!   with it. jjpr notes which of your bookmarks the fetch removed, asks the
-//!   forge whether each merged, and rebases everything between trunk and the
-//!   survivor with `--skip-emptied`: the merged commits become empty on top of
-//!   trunk and are dropped. A bookmark deleted by a fetch outside jjpr leaves
-//!   nothing to compare against, so that case is not detected.
+//! - The merged bookmark still exists (the forge kept the branch), and the
+//!   plan's merged check found it.
+//! - The forge reports a PR merged into trunk whose head is that very commit.
+//!   This needs no local history, so it works however the bookmark was lost:
+//!   submit's own fetch, an earlier `jj git fetch`, or a fresh clone. It is
+//!   asked whenever no deleted bookmark already names its exact commit.
+//! - Submit's fetch deleted a bookmark whose PR merged from a different commit
+//!   (the forge rewrote it before merging). Which commits landed is unknown, so
+//!   everything from trunk up is rebased with `--skip-emptied`, dropping what
+//!   the rebase empties.
+//!
+//! With a known merged commit, only the commits above it move onto trunk, so
+//! the merged content cannot conflict, and the merged commits left behind are
+//! abandoned unless something else of yours still builds on them.
 
 use std::collections::HashSet;
 
@@ -24,6 +29,7 @@ use anyhow::{Context, Result};
 
 use super::plan::SubmissionPlan;
 use crate::forge::Forge;
+use crate::forge::merged::{branch_name, merged_from};
 use crate::jj::Jj;
 use crate::jj::types::{Bookmark, LogEntry, NarrowedSegment};
 use crate::merge::execute::rebase_root;
@@ -35,9 +41,35 @@ pub struct Restack {
     pub bookmark: String,
     /// Change id handed to `jj rebase -s`.
     pub root: String,
-    /// Whether the rebase drops commits it empties: merged commits whose
-    /// bookmark the fetch deleted sit below the survivor.
+    /// Whether the rebase drops commits it empties: the fallback when it is
+    /// not known which commits merged.
     pub skip_emptied: bool,
+    /// The merged head commit whose unbookmarked commits, from trunk up, are
+    /// abandoned once the survivor no longer sits on them.
+    pub abandon: Option<String>,
+}
+
+/// What [`plan_restack`] decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decision {
+    /// Nothing below the survivor merged; leave the stack alone.
+    Leave,
+    Rebase(Restack),
+    /// Something below merged, but the commits between it and the survivor are
+    /// not a single line, so which to move is unclear.
+    CannotTell,
+}
+
+/// Commits below the first live segment's bookmark that merged on the forge.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MergedBelow {
+    /// Head commits of PRs merged into trunk: they and everything under them
+    /// down to trunk landed.
+    pub heads: HashSet<String>,
+    /// Commits whose deleted bookmark's PR merged from a different commit.
+    pub rewritten: HashSet<String>,
+    /// The merged branches, for the message.
+    pub names: Vec<String>,
 }
 
 /// The first segment the plan did not find merged, with its index.
@@ -66,30 +98,121 @@ pub fn vanished_in_stack(
         .collect()
 }
 
-/// Decide the restack, if any. `merged` names segments the plan found merged
-/// with their bookmark still present; `vanished_merged` holds the commit ids of
-/// merged bookmarks the fetch deleted; `ancestry` is the first live segment's
+/// Decide the restack. `merged` names segments the plan found merged with
+/// their bookmark still present; `ancestry` is the first live segment's
 /// `trunk()..` range, newest first. Only the first live segment is rebased:
 /// `jj rebase -s` carries everything above it along.
 pub fn plan_restack(
     segments: &[NarrowedSegment],
     merged: &HashSet<&str>,
-    vanished_merged: &HashSet<&str>,
+    below: &MergedBelow,
     ancestry: &[LogEntry],
-) -> Option<Restack> {
-    let (idx, live) = first_live(segments, merged)?;
-    let skip_emptied = ancestry
-        .iter()
-        .any(|c| vanished_merged.contains(c.commit_id.as_str()));
-    let root = match ancestry.last() {
-        Some(oldest) if skip_emptied => oldest.change_id.clone(),
-        _ => rebase_root(live).to_string(),
+) -> Decision {
+    let Some((idx, live)) = first_live(segments, merged) else {
+        return Decision::Leave;
     };
-    (skip_emptied || idx > 0).then(|| Restack {
-        bookmark: live.bookmark.name.clone(),
-        root,
-        skip_emptied,
-    })
+    let kept: HashSet<&str> = segments[..idx]
+        .iter()
+        .map(|s| s.bookmark.commit_id.as_str())
+        .collect();
+    // ancestry[0] is the survivor's own tip; a merged base sits below it.
+    let is_head =
+        |c: &LogEntry| kept.contains(c.commit_id.as_str()) || below.heads.contains(&c.commit_id);
+    let head = ancestry.iter().skip(1).position(is_head).map(|i| i + 1);
+    let rewritten = ancestry
+        .iter()
+        .skip(1)
+        .position(|c| below.rewritten.contains(&c.commit_id))
+        .map(|i| i + 1);
+    let restack = |root: String, skip_emptied: bool, abandon: Option<String>| {
+        Decision::Rebase(Restack {
+            bookmark: live.bookmark.name.clone(),
+            root,
+            skip_emptied,
+            abandon,
+        })
+    };
+    match (head, rewritten) {
+        (_, Some(r)) if head.is_none_or(|h| r < h) => match ancestry.last() {
+            Some(oldest) => restack(oldest.change_id.clone(), true, None),
+            None => Decision::Leave,
+        },
+        (Some(h), _) => {
+            let (child, merged_head) = (&ancestry[h - 1], &ancestry[h]);
+            let id = &merged_head.commit_id;
+            if child.parents.len() != 1 || &child.parents[0] != id {
+                return Decision::CannotTell;
+            }
+            let abandon = (!kept.contains(id.as_str())).then(|| id.clone());
+            restack(child.change_id.clone(), false, abandon)
+        }
+        _ if idx > 0 => restack(rebase_root(live).to_string(), false, None),
+        _ => Decision::Leave,
+    }
+}
+
+/// The commits to abandon below a merged `head` once the survivor has moved
+/// off it: everything from trunk up to `head`, except what a bookmark, the
+/// working copy or another line of work still stands on.
+pub fn abandon_revset(head: &str) -> String {
+    let landed = format!(r#"(trunk().."{head}")"#);
+    format!("{landed} ~ ::((visible_heads() ~ {landed}) | bookmarks() | @)")
+}
+
+/// Find what merged below the first live segment: bookmarks submit's fetch
+/// deleted whose PR merged, then, unless one of those named its exact commit,
+/// recently merged PRs whose head is a commit below the segment's tip.
+fn find_merged_below(
+    jj: &dyn Jj,
+    forge: &dyn Forge,
+    plan: &SubmissionPlan,
+    live: &NarrowedSegment,
+    ancestry: &[LogEntry],
+    before_fetch: &[Bookmark],
+) -> Result<MergedBelow> {
+    let (owner, repo) = (&plan.repo_info.owner, &plan.repo_info.repo);
+    let mut found = MergedBelow::default();
+    if !before_fetch.is_empty() {
+        let after: HashSet<String> = jj.get_my_bookmarks()?.into_iter().map(|b| b.name).collect();
+        for gone in vanished_in_stack(before_fetch, &after, ancestry) {
+            match forge.find_merged_pr(owner, repo, &gone.name) {
+                Ok(Some(pr)) => {
+                    let exact =
+                        !gone.commit_id.is_empty() && pr.head.sha.starts_with(&gone.commit_id);
+                    let into = if exact {
+                        &mut found.heads
+                    } else {
+                        &mut found.rewritten
+                    };
+                    into.insert(gone.commit_id);
+                    found.names.push(gone.name);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "  Warning: could not check merged status for '{}': {e}",
+                    gone.name
+                ),
+            }
+        }
+    }
+    if !found.heads.is_empty() || ancestry.len() < 2 {
+        return Ok(found);
+    }
+    match forge.list_recently_merged_prs(owner, repo) {
+        Ok(prs) => {
+            for commit in &ancestry[1..] {
+                if let Some(pr) = merged_from(&prs, &commit.commit_id, &plan.default_branch) {
+                    found.heads.insert(commit.commit_id.clone());
+                    found.names.push(branch_name(pr, plan.forge_kind));
+                }
+            }
+        }
+        Err(e) => eprintln!(
+            "  Warning: could not check whether a PR below '{}' was merged: {e}",
+            live.bookmark.name
+        ),
+    }
+    Ok(found)
 }
 
 /// Rebase the survivor of an out-of-band merge onto trunk. Returns whether the
@@ -112,40 +235,32 @@ pub fn restack_merged_base(
     let Some((idx, live)) = first_live(segments, &merged).filter(|_| !foreign_base) else {
         return Ok(false);
     };
-    let mut merged_names: Vec<String> = segments[..idx]
+    let ancestry = jj.get_changes_to_commit(&live.bookmark.commit_id)?;
+    let mut below = find_merged_below(jj, forge, plan, live, &ancestry, before_fetch)?;
+    let mut names: Vec<String> = segments[..idx]
         .iter()
         .map(|s| s.bookmark.name.clone())
         .collect();
-    let mut vanished_merged = HashSet::new();
-    let mut ancestry = Vec::new();
-    if !before_fetch.is_empty() {
-        let after: HashSet<String> = jj.get_my_bookmarks()?.into_iter().map(|b| b.name).collect();
-        ancestry = jj.get_changes_to_commit(&live.bookmark.commit_id)?;
-        let (owner, repo) = (&plan.repo_info.owner, &plan.repo_info.repo);
-        for gone in vanished_in_stack(before_fetch, &after, &ancestry) {
-            match forge.find_merged_pr(owner, repo, &gone.name) {
-                Ok(Some(_)) => {
-                    merged_names.push(gone.name);
-                    vanished_merged.insert(gone.commit_id);
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!(
-                    "  Warning: could not check merged status for '{}': {e}",
-                    gone.name
-                ),
-            }
+    names.append(&mut below.names);
+    names.sort();
+    names.dedup();
+    let trunk = &plan.default_branch;
+    // A merged segment still listed is one whose commits trunk lacks (a squash
+    // or rebase landing), so the survivor on top of it is never already based
+    // on trunk. A merge-commit landing puts the commits in trunk, the segment
+    // drops out of `trunk()..`, and nothing is planned.
+    let restack = match plan_restack(segments, &merged, &below, &ancestry) {
+        Decision::Leave => return Ok(false),
+        Decision::CannotTell => {
+            eprintln!(
+                "{}",
+                merge_commit_warning(&live.bookmark.name, trunk, &names)
+            );
+            return Ok(false);
         }
-    }
-    let vanished: HashSet<&str> = vanished_merged.iter().map(String::as_str).collect();
-    let Some(restack) = plan_restack(segments, &merged, &vanished, &ancestry) else {
-        return Ok(false);
+        Decision::Rebase(restack) => restack,
     };
-    // No is_rooted_in check as in merge's reconcile: segments are built after
-    // the fetch from `trunk()..`, so a merged segment still listed is one whose
-    // commits trunk lacks (a squash or rebase landing), and the survivor on top
-    // of it is never already based on trunk. A merge-commit landing puts the
-    // commits in trunk, the segment drops out, and no restack is planned.
-    let note = restack_note(&restack.bookmark, &plan.default_branch, merged_names);
+    let note = restack_note(&restack.bookmark, trunk, names);
     if plan.dry_run {
         println!("Would rebase {note}\n");
         return Ok(false);
@@ -156,9 +271,26 @@ pub fn restack_merged_base(
     } else {
         jj.rebase_onto(&restack.root, "trunk()")
     };
-    let (bookmark, trunk) = (&restack.bookmark, &plan.default_branch);
+    let bookmark = &restack.bookmark;
     rebase.with_context(|| format!("failed to rebase '{bookmark}' onto {trunk}"))?;
+    if let Some(head) = &restack.abandon {
+        // The survivor is already safe on trunk; a failure here only leaves
+        // the merged commits visible, so it warns rather than stopping submit.
+        if let Err(e) = jj.abandon(&abandon_revset(head)) {
+            eprintln!("  Warning: could not abandon the merged commits below '{bookmark}': {e}");
+        }
+    }
     Ok(true)
+}
+
+/// Said instead of rebasing when [`Decision::CannotTell`]. `merged` is sorted.
+pub fn merge_commit_warning(bookmark: &str, trunk: &str, merged: &[String]) -> String {
+    let verb = if merged.len() == 1 { "was" } else { "were" };
+    let names = merged.join("', '");
+    format!(
+        "  Warning: '{names}' below '{bookmark}' {verb} merged, but '{bookmark}' \
+         starts with a merge commit; rebase it onto {trunk} yourself."
+    )
 }
 
 /// `'top' onto main ('bottom' below it was merged)`: what the restack does and
@@ -256,30 +388,61 @@ mod tests {
         items.iter().copied().collect()
     }
 
+    /// A line of commits, newest first, each the parent of the one before.
     fn changes(commits: &[&str]) -> Vec<LogEntry> {
-        commits.iter().map(|c| change(c)).collect()
+        let mut line: Vec<LogEntry> = commits.iter().map(|c| change(c)).collect();
+        for i in 0..line.len().saturating_sub(1) {
+            line[i].parents = vec![commits[i + 1].to_string()];
+        }
+        line
     }
 
-    /// Issue #10, after the fetch deleted `bottom`: its commit sits below
-    /// `top`, unbookmarked, so everything from trunk up is rebased, dropping
-    /// what the rebase empties.
+    fn below(heads: &[&str], rewritten: &[&str]) -> MergedBelow {
+        MergedBelow {
+            heads: heads.iter().map(|c| c.to_string()).collect(),
+            rewritten: rewritten.iter().map(|c| c.to_string()).collect(),
+            names: vec![],
+        }
+    }
+
+    fn rebase(root: &str, skip_emptied: bool, abandon: Option<&str>) -> Decision {
+        Decision::Rebase(Restack {
+            bookmark: "top".to_string(),
+            root: root.to_string(),
+            skip_emptied,
+            abandon: abandon.map(str::to_string),
+        })
+    }
+
+    /// Issue #10 with the bookmark gone: the forge says `b2` was a merged PR's
+    /// head, so only what sits above it moves, and `b2` down to trunk is
+    /// abandoned. Nothing depends on the merged content applying cleanly.
     #[test]
-    fn a_deleted_merged_bookmark_below_restacks_from_trunk_skipping_emptied() {
+    fn a_merged_head_below_moves_only_what_sits_above_it() {
+        let segments = [segment("top", &["t2"])];
+        let ancestry = changes(&["t2", "t1", "b2", "b1"]);
+        assert_eq!(
+            plan_restack(&segments, &set(&[]), &below(&["b2"], &[]), &ancestry),
+            rebase("ch_t1", false, Some("b2"))
+        );
+    }
+
+    /// Submit's fetch deleted `bottom`, whose PR merged from another commit:
+    /// which commits landed is unknown, so everything from trunk up is rebased,
+    /// dropping what the rebase empties.
+    #[test]
+    fn a_rewritten_merge_below_restacks_from_trunk_skipping_emptied() {
         let segments = [segment("top", &["t1"])];
         let ancestry = changes(&["t1", "b2", "b1"]);
-        let restack = plan_restack(&segments, &set(&[]), &set(&["b2"]), &ancestry).unwrap();
         assert_eq!(
-            restack,
-            Restack {
-                bookmark: "top".to_string(),
-                root: "ch_b1".to_string(),
-                skip_emptied: true,
-            }
+            plan_restack(&segments, &set(&[]), &below(&[], &["b2"]), &ancestry),
+            rebase("ch_b1", true, None)
         );
     }
 
     /// Issue #10 with the branch kept: `bottom` is still a segment, found
     /// merged by the plan, and `top` is rebased from its own oldest commit.
+    /// Its bookmark keeps its commits, so nothing is abandoned.
     #[test]
     fn a_merged_segment_below_restacks_the_first_live_one() {
         let segments = [
@@ -287,26 +450,64 @@ mod tests {
             segment("top", &["t2", "t1"]),
             segment("leaf", &["l1"]),
         ];
-        let restack = plan_restack(&segments, &set(&["bottom"]), &set(&[]), &[]).unwrap();
-        assert_eq!(restack.bookmark, "top");
-        assert_eq!(restack.root, "ch_t1");
-        assert!(!restack.skip_emptied);
+        let merged = set(&["bottom"]);
+        let expected = rebase("ch_t1", false, None);
+        assert_eq!(
+            plan_restack(&segments, &merged, &below(&[], &[]), &[]),
+            expected
+        );
+        let ancestry = changes(&["t2", "t1", "b1"]);
+        assert_eq!(
+            plan_restack(&segments, &merged, &below(&[], &[]), &ancestry),
+            expected
+        );
+    }
+
+    /// A merged head whose child has a second parent: which commits are the
+    /// survivor's own is unclear, so jjpr does not guess.
+    #[test]
+    fn a_merge_commit_above_the_merged_head_cannot_be_told_apart() {
+        let segments = [segment("top", &["t1"])];
+        let mut ancestry = changes(&["t1", "b1"]);
+        ancestry[0].parents.push("other".to_string());
+        assert_eq!(
+            plan_restack(&segments, &set(&[]), &below(&["b1"], &[]), &ancestry),
+            Decision::CannotTell
+        );
     }
 
     #[test]
     fn nothing_merged_or_everything_merged_needs_no_restack() {
         let segments = [segment("bottom", &["b1"]), segment("top", &["t1"])];
         let ancestry = changes(&["b1"]);
+        let none = below(&[], &[]);
         assert_eq!(
-            plan_restack(&segments, &set(&[]), &set(&[]), &ancestry),
-            None
+            plan_restack(&segments, &set(&[]), &none, &ancestry),
+            Decision::Leave
         );
         let all = set(&["bottom", "top"]);
+        let found = below(&["b1"], &["b1"]);
         assert_eq!(
-            plan_restack(&segments, &all, &set(&["b1"]), &ancestry),
-            None
+            plan_restack(&segments, &all, &found, &ancestry),
+            Decision::Leave
         );
-        assert_eq!(plan_restack(&[], &set(&[]), &set(&["b1"]), &ancestry), None);
+        assert_eq!(
+            plan_restack(&[], &set(&[]), &found, &ancestry),
+            Decision::Leave
+        );
+        // The survivor's own tip reported merged says nothing about below it.
+        assert_eq!(
+            plan_restack(&segments, &set(&[]), &found, &ancestry),
+            Decision::Leave
+        );
+    }
+
+    #[test]
+    fn abandon_revset_spares_what_anything_else_stands_on() {
+        assert_eq!(
+            abandon_revset("b2"),
+            r#"(trunk().."b2") ~ ::((visible_heads() ~ (trunk().."b2")) | bookmarks() | @)"#
+        );
     }
 
     #[test]
@@ -331,11 +532,13 @@ mod tests {
     }
 
     /// Property over every way to mark a three-segment stack merged and every
-    /// commit of the first live segment's ancestry vanished: a restack, when
-    /// planned, names the first unmerged segment, skips emptied commits exactly
-    /// when the ancestry holds a vanished one and then roots at its oldest
-    /// commit, else at the segment's own oldest; with nothing merged below and
-    /// nothing vanished, there is none.
+    /// choice of merged heads and rewritten merges among the live segment's
+    /// ancestry: the restack always names the first unmerged segment; it is
+    /// planned exactly when something below the tip merged or a segment below
+    /// was merged; it skips emptied commits exactly when a rewritten merge sits
+    /// above every known head; otherwise its root is the child of the merged
+    /// head it abandons, and the root is never itself a commit known to have
+    /// merged.
     #[test]
     fn plan_restack_invariants_hold_for_every_small_stack() {
         let segments = [
@@ -345,39 +548,62 @@ mod tests {
         ];
         let names = ["a", "b", "c"];
         let ancestry = changes(&["c2", "c1", "x2", "x1"]);
+        let pick = |mask: u32| -> Vec<&str> {
+            (0..4)
+                .filter(|i| mask & (1 << i) != 0)
+                .map(|i| ancestry[i].commit_id.as_str())
+                .collect()
+        };
         for merged_mask in 0..8u32 {
-            for vanished_mask in 0..16u32 {
-                let merged: HashSet<&str> = (0..3)
-                    .filter(|i| merged_mask & (1 << i) != 0)
-                    .map(|i| names[i])
-                    .collect();
-                let vanished: HashSet<&str> = (0..4)
-                    .filter(|i| vanished_mask & (1 << i) != 0)
-                    .map(|i| ancestry[i].commit_id.as_str())
-                    .collect();
-                let got = plan_restack(&segments, &merged, &vanished, &ancestry);
-                let Some(idx) = segments
-                    .iter()
-                    .position(|s| !merged.contains(s.bookmark.name.as_str()))
-                else {
-                    assert_eq!(got, None, "{merged:?}");
-                    continue;
-                };
-                let live = &segments[idx];
-                let holds_vanished = !vanished.is_empty();
-                if idx == 0 && !holds_vanished {
-                    assert_eq!(got, None, "{merged:?} {vanished:?}");
-                    continue;
+            for heads_mask in 0..16u32 {
+                for rewritten_mask in 0..16u32 {
+                    let merged: HashSet<&str> = (0..3)
+                        .filter(|i| merged_mask & (1 << i) != 0)
+                        .map(|i| names[i])
+                        .collect();
+                    let found = below(&pick(heads_mask), &pick(rewritten_mask));
+                    let got = plan_restack(&segments, &merged, &found, &ancestry);
+                    let ctx = format!("{merged:?} {found:?}");
+                    let Some(idx) = segments
+                        .iter()
+                        .position(|s| !merged.contains(s.bookmark.name.as_str()))
+                    else {
+                        assert_eq!(got, Decision::Leave, "{ctx}");
+                        continue;
+                    };
+                    let first_below = |mask: u32| (1..4).find(|i| mask & (1 << i) != 0);
+                    let (head, rewritten) = (first_below(heads_mask), first_below(rewritten_mask));
+                    if idx == 0 && head.is_none() && rewritten.is_none() {
+                        assert_eq!(got, Decision::Leave, "{ctx}");
+                        continue;
+                    }
+                    let Decision::Rebase(restack) = got else {
+                        panic!("expected a rebase: {ctx} {got:?}");
+                    };
+                    assert_eq!(restack.bookmark, segments[idx].bookmark.name, "{ctx}");
+                    let skip = rewritten.is_some_and(|r| head.is_none_or(|h| r < h));
+                    assert_eq!(restack.skip_emptied, skip, "{ctx}");
+                    if skip {
+                        assert_eq!(restack.root, "ch_x1", "{ctx}");
+                        assert_eq!(restack.abandon, None, "{ctx}");
+                        continue;
+                    }
+                    let root = ancestry.iter().find(|c| c.change_id == restack.root);
+                    match (&restack.abandon, root) {
+                        (Some(gone), Some(root)) => {
+                            assert_eq!(root.parents, vec![gone.clone()], "{ctx}");
+                            assert!(found.heads.contains(gone), "{ctx}");
+                            assert!(
+                                !found.heads.contains(&root.commit_id) || root.commit_id == "c2"
+                            );
+                        }
+                        (None, _) => {
+                            assert!(head.is_none() && idx > 0, "{ctx}");
+                            assert_eq!(restack.root, rebase_root(&segments[idx]), "{ctx}");
+                        }
+                        (Some(_), None) => panic!("root outside the ancestry: {ctx}"),
+                    }
                 }
-                let restack = got.unwrap_or_else(|| panic!("{merged:?} {vanished:?}"));
-                assert_eq!(restack.bookmark, live.bookmark.name);
-                assert_eq!(restack.skip_emptied, holds_vanished);
-                let root = if holds_vanished {
-                    "ch_x1"
-                } else {
-                    rebase_root(live)
-                };
-                assert_eq!(restack.root, root);
             }
         }
     }
@@ -392,6 +618,17 @@ mod tests {
             restack_note("top", "main", vec!["b".to_string(), "a".to_string()]),
             "'top' onto main ('a', 'b' below it were merged)"
         );
+    }
+
+    #[test]
+    fn merge_commit_warning_names_what_merged_and_what_to_do() {
+        assert_eq!(
+            merge_commit_warning("top", "main", &["bottom".to_string()]),
+            "  Warning: 'bottom' below 'top' was merged, but 'top' starts with a merge \
+             commit; rebase it onto main yourself."
+        );
+        let two = ["a".to_string(), "b".to_string()];
+        assert!(merge_commit_warning("top", "main", &two).contains("'a', 'b' below 'top' were"));
     }
 
     #[test]

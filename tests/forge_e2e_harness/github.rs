@@ -190,6 +190,19 @@ impl ForgeTestDriver for GitHubDriver {
         ]);
     }
 
+    fn admin_squash_deleting_branch(&self, number: u64) {
+        gh(&[
+            "pr",
+            "merge",
+            &number.to_string(),
+            "--repo",
+            &repo_slug(),
+            "--squash",
+            "--admin",
+            "--delete-branch",
+        ]);
+    }
+
     fn set_dismiss_stale(&self, branch: &str) {
         let body = serde_json::json!({
             "name": ruleset_name(branch),

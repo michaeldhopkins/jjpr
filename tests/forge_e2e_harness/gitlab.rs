@@ -142,6 +142,20 @@ impl ForgeTestDriver for GitLabDriver {
         glab(&args);
     }
 
+    fn admin_squash_deleting_branch(&self, number: u64) {
+        let path = format!("projects/{}/merge_requests/{number}/merge", enc());
+        glab(&[
+            "api",
+            "-X",
+            "PUT",
+            &path,
+            "-f",
+            "squash=true",
+            "-f",
+            "should_remove_source_branch=true",
+        ]);
+    }
+
     fn dismiss_stale_toggle_supported(&self) -> bool {
         // reset_approvals_on_push is GitLab Premium; a free sandbox silently
         // ignores the write, so we can't build the "on" precondition here.

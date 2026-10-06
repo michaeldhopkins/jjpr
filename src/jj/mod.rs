@@ -47,6 +47,13 @@ pub trait Jj: Send + Sync {
         let _ = (source, destination);
         anyhow::bail!("rebase_onto_skipping_emptied is not implemented here")
     }
+    /// Abandon every commit in `revset` (`jj abandon`). Restacking drops the
+    /// merged commits a survivor no longer sits on this way. Stubs that never
+    /// restack need not implement it.
+    fn abandon(&self, revset: &str) -> Result<()> {
+        let _ = revset;
+        anyhow::bail!("abandon is not implemented here")
+    }
     /// Create a merge commit combining `bookmark` and `dest`, then move the
     /// bookmark to it. Used for merge-based reconciliation (avoids force pushes).
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()>;

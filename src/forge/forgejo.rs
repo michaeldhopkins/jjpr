@@ -252,6 +252,10 @@ impl Forge for ForgejoForge {
         Ok(None)
     }
 
+    fn list_recently_merged_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>> {
+        super::merged::forgejo(&self.client, owner, repo)
+    }
+
     fn merge_pr(&self, owner: &str, repo: &str, number: u64, method: MergeMethod) -> Result<()> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}/merge");
         let do_value = match method {
@@ -806,5 +810,27 @@ mod tests {
                 "{method:?}"
             );
         }
+    }
+
+    /// Issue #10, as on GitHub: one page of closed PRs, newest update first,
+    /// keeping the merged ones with their head commits.
+    #[test]
+    fn list_recently_merged_prs_keeps_the_merged_closed_prs_with_their_heads() {
+        let mut merged = closed_pr(2, "feat", true);
+        merged["head"]["sha"] = serde_json::json!("bbb");
+        let body = serde_json::json!([closed_pr(1, "feat", false), merged]);
+        let path = "/repos/o/r/pulls?state=closed&sort=recentupdate&page=1&limit=50";
+        let server = StubServer::start(vec![route("GET", path, 200, &body.to_string())]);
+
+        let prs = stub_forge(&server)
+            .list_recently_merged_prs("o", "r")
+            .expect("list");
+
+        let heads: Vec<(u64, &str)> = prs
+            .iter()
+            .map(|p| (p.number, p.head.sha.as_str()))
+            .collect();
+        assert_eq!(heads, vec![(2, "bbb")]);
+        assert_eq!(server.request_lines(), vec![format!("GET {path}")]);
     }
 }

@@ -28,8 +28,8 @@ const LIMIT: usize = 400;
 /// shrink, never grow. A file that outgrows the limit later is split, never pinned.
 fn pinned() -> HashMap<&'static str, usize> {
     HashMap::from([
-        ("src/forge/github.rs", 684),
-        ("src/forge/gitlab.rs", 475),
+        ("src/forge/github.rs", 682),
+        ("src/forge/gitlab.rs", 471),
         ("src/forge/http.rs", 541),
         ("src/forge/types.rs", 409),
         ("src/main.rs", 1879),

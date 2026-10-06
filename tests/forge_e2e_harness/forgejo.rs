@@ -131,6 +131,14 @@ impl ForgeTestDriver for ForgejoDriver {
         );
     }
 
+    fn admin_squash_deleting_branch(&self, number: u64) {
+        req(
+            "POST",
+            &repo_path(&format!("pulls/{number}/merge")),
+            Some(json!({ "Do": "squash", "delete_branch_after_merge": true })),
+        );
+    }
+
     fn set_dismiss_stale(&self, branch: &str) {
         req(
             "POST",

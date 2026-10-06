@@ -57,7 +57,7 @@ impl GitLabForge {
 }
 
 /// Parse a single GitLab MR JSON value into our `PullRequest` type.
-fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
+pub(super) fn parse_mr(mr: &serde_json::Value) -> Result<PullRequest> {
     let iid = mr["iid"]
         .as_u64()
         .ok_or_else(|| anyhow::anyhow!("MR missing iid"))?;
@@ -354,14 +354,10 @@ impl Forge for GitLabForge {
     }
 
     fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>> {
-        let project = Self::encode_project(owner, repo);
-        let encoded_head = super::http::url_encode(head);
-        let path =
-            format!("projects/{project}/merge_requests?source_branch={encoded_head}&state=merged");
-        let output = self.client.get(&path)?;
-        let mrs: Vec<serde_json::Value> =
-            serde_json::from_value(output).context("failed to parse merged MR list response")?;
-        mrs.first().map(parse_mr).transpose()
+        super::merged::gitlab_by_head(&self.client, &Self::encode_project(owner, repo), head)
+    }
+    fn list_recently_merged_prs(&self, owner: &str, repo: &str) -> Result<Vec<PullRequest>> {
+        super::merged::gitlab(&self.client, &Self::encode_project(owner, repo))
     }
 
     fn merge_pr(&self, owner: &str, repo: &str, number: u64, method: MergeMethod) -> Result<()> {
@@ -1047,5 +1043,27 @@ mod tests {
             assert_eq!(got.merged, merged, "state {state}");
             assert_eq!(got.state, state);
         }
+    }
+
+    /// Issue #10: GitLab filters merged MRs on the server; the head commit is
+    /// the MR's `sha`, which survives the source branch's deletion.
+    #[test]
+    fn list_recently_merged_prs_reads_each_merged_mr_head() {
+        let path = "/projects/o%2Fr/merge_requests?state=merged&order_by=updated_at&sort=desc&per_page=100";
+        let body = serde_json::json!([
+            {"iid": 4, "source_branch": "feat", "target_branch": "main", "sha": "bbb",
+             "merged_at": "2026-10-05T00:00:00Z"},
+            {"note": "no iid, skipped"}
+        ]);
+        let server = StubServer::start(vec![route("GET", path, 200, &body.to_string())]);
+
+        let prs = stub_forge(&server)
+            .list_recently_merged_prs("o", "r")
+            .expect("list");
+
+        assert_eq!(prs.len(), 1);
+        assert_eq!((prs[0].number, prs[0].head.sha.as_str()), (4, "bbb"));
+        assert_eq!(prs[0].base.ref_name, "main");
+        assert_eq!(server.request_lines(), vec![format!("GET {path}")]);
     }
 }
