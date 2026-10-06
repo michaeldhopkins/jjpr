@@ -488,9 +488,9 @@ struct EntryData {
 /// Classify entries for rendering, returning `(live, fossils)`.
 ///
 /// Live entries are open PRs in the current local stack, ordered base→top
-/// to match the live jj graph. Fossils are closed/merged PRs (either
-/// still in the local stack as merged, or known only from the previous
-/// comment); they are sorted by `closed_at` descending — most recent
+/// to match the live jj graph. Fossils are merged PRs (still in the local
+/// stack as merged, or known only from the previous comment, narrowed to
+/// merged ones by `retain_settled_previous`); they are sorted by `closed_at` descending — most recent
 /// first — and rendered inside a collapsible block at the bottom.
 ///
 /// Entries appearing only in `previous` (no longer in the local jj
@@ -564,14 +564,14 @@ fn classify_stack_entries(
     (live, fossils)
 }
 
-/// Drop previous-comment entries whose PR is still open but no longer in
-/// the local stack. `classify_stack_entries` fossilizes every entry it
-/// does not recognise, on the theory that a bookmark gone from the graph
-/// was merged, but a PR that was rebased out of the stack is gone too.
-/// Rendering it as "earlier closed/merged" told reviewers a live PR had
-/// landed. Entries already recorded as merged, or still in the stack, are
-/// kept without a lookup. A forge error keeps the entry, so a failed
-/// lookup cannot erase real history.
+/// Drop previous-comment entries no longer in the local stack whose PR did
+/// not merge. `classify_stack_entries` fossilizes every entry it does not
+/// recognise, on the theory that a bookmark gone from the graph was merged,
+/// but a PR rebased out of the stack is gone too, and so is one closed
+/// unmerged: abandoned, or folded into a sibling whose diff now carries it.
+/// Only a merge is history worth a link (issue #12). Entries already
+/// recorded as merged, or still in the stack, are kept without a lookup. A
+/// forge error keeps the entry, so a failed lookup cannot erase real history.
 ///
 /// `settled` caches lookups across the PRs of one submission: every PR's
 /// comment names the same missing bookmark, and asking once per PR would
@@ -594,7 +594,7 @@ fn retain_settled_previous(
                 return known;
             }
             let keep = match forge.get_pr_state(owner, repo, prev.pr_number) {
-                Ok(state) => state.merged || state.state == "closed",
+                Ok(state) => state.merged,
                 Err(e) => {
                     eprintln!(
                         "  Warning: could not check whether #{} is still open: {e}",
@@ -1796,10 +1796,11 @@ mod tests {
         assert!(update.contains("~~[`old`]"), "history is kept: {update}");
     }
 
-    /// Closed without merging is history too, and GitLab reports a merged
-    /// MR with state "merged" rather than "closed". Both stay as fossils.
+    /// Closed without merging is not history: the work was abandoned or
+    /// folded into a sibling, so a link to it is a dead end. GitLab reports
+    /// a merged MR with state "merged" rather than "closed"; that one stays.
     #[test]
-    fn test_closed_and_gitlab_merged_states_both_become_fossils() {
+    fn test_closed_unmerged_drops_out_and_gitlab_merged_stays_a_fossil() {
         let github = CommentScenarioForge::new(
             vec![stack_comment(
                 99,
@@ -1819,9 +1820,92 @@ mod tests {
             .iter()
             .find(|c| c.starts_with("update_comment:99:"))
             .unwrap_or_else(|| panic!("expected a rewrite: {calls:?}"));
-        assert!(update.contains("2 earlier closed/merged PRs"), "{update}");
-        assert!(update.contains("~~[`profile`]"), "{update}");
+        assert!(
+            update.contains("1 earlier closed/merged PR</summary>"),
+            "{update}"
+        );
         assert!(update.contains("~~[`settings`]"), "{update}");
+        assert!(!update.contains("profile"), "{update}");
+    }
+
+    /// Issue #12: the lower of two stacked PRs was folded into the upper and
+    /// closed unmerged. The survivor is a stack of one, so its comment is
+    /// deleted rather than rewritten around a link to the closed PR.
+    #[test]
+    fn test_stack_collapsing_over_a_closed_pr_removes_the_comment() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(99, &[("lower", 10), ("upper", 11)])],
+            HashMap::from([(10, pr_state("closed", false))]),
+        );
+        let plan = nav_only_plan(&[("upper", 11)], crate::config::StackNavMode::Comment);
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        assert!(
+            calls.contains(&"delete_comment:99".to_string()),
+            "a stack of one over a closed PR has no navigation: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("update_comment")),
+            "must not rewrite the comment around the closed PR: {calls:?}"
+        );
+    }
+
+    /// The same collapse in description mode strips the nav section.
+    #[test]
+    fn test_stack_collapsing_over_a_closed_pr_strips_description_nav() {
+        let previous = comment::generate_comment_body(
+            &[
+                nav_entry("lower", 10, false),
+                comment::StackEntry {
+                    is_current: true,
+                    ..nav_entry("upper", 11, false)
+                },
+            ],
+            &[],
+        );
+        let body = format!(
+            "Upper's description.\n\n<!-- jjpr:stack-nav -->\n{previous}<!-- /jjpr:stack-nav -->\n"
+        );
+        let github =
+            CommentScenarioForge::new(vec![], HashMap::from([(10, pr_state("closed", false))]));
+        let mut plan = nav_only_plan(&[("upper", 11)], crate::config::StackNavMode::Description);
+        plan.existing_prs
+            .insert("upper".to_string(), open_pr(11, "upper", Some(&body)));
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        let update = calls
+            .iter()
+            .find(|c| c.starts_with("update_pr_body:#11:"))
+            .unwrap_or_else(|| panic!("expected a body rewrite: {calls:?}"));
+        assert_eq!(
+            update.trim_start_matches("update_pr_body:#11:"),
+            "Upper's description.\n"
+        );
+    }
+
+    /// One open PR atop a MERGED ancestor is still a stack: the comment stays
+    /// and keeps the merged PR as history.
+    #[test]
+    fn test_stack_collapsing_over_a_merged_pr_keeps_the_comment() {
+        let github = CommentScenarioForge::new(
+            vec![stack_comment(99, &[("lower", 10), ("upper", 11)])],
+            HashMap::from([(10, pr_state("closed", true))]),
+        );
+        let plan = nav_only_plan(&[("upper", 11)], crate::config::StackNavMode::Comment);
+
+        execute_submission_plan(&RecordingJj::new(), &github, &plan).unwrap();
+
+        let calls = github.calls();
+        let update = calls
+            .iter()
+            .find(|c| c.starts_with("update_comment:99:"))
+            .unwrap_or_else(|| panic!("expected a rewrite: {calls:?}"));
+        assert!(update.contains("~~[`lower`]"), "{update}");
+        assert!(!calls.iter().any(|c| c.starts_with("delete_comment")));
     }
 
     /// A forge error on the state lookup keeps the old behaviour rather

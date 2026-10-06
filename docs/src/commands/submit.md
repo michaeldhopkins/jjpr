@@ -228,8 +228,8 @@ The list always reflects the current local stack in base-to-top order.
 As you rebase, split, or reorder commits, the order is recomputed every
 submit so each PR's comment stays in sync with the others.
 
-When a PR in the stack is merged or closed and its bookmark is no
-longer in the local graph, it moves into a collapsible history block
+When a PR in the stack is merged and its bookmark is no longer in the
+local graph, it moves into a collapsible history block
 at the bottom of the comment, rendered with strikethrough:
 
 ```
@@ -259,11 +259,13 @@ submit to inherit fossil metadata (PR numbers, merge timestamps) for
 PRs whose local bookmarks have been cleaned up. Don't edit it; jjpr
 rewrites the whole comment on every submit.
 
-A PR that leaves the stack is not history. If a bookmark from the
-previous comment is gone from the local graph, jjpr asks the forge
-whether its PR is still open before filing it under closed/merged.
-An open PR was rebased out of the stack, so it simply drops off the
-list. When that leaves a single live PR with no history, jjpr deletes
+Only a merged PR is history. If a bookmark from the previous comment
+is gone from the local graph, jjpr asks the forge whether its PR
+merged before filing it under the history block. Any other PR drops
+off the list: an open one was rebased out of the stack, and one closed
+without merging was abandoned or folded into another PR, so a link to
+it would lead nowhere useful. When that leaves a single live PR with no
+history, jjpr deletes
 the comment (or strips the section from the description in
 `stack_nav = "description"` mode), so an unstacked PR looks like any
 other PR again. Submit only touches the PRs in the stack it was given,
