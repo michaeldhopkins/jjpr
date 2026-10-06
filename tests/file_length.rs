@@ -30,7 +30,7 @@ fn pinned() -> HashMap<&'static str, usize> {
     HashMap::from([
         ("src/forge/github.rs", 682),
         ("src/forge/gitlab.rs", 471),
-        ("src/forge/http.rs", 536),
+        ("src/forge/http.rs", 446),
         ("src/forge/types.rs", 409),
         ("src/main.rs", 1879),
         ("src/merge/execute.rs", 1071),

@@ -16,7 +16,7 @@ above it still carries its commits. Rebase onto trunk, dropping what
 already landed:
 
 ```
-jj log -r 'roots(trunk()..top)'      # the oldest commit above trunk
+jj log -r 'roots(trunk()..<bookmark>)'   # the oldest commit above trunk
 jj rebase -s <that change> -d main --skip-emptied
 jjpr submit
 ```
@@ -33,7 +33,7 @@ Move the merge commit onto trunk, keeping each parent that was not
 merged:
 
 ```
-jj log -r 'trunk()..top'                         # find the merge commit's parents
+jj log -r 'trunk()..<bookmark>'    # find the merge commit and its parents
 jj rebase -s <merge commit> -d main -d <unmerged parent>
 jjpr submit
 ```
@@ -130,7 +130,7 @@ failing, see the table below.
 | 404 | The token cannot see the repository, or the PR is gone | `jjpr auth test`, and check the remote URL |
 | 405, 409 | The forge refused the merge: checks, reviews or a merge method the repository does not allow | Open the PR on the forge to see what it waits for |
 | 422 | The forge rejected the change, often because a branch it names is gone | `jj git fetch`, then run the command again |
-| 429 | Too many requests | Wait a few minutes, then run again |
+| 429 | Too many requests. jjpr waits out a limit that lifts within a minute | Wait until the limit lifts, then run again |
 | 500–504 | The forge is having trouble | Run again in a minute |
 
 ## Watch gave up

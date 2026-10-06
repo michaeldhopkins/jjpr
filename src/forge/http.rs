@@ -113,30 +113,7 @@ impl ForgeClient {
     /// GET a single JSON response.
     pub fn get(&self, path: &str) -> Result<serde_json::Value> {
         let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let (header, value) = self.auth_header();
-        let mut resp = self
-            .agent
-            .get(&url)
-            .header(header, &value)
-            .header("Accept", "application/json")
-            .call()
-            .with_context(|| format!("GET {url}"))?;
-
-        let status = resp.status().as_u16();
-        if status >= 400 {
-            let body = resp
-                .body_mut()
-                .read_to_string()
-                .unwrap_or_else(|_| String::from("<unreadable>"));
-            return Err(HttpError {
-                status,
-                method: "GET".to_string(),
-                path: path.to_string(),
-                body,
-            }
-            .into());
-        }
-
+        let mut resp = self.send_get(&url, path)?;
         resp.body_mut()
             .read_json()
             .with_context(|| format!("failed to parse JSON from GET {path}"))
@@ -146,29 +123,20 @@ impl ForgeClient {
     pub fn delete(&self, path: &str) -> Result<()> {
         let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
-        let mut resp = self
-            .agent
-            .delete(&url)
-            .header(header, &value)
-            .header("Accept", "application/json")
-            .call()
-            .with_context(|| format!("DELETE {url}"))?;
-
-        let status = resp.status().as_u16();
-        if status >= 400 {
-            let body = resp
-                .body_mut()
-                .read_to_string()
-                .unwrap_or_else(|_| String::from("<unreadable>"));
-            return Err(HttpError {
-                status,
-                method: "DELETE".to_string(),
-                path: path.to_string(),
-                body,
-            }
-            .into());
-        }
+        super::backoff::send("DELETE", path, &url, || {
+            let request = self.agent.delete(&url).header(header, &value);
+            request.header("Accept", "application/json").call()
+        })?;
         Ok(())
+    }
+
+    /// GET `url` (with `path` for errors), waiting out a short rate limit.
+    fn send_get(&self, url: &str, path: &str) -> Result<http::Response<ureq::Body>> {
+        let (header, value) = self.auth_header();
+        super::backoff::send("GET", path, url, || {
+            let request = self.agent.get(url).header(header, &value);
+            request.header("Accept", "application/json").call()
+        })
     }
 
     /// POST with a JSON body, return the response JSON.
@@ -195,33 +163,19 @@ impl ForgeClient {
         let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
 
-        let request = match method {
-            "POST" => self.agent.post(&url),
-            "PATCH" => self.agent.patch(&url),
-            "PUT" => self.agent.put(&url),
-            _ => anyhow::bail!("unsupported HTTP method: {method}"),
-        };
-
-        let mut resp = request
-            .header(header, &value)
-            .header("Accept", "application/json")
-            .send_json(body)
-            .with_context(|| format!("{method} {url}"))?;
-
-        let status = resp.status().as_u16();
-        if status >= 400 {
-            let resp_body = resp
-                .body_mut()
-                .read_to_string()
-                .unwrap_or_else(|_| String::from("<unreadable>"));
-            return Err(HttpError {
-                status,
-                method: method.to_string(),
-                path: path.to_string(),
-                body: resp_body,
-            }
-            .into());
+        if !matches!(method, "POST" | "PATCH" | "PUT") {
+            anyhow::bail!("unsupported HTTP method: {method}");
         }
+        let mut resp = super::backoff::send(method, path, &url, || {
+            let request = match method {
+                "POST" => self.agent.post(&url),
+                "PATCH" => self.agent.patch(&url),
+                _ => self.agent.put(&url),
+            };
+            let request = request.header(header, &value);
+            request.header("Accept", "application/json").send_json(body)
+        })?;
+        let status = resp.status().as_u16();
 
         // Some endpoints return 204 No Content or empty body on success
         if status == 204 {
@@ -251,32 +205,10 @@ impl ForgeClient {
         const MAX_PAGES: usize = 100;
 
         let mut url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let (header, value) = self.auth_header();
         let mut all_items = Vec::new();
 
         for _ in 0..MAX_PAGES {
-            let mut resp = self
-                .agent
-                .get(&url)
-                .header(header, &value)
-                .header("Accept", "application/json")
-                .call()
-                .with_context(|| format!("GET {url}"))?;
-
-            let status = resp.status().as_u16();
-            if status >= 400 {
-                let body = resp
-                    .body_mut()
-                    .read_to_string()
-                    .unwrap_or_else(|_| String::from("<unreadable>"));
-                return Err(HttpError {
-                    status,
-                    method: "GET".to_string(),
-                    path: path.to_string(),
-                    body,
-                }
-                .into());
-            }
+            let mut resp = self.send_get(&url, path)?;
 
             let next = extract_next_link(&resp);
 
@@ -312,32 +244,10 @@ impl ForgeClient {
         const MAX_PAGES: usize = 100;
 
         let mut url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
-        let (header, value) = self.auth_header();
         let mut all_items = Vec::new();
 
         for _ in 0..MAX_PAGES {
-            let mut resp = self
-                .agent
-                .get(&url)
-                .header(header, &value)
-                .header("Accept", "application/json")
-                .call()
-                .with_context(|| format!("GET {url}"))?;
-
-            let status = resp.status().as_u16();
-            if status >= 400 {
-                let body = resp
-                    .body_mut()
-                    .read_to_string()
-                    .unwrap_or_else(|_| String::from("<unreadable>"));
-                return Err(HttpError {
-                    status,
-                    method: "GET".to_string(),
-                    path: path.to_string(),
-                    body,
-                }
-                .into());
-            }
+            let mut resp = self.send_get(&url, path)?;
 
             let next = extract_next_link(&resp);
 

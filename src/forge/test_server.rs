@@ -13,7 +13,7 @@
 //! That is what `ForgeClient` sends today; if it ever grows past that,
 //! grow this with it rather than reaching for a mocking crate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +24,9 @@ use std::time::Duration;
 /// A client that connects and then stalls would otherwise park the server
 /// thread in `read` forever, and `Drop` joins that thread.
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Each `(method, target)`'s answers in order: status, body, extra headers.
+type Table = HashMap<(String, String), VecDeque<(u16, String, Vec<(String, String)>)>>;
 
 /// One request as the server saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +44,8 @@ pub struct Route {
     pub target: String,
     pub status: u16,
     pub body: String,
+    /// Extra response headers, such as `Retry-After`.
+    pub headers: Vec<(String, String)>,
 }
 
 pub fn route(method: &'static str, target: &str, status: u16, body: &str) -> Route {
@@ -49,7 +54,25 @@ pub fn route(method: &'static str, target: &str, status: u16, body: &str) -> Rou
         target: target.to_string(),
         status,
         body: body.to_string(),
+        headers: Vec::new(),
     }
+}
+
+/// [`route`] with extra response headers. Several routes for one
+/// `(method, target)` answer in turn, the last one repeating.
+pub fn route_with_headers(
+    method: &'static str,
+    target: &str,
+    status: u16,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Route {
+    let mut r = route(method, target, status, body);
+    r.headers = headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    r
 }
 
 pub struct StubServer {
@@ -67,10 +90,14 @@ impl StubServer {
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
 
-        let table: HashMap<(String, String), (u16, String)> = routes
-            .into_iter()
-            .map(|r| ((r.method.to_string(), r.target), (r.status, r.body)))
-            .collect();
+        let mut table: Table = HashMap::new();
+        for r in routes {
+            let answer = (r.status, r.body, r.headers);
+            table
+                .entry((r.method.to_string(), r.target))
+                .or_default()
+                .push_back(answer);
+        }
 
         let thread = {
             let recorded = Arc::clone(&recorded);
@@ -82,7 +109,7 @@ impl StubServer {
                     }
                     let Ok(stream) = stream else { continue };
                     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-                    serve_one(stream, &table, &recorded);
+                    serve_one(stream, &mut table, &recorded);
                 }
             })
         };
@@ -128,11 +155,7 @@ impl Drop for StubServer {
     }
 }
 
-fn serve_one(
-    mut stream: TcpStream,
-    table: &HashMap<(String, String), (u16, String)>,
-    recorded: &Arc<Mutex<Vec<Recorded>>>,
-) {
+fn serve_one(mut stream: TcpStream, table: &mut Table, recorded: &Arc<Mutex<Vec<Recorded>>>) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let head_end = loop {
@@ -175,20 +198,26 @@ fn serve_one(
         body,
     });
 
-    let (status, resp_body) = table
-        .get(&(method, target))
-        .cloned()
-        .unwrap_or((404, r#"{"message":"Not Found"}"#.to_string()));
+    let (status, resp_body, headers) = match table.get_mut(&(method, target)) {
+        Some(queue) if queue.len() > 1 => queue.pop_front().expect("non-empty"),
+        Some(queue) => queue.front().cloned().expect("non-empty"),
+        None => (404, r#"{"message":"Not Found"}"#.to_string(), Vec::new()),
+    };
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
     let reason = match status {
         200 => "OK",
         201 => "Created",
         204 => "No Content",
         403 => "Forbidden",
         404 => "Not Found",
+        429 => "Too Many Requests",
         _ => "Status",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
         resp_body.len()
     );
     let _ = stream.write_all(response.as_bytes());

@@ -10,6 +10,8 @@
 
 mod forge_e2e_harness;
 
+use jjpr::forge::ForgeKind;
+
 use forge_e2e_harness::{
     ForgeE2eContext, ForgeTestDriver, MergeMethod, OWNER, REPO, configured_drivers,
 };
@@ -560,5 +562,58 @@ fn out_of_band_squash_merge_restacks_after_a_plain_fetch_all_forges() {
             "{name}: the survivor's PR got the rebase"
         );
         eprintln!("=== {name}: out-of-band squash OK ===");
+    }
+}
+
+/// Backoff reads each forge's own rate-limit headers. This asks each real
+/// forge for the sandbox repository and checks what it sends: GitHub and
+/// GitLab say when the quota refills, which jjpr would wait for after a 429.
+/// Forgejo sends none unless an instance configures limits, so jjpr waits a
+/// minute there; that is reported, not asserted.
+#[test]
+fn rate_limit_headers_are_read_from_each_real_forge() {
+    let drivers = configured_drivers();
+    for driver in drivers {
+        let name = driver.name();
+        let (url, header, value) = match name {
+            "github" => {
+                let token = jjpr::forge::token::resolve_token(ForgeKind::GitHub, None, None)
+                    .expect("github token");
+                let url = format!("https://api.github.com/repos/{OWNER}/{REPO}");
+                (url, "Authorization", format!("Bearer {token}"))
+            }
+            "gitlab" => {
+                let token =
+                    jjpr::forge::token::resolve_token(ForgeKind::GitLab, Some("gitlab.com"), None)
+                        .expect("gitlab token");
+                let url = format!("https://gitlab.com/api/v4/projects/{OWNER}%2F{REPO}");
+                (url, "Authorization", format!("Bearer {token}"))
+            }
+            _ => {
+                let token = std::env::var("FORGEJO_TOKEN").expect("FORGEJO_TOKEN");
+                let url = format!("https://codeberg.org/api/v1/repos/{OWNER}/{REPO}");
+                (url, "Authorization", format!("token {token}"))
+            }
+        };
+        let resp = ureq::get(&url)
+            .header(header, &value)
+            .call()
+            .expect("request");
+        assert_eq!(resp.status().as_u16(), 200, "{name}");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let reset = jjpr::forge::backoff::reset_at(resp.headers());
+        let wait = jjpr::forge::backoff::wait(429, resp.headers(), now);
+        eprintln!("=== {name}: reset {reset:?}, a 429 now would wait {wait:?} ===");
+        assert!(wait.is_some(), "{name}: a 429 always gets a wait");
+        if name != "forgejo" {
+            let at = reset.unwrap_or_else(|| panic!("{name} sends its quota reset time"));
+            assert!(
+                at + 5 >= now && at <= now + 3 * 3600,
+                "{name}: reset {at}, now {now}"
+            );
+        }
     }
 }
