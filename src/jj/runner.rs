@@ -24,6 +24,9 @@ pub struct JjRunner {
     /// every poll with the same runner, and repeating the same warning
     /// each time buried the output that mattered.
     warned_stale: Mutex<HashSet<String>>,
+    /// The forge's remote, when known: the one remote a fetch must reach.
+    /// Unset, a fetch takes every remote in one call and any failure is fatal.
+    fetch_remote: Option<String>,
 }
 
 impl JjRunner {
@@ -40,7 +43,24 @@ impl JjRunner {
             repo_path,
             owned_revset: "mine()".to_string(),
             warned_stale: Mutex::new(HashSet::new()),
+            fetch_remote: None,
         })
+    }
+
+    /// Make `remote` the one a fetch requires (issue #11). Other remotes are
+    /// still fetched, since trunk can live on one, but a failure on them is a
+    /// warning: a mirror the network cannot reach must not stop a submit.
+    pub fn set_fetch_remote(&mut self, remote: Option<String>) {
+        self.fetch_remote = remote;
+    }
+
+    fn fetch(&self, args: &[&str]) -> Result<()> {
+        // Fetch is pure-read into the git backend, so retrying on a transient
+        // error (".lock", or "stale", which can follow a partial commit) is
+        // safe here, unlike the mutating ops, which use plain `run_jj`.
+        let args = [&["--ignore-working-copy", "git", "fetch"], args].concat();
+        run_jj_utf8_with_retry(&self.repo_path, &args, is_transient_error)?;
+        Ok(())
     }
 
     /// Warn once per stale bookmark for the life of this runner. Returns
@@ -120,18 +140,20 @@ impl JjRunner {
 
 impl Jj for JjRunner {
     fn git_fetch(&self) -> Result<()> {
-        // Only idempotent operations retry. `vcs_runner::is_transient_error`
-        // matches both ".lock" (op didn't start — always safe) and "stale"
-        // (working-copy staleness — op may have partially committed). Retrying
-        // mutating ops like `jj new` or `jj rebase` on "stale" could create
-        // duplicate commits, so those deliberately use `run_jj` (no retry).
-        // Fetch is pure-read into the git backend; retrying is safe in both
-        // cases.
-        run_jj_utf8_with_retry(
-            &self.repo_path,
-            &["--ignore-working-copy", "git", "fetch", "--all-remotes"],
-            is_transient_error,
-        )?;
+        let Some(required) = self.fetch_remote.as_deref() else {
+            return self.fetch(&["--all-remotes"]);
+        };
+        self.fetch(&["--remote", required])?;
+        for remote in self.get_git_remotes()? {
+            if remote.name != required
+                && let Err(e) = self.fetch(&["--remote", &remote.name])
+            {
+                eprintln!(
+                    "  Warning: could not fetch remote '{}'; continuing without it.\n    {e}",
+                    remote.name
+                );
+            }
+        }
         Ok(())
     }
 
@@ -444,6 +466,117 @@ mod tests {
         let bookmarks = runner.get_my_bookmarks().unwrap();
         assert_eq!(bookmarks.len(), 1);
         assert_eq!(bookmarks[0].name, "feature");
+    }
+
+    /// A repo with a reachable `origin` (an empty bare git repo) and a
+    /// `backup` remote whose path does not exist, so fetching it fails at once.
+    fn repo_with_an_unreachable_remote(temp: &tempfile::TempDir) -> PathBuf {
+        let origin = temp.path().join("origin.git");
+        let status = Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&origin)
+            .status()
+            .expect("git init --bare");
+        assert!(status.success());
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        init_jj_repo(&repo);
+        let missing = temp.path().join("no-such-remote.git");
+        for (name, url) in [("origin", origin.as_path()), ("backup", missing.as_path())] {
+            let out = Command::new("jj")
+                .args(["git", "remote", "add", name])
+                .arg(url)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        repo
+    }
+
+    /// Issue #11: an unreachable remote that is not the forge's must not abort
+    /// the fetch. Fetching every remote at once is what used to.
+    #[test]
+    fn fetch_survives_an_unreachable_remote_that_is_not_required() {
+        if !jj_available() {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = repo_with_an_unreachable_remote(&temp);
+        let mut runner = JjRunner::new(repo).unwrap();
+
+        assert!(
+            runner.git_fetch().is_err(),
+            "with no required remote every remote must still be fetched, as before"
+        );
+
+        runner.set_fetch_remote(Some("origin".to_string()));
+        runner
+            .git_fetch()
+            .expect("the unreachable remote is not the one the command needs");
+    }
+
+    /// Remotes other than the required one are still fetched, since trunk can
+    /// live on one of them.
+    #[test]
+    fn fetch_still_fetches_the_other_reachable_remotes() {
+        if !jj_available() {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = repo_with_an_unreachable_remote(&temp);
+        let mirror = temp.path().join("mirror");
+        std::fs::create_dir(&mirror).unwrap();
+        for args in [
+            &["git", "init", "--colocate"][..],
+            &["commit", "-m", "on the mirror"],
+            &["bookmark", "set", "landed", "-r", "@-"],
+        ] {
+            let out = Command::new("jj")
+                .args(args)
+                .current_dir(&mirror)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        }
+        let out = Command::new("jj")
+            .args(["git", "remote", "add", "mirror"])
+            .arg(&mirror)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let mut runner = JjRunner::new(repo).unwrap();
+        runner.set_fetch_remote(Some("origin".to_string()));
+
+        runner.git_fetch().unwrap();
+
+        let fetched = runner
+            .run_jj(&[
+                "log",
+                "-r",
+                "landed@mirror",
+                "--no-graph",
+                "-T",
+                "description",
+            ])
+            .expect("the mirror's bookmark was fetched");
+        assert_eq!(fetched.trim(), "on the mirror");
+    }
+
+    /// The remote the command needs is still required: its failure is fatal.
+    #[test]
+    fn fetch_fails_when_the_required_remote_is_unreachable() {
+        if !jj_available() {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = repo_with_an_unreachable_remote(&temp);
+        let mut runner = JjRunner::new(repo).unwrap();
+
+        runner.set_fetch_remote(Some("backup".to_string()));
+        let err = runner.git_fetch().unwrap_err().to_string();
+        assert!(err.contains("--remote backup"), "{err}");
     }
 
     #[test]

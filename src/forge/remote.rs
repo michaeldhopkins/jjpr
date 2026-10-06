@@ -228,6 +228,41 @@ pub fn resolve_remote(
     }
 }
 
+/// The remote named by `preferred`, else `origin`, else the first. Used when
+/// the config pins the forge, so any remote may carry it.
+pub fn pick_remote<'a>(remotes: &'a [GitRemote], preferred: Option<&str>) -> Result<&'a GitRemote> {
+    if let Some(name) = preferred {
+        return remotes
+            .iter()
+            .find(|r| r.name == name)
+            .ok_or_else(|| anyhow::anyhow!("remote '{}' not found", name));
+    }
+    if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
+        return Ok(origin);
+    }
+    remotes
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no git remotes found"))
+}
+
+/// The remote the forge will be resolved from, chosen the same way, without
+/// building the forge: `forge_configured` takes `pick_remote`'s rule, otherwise
+/// `resolve_remote`'s. `None` when that would fail, and the caller then fetches
+/// every remote as before.
+pub fn forge_remote_name(
+    remotes: &[GitRemote],
+    forge_configured: bool,
+    preferred: Option<&str>,
+) -> Option<String> {
+    if forge_configured {
+        pick_remote(remotes, preferred).ok().map(|r| r.name.clone())
+    } else {
+        resolve_remote(remotes, preferred)
+            .ok()
+            .map(|(name, _, _)| name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,5 +686,63 @@ mod tests {
     fn test_extract_host_preserves_https_port() {
         let host = extract_host("https://my.gitlab.dev:8443/me/repo.git").unwrap();
         assert_eq!(host, "my.gitlab.dev:8443");
+    }
+
+    fn named(pairs: &[(&str, &str)]) -> Vec<GitRemote> {
+        pairs
+            .iter()
+            .map(|(name, url)| GitRemote {
+                name: name.to_string(),
+                url: url.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pick_remote_prefers_the_named_remote_then_origin_then_the_first() {
+        let remotes = named(&[("mirror", "/m"), ("origin", "/o"), ("fork", "/f")]);
+        assert_eq!(pick_remote(&remotes, Some("fork")).unwrap().name, "fork");
+        assert!(pick_remote(&remotes, Some("nope")).is_err());
+        assert_eq!(pick_remote(&remotes, None).unwrap().name, "origin");
+        let no_origin = named(&[("mirror", "/m"), ("fork", "/f")]);
+        assert_eq!(pick_remote(&no_origin, None).unwrap().name, "mirror");
+        assert!(pick_remote(&[], None).is_err());
+    }
+
+    /// Issue #11's shape: one forge remote beside one that is not a forge.
+    /// Auto-detection names the forge remote whatever the order, so the
+    /// fetch requires that one and only warns about the other.
+    #[test]
+    fn forge_remote_name_is_the_forge_remote_beside_a_non_forge_one() {
+        let remotes = named(&[
+            ("backup", "ssh://git@nas.local/srv/repo.git"),
+            ("upstream", "git@github.com:o/r.git"),
+        ]);
+        assert_eq!(
+            forge_remote_name(&remotes, false, None).as_deref(),
+            Some("upstream")
+        );
+        // A pinned forge takes pick_remote's rule: no origin, so the first.
+        assert_eq!(
+            forge_remote_name(&remotes, true, None).as_deref(),
+            Some("backup")
+        );
+        assert_eq!(
+            forge_remote_name(&remotes, true, Some("upstream")).as_deref(),
+            Some("upstream")
+        );
+    }
+
+    /// When the forge remote cannot be chosen, there is no name, and the
+    /// caller falls back to fetching every remote.
+    #[test]
+    fn forge_remote_name_is_none_when_the_choice_fails() {
+        let two_forges = named(&[
+            ("a", "git@github.com:o/r.git"),
+            ("b", "git@github.com:o/s.git"),
+        ]);
+        assert_eq!(forge_remote_name(&two_forges, false, None), None);
+        assert_eq!(forge_remote_name(&[], true, None), None);
+        assert_eq!(forge_remote_name(&two_forges, false, Some("missing")), None);
     }
 }

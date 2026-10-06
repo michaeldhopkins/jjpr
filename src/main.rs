@@ -220,16 +220,16 @@ fn resolve_stack(
     let mut identity = Identity::seed(&local_email, &cfg.identity.emails, &cfg.identity.logins);
     jj.set_identity(&identity);
 
+    // Resolve the forge up front, before the fetch (which then requires only
+    // its remote) and so Tier 2 can consult it. Tolerate its absence: the
+    // no-bookmark case below should report "no bookmark", not a forge error.
+    let remotes = jj.get_git_remotes()?;
+    let forge_result = resolve_forge(&remotes, &cfg, preferred_remote);
     if !no_fetch {
+        jj.set_fetch_remote(forge_result.as_ref().ok().map(|f| f.remote_name.clone()));
         eprintln!("Fetching remotes...");
         jj.git_fetch()?;
     }
-
-    // Resolve the forge up front so Tier 2 can consult it, but tolerate its
-    // absence: the no-bookmark case below should still report "no bookmark",
-    // not a forge error.
-    let remotes = jj.get_git_remotes()?;
-    let forge_result = resolve_forge(&remotes, &cfg, preferred_remote);
 
     let target_bookmark = match bookmark {
         Some(name) => name.to_string(),
@@ -428,6 +428,11 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
 
     // Read the remotes before anything else touches jj concurrently.
     let remotes = jj.get_git_remotes().unwrap_or_default();
+    jj.set_fetch_remote(remote::forge_remote_name(
+        &remotes,
+        cfg.forge.is_some(),
+        None,
+    ));
 
     // `jj git fetch` is a second of network latency that the forge lookups do
     // not depend on, so run them underneath it. The graph does depend on the
@@ -1680,7 +1685,7 @@ fn resolve_forge_from_config(
     let env_var = token_env.unwrap_or(kind.token_env_var());
     let token = std::env::var(env_var).ok().filter(|v| !v.is_empty());
 
-    let remote = pick_remote(remotes, preferred_remote)?;
+    let remote = remote::pick_remote(remotes, preferred_remote)?;
     let host = remote::extract_host(&remote.url);
     let repo_info = remote::parse_url_as(&remote.url, kind).ok_or_else(|| {
         anyhow::anyhow!(
@@ -1712,24 +1717,6 @@ fn resolve_forge_auto(
         remote_name,
         repo_info,
     })
-}
-
-fn pick_remote<'a>(
-    remotes: &'a [jjpr::jj::GitRemote],
-    preferred: Option<&str>,
-) -> Result<&'a jjpr::jj::GitRemote> {
-    if let Some(name) = preferred {
-        return remotes
-            .iter()
-            .find(|r| r.name == name)
-            .ok_or_else(|| anyhow::anyhow!("remote '{}' not found", name));
-    }
-    if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
-        return Ok(origin);
-    }
-    remotes
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("no git remotes found"))
 }
 
 fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -> Option<&'a str> {
@@ -1829,7 +1816,7 @@ fn detect_forge_for_cwd(preferred_remote: Option<&str>) -> Result<DetectedForge>
     if let Some(kind) = cfg.forge {
         // Config pins the forge, so the host is a nicety: a repo can legitimately
         // have no matching remote here and still be configured correctly.
-        let host = pick_remote(&remotes, preferred_remote)
+        let host = remote::pick_remote(&remotes, preferred_remote)
             .ok()
             .and_then(|r| remote::extract_host(&r.url).map(|s| s.to_string()));
         let env_var = cfg
