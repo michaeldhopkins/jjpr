@@ -16,14 +16,9 @@ pub struct HttpError {
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {} failed (HTTP {}): {}",
-            self.method,
-            self.path,
-            self.status,
-            truncate_body(&self.body, 500)
-        )
+        let (method, path, status) = (&self.method, &self.path, self.status);
+        let (body, see) = (truncate_body(&self.body, 500), crate::hints::forge_error());
+        write!(f, "{method} {path} failed (HTTP {status}): {body}\n{see}")
     }
 }
 
@@ -600,6 +595,21 @@ mod tests {
         let err = GraphQlError::from_errors(&errors);
         assert!(err.types.is_empty());
         assert!(err.to_string().contains("doesn't exist"));
+    }
+
+    #[test]
+    fn http_error_display_names_the_call_and_links_the_status_table() {
+        let err = HttpError {
+            status: 403,
+            method: "GET".to_string(),
+            path: "repos/o/r/pulls".to_string(),
+            body: "Resource not accessible".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "GET repos/o/r/pulls failed (HTTP 403): Resource not accessible\nSee \
+             https://michaeldhopkins.com/docs/jjpr/recovering.html#the-forge-returned-an-error"
+        );
     }
 
     #[test]

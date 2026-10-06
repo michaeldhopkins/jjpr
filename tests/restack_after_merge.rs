@@ -711,3 +711,66 @@ fn a_merge_commit_survivor_keeps_its_other_parent_and_drops_the_merged_one() {
     assert_eq!(carried, vec!["Add side", "Add top"]);
     assert!(!off_trunk(&repo).contains("Add bottom\n"));
 }
+
+/// `feat` moved on the forge and locally, so after a fetch it is conflicted:
+/// jj cannot say where it points, and jjpr skips it with a warning. Once the
+/// forge says its PR merged, submit forgets it. Unmerged, it stays.
+#[test]
+fn a_stale_bookmark_is_forgotten_only_once_its_pr_merged() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = common::JjTestRepo::new();
+    repo.commit_and_bookmark("feat.rs", "// feat\n", "Add feat", "feat");
+    let mut push =
+        jjpr::jj::version::push_new_bookmark_args(jjpr::jj::version::installed_jj_version())
+            .to_vec();
+    push.extend(["git", "push", "--remote", "origin", "--bookmark", "feat"]);
+    repo.run_jj(&push);
+    let forge_side = tempfile::TempDir::new().unwrap();
+    let origin = repo.origin_path().to_str().unwrap().to_string();
+    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
+    let clone = forge_side.path().join("clone");
+    run(
+        &clone,
+        "jj",
+        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
+    );
+    run(&clone, "jj", &["bookmark", "track", "feat@origin"]);
+    run(&clone, "jj", &["new", "feat"]);
+    std::fs::write(clone.join("feat.rs"), "// feat, remote\n").unwrap();
+    run(&clone, "jj", &["commit", "-m", "Remote edit"]);
+    run(&clone, "jj", &["bookmark", "set", "feat", "-r", "@-"]);
+    run(&clone, "jj", &["git", "push", "--bookmark", "feat"]);
+    repo.write_file("feat.rs", "// feat, local\n");
+    repo.commit("Local edit");
+    repo.set_bookmark("feat");
+    repo.run_jj(&["git", "fetch"]);
+
+    let jj = repo.runner();
+    let mine = jj.get_my_bookmarks().unwrap();
+    assert!(mine.iter().all(|b| b.name != "feat"), "feat is skipped");
+    assert_eq!(jj.stale_bookmarks(), vec!["feat".to_string()]);
+    let listed = || repo.run_jj(&["bookmark", "list", "feat"]);
+
+    let open = MergedForge {
+        merged: vec![],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
+    };
+    let forgotten = jjpr::submit::stale::forget_merged(&jj, &open, "o", "r", ForgeKind::GitHub);
+    assert!(forgotten.is_empty());
+    assert!(
+        listed().contains("feat"),
+        "an unmerged PR keeps its bookmark"
+    );
+
+    let merged = MergedForge {
+        merged: vec!["feat"],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
+    };
+    let forgotten = jjpr::submit::stale::forget_merged(&jj, &merged, "o", "r", ForgeKind::GitHub);
+    assert_eq!(forgotten, vec!["feat".to_string()]);
+    assert!(listed().trim().is_empty(), "forgotten: {}", listed());
+}

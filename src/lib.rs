@@ -5,6 +5,7 @@ pub mod docs;
 pub mod forge;
 pub mod graph;
 pub mod heartbeat;
+pub mod hints;
 pub mod identity;
 pub mod jj;
 pub mod merge;

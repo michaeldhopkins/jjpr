@@ -43,7 +43,10 @@ pub fn execute_submission_plan(
     // and a created PR notifies reviewers and is awkward to retract, so this must
     // refuse before the first push rather than warn afterwards.
     if !plan.divergent_changes.is_empty() {
-        anyhow::bail!("{}", divergent_change_message(plan));
+        anyhow::bail!(
+            "{}",
+            crate::hints::divergent_refusal(&plan.divergent_changes)
+        );
     }
 
     // Report merged bookmarks
@@ -80,7 +83,7 @@ pub fn execute_submission_plan(
         println!("  Pushing '{}'...", bookmark.name);
         if let Err(e) = jj.push_bookmark(&bookmark.name, &plan.remote_name) {
             report_partial_failure(&completed_actions);
-            return Err(e);
+            return Err(e.context(crate::hints::push_failed(&bookmark.name)));
         }
         completed_actions.push(format!("Pushed '{}'", bookmark.name));
 
@@ -390,34 +393,6 @@ fn print_body_conflict_warnings(
 /// Deliberately says what jjpr wanted to do, why it cannot, and what the user
 /// can do instead. The bare `422` ("Validation Failed") that GitHub would
 /// otherwise surface names none of those.
-/// Why submit stopped, and the two commits the user has to choose between.
-///
-/// Names the commits explicitly: "resolve the divergence" is not actionable
-/// without knowing which commits collided, and `jj log` will not obviously show
-/// it when the copies sit at different depths in the stack.
-fn divergent_change_message(plan: &SubmissionPlan) -> String {
-    let mut out = String::from("Refusing to submit: this stack contains a divergent change.\n");
-    for d in &plan.divergent_changes {
-        let short = &d.change_id[..d.change_id.len().min(12)];
-        out.push_str(&format!(
-            "\n  change {} is on {} commits: {}",
-            short,
-            d.commit_ids.len(),
-            d.commit_ids.join(", ")
-        ));
-        if !d.bookmarks.is_empty() {
-            out.push_str(&format!("\n    bookmarks: {}", d.bookmarks.join(", ")));
-        }
-    }
-    out.push_str(
-        "\n\njjpr will not publish both copies as separate pull requests. Resolve the \n\
-         divergence first — `jj abandon <commit>` to drop one, or `jj duplicate` to \n\
-         give it its own change id — then re-run.\n\n\
-         Nothing has been pushed.",
-    );
-    out
-}
-
 fn native_stack_conflict_message(plan: &SubmissionPlan, fk: ForgeKind) -> String {
     let abbr = fk.request_abbreviation();
     let mut out =
@@ -1064,7 +1039,14 @@ mod tests {
             "names BOTH commits, since 'resolve the divergence' is not actionable \
              without them: {msg}"
         );
-        assert!(msg.contains("jj abandon"), "gives the remedy: {msg}");
+        assert!(
+            msg.contains("jj abandon commit_hi, or jj abandon commit_lo"),
+            "gives the remedy with the real commits: {msg}"
+        );
+        assert!(
+            msg.contains("recovering.html#"),
+            "links the recovery page: {msg}"
+        );
         assert!(
             msg.contains("Nothing has been pushed"),
             "states the state: {msg}"
@@ -2681,7 +2663,12 @@ mod tests {
         };
 
         let err = execute_submission_plan(&FailingJj, &github, &plan).unwrap_err();
-        assert!(err.to_string().contains("push failed for profile"));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("push failed for profile"), "{msg}");
+        assert!(
+            msg.starts_with("could not push 'profile'. See ") && msg.contains("#a-push-failed"),
+            "names the bookmark and links the recovery page: {msg}"
+        );
     }
 
     #[test]

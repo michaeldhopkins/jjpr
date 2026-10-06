@@ -622,7 +622,7 @@ fn handle_phase_error(
     let now = local_time_hhmm();
     eprintln!("  [{now}] {label} error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {err}");
     if *consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-        eprintln!("  Too many consecutive errors; giving up.");
+        eprintln!("{}", crate::hints::watch_gave_up());
         return PhaseError::GiveUp;
     }
     if spinner_sleep(poll_interval, shutdown, is_tty, spinner_frame) {
@@ -1001,7 +1001,7 @@ pub fn run_watch_loop(
             // here, so without this an eval error could repeat forever: it was
             // the one increment in the loop that nothing ever tested against
             // the threshold.
-            eprintln!("  Too many consecutive errors; giving up.");
+            eprintln!("{}", crate::hints::watch_gave_up());
             break;
         }
 

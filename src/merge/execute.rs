@@ -8,6 +8,7 @@ use crate::forge::comment;
 use crate::forge::http::HttpError;
 use crate::forge::types::{MergeMethod, PullRequest};
 use crate::forge::{Forge, ForgeKind};
+use crate::hints;
 use crate::jj::Jj;
 use crate::jj::types::NarrowedSegment;
 
@@ -142,9 +143,12 @@ fn reconcile_local_state(
                 let range = segment_range(seg);
                 match jj.is_conflicted(&range) {
                     Ok(true) => {
-                        warnings.push(mk(format!(
-                            "Merge of '{effective_base}' into '{}' has conflicts; skipping push",
-                            seg.bookmark.name
+                        let first = jj.first_conflict(&range).ok().flatten();
+                        let name = &seg.bookmark.name;
+                        warnings.push(mk(hints::merge_conflict(
+                            effective_base,
+                            name,
+                            first.as_deref(),
                         )));
                         break;
                     }
@@ -187,9 +191,7 @@ fn reconcile_local_state(
                         // id comes from jj's stdout rather than from us.
                         let short_id: String = next_change_id.chars().take(12).collect();
                         let count = commit_ids.len();
-                        warnings.push(mk(format!(
-                            "Change '{short_id}' is divergent ({count} commits share this change ID)"
-                        )));
+                        warnings.push(mk(hints::divergent_change(&short_id, count)));
                         return warnings;
                     }
                     Ok(commit_ids) if commit_ids.is_empty() => {
@@ -237,9 +239,12 @@ fn reconcile_local_state(
                 match jj.is_conflicted(&range) {
                     Ok(false) => clean.push(seg.bookmark.name.as_str()),
                     Ok(true) => {
-                        warnings.push(mk(format!(
-                            "Rebase of '{}' onto '{effective_base}' has conflicts; skipping push",
-                            seg.bookmark.name
+                        let first = jj.first_conflict(&range).ok().flatten();
+                        let name = &seg.bookmark.name;
+                        warnings.push(mk(hints::rebase_conflict(
+                            name,
+                            effective_base,
+                            first.as_deref(),
                         )));
                         break;
                     }
@@ -293,7 +298,7 @@ fn reconcile_local_state(
         });
         println!("  Pushing '{name}'...");
         if let Err(e) = jj.push_bookmark(name, remote_name) {
-            warnings.push(mk(format!("Failed to push '{name}': {e}")));
+            warnings.push(mk(format!("{}: {e}", hints::push_failed(name))));
             break;
         }
         if let Some((n, number)) = dismissed {
@@ -313,27 +318,7 @@ fn reconcile_local_state(
 /// mangling rebase (`restored = false`) or roll only the rebase back to the
 /// clean post-fetch op (`restored = true`). No "run jj op restore" hand-off.
 fn concurrent_gate_warning(restored: bool, divergent_ids: &[String]) -> LocalDivergenceWarning {
-    let mut message = if restored {
-        "Paused: a concurrent jj process raced jjpr's restack. jjpr rolled its \
-         in-progress restack back to the clean fetched state — your work and the \
-         fetched changes are intact — and will retry on the next poll."
-            .to_string()
-    } else {
-        "Paused: a concurrent jj process modified the operation log while jjpr was \
-         reconciling. Both your work and the other process's work are preserved; \
-         jjpr did not restack, to avoid corrupting the stack, and will retry on \
-         the next poll."
-            .to_string()
-    };
-    if !divergent_ids.is_empty() {
-        message.push_str(&format!(
-            " The stack has a divergent change ({}) — two versions of the same \
-             change from the concurrent modification, both kept. jjpr continues \
-             once it is resolved (keep one with `jj abandon <the-stale-commit>`).",
-            divergent_ids.join(", ")
-        ));
-    }
-    message.push_str(" If another jj/jjpr process is running on this repo, pause it.");
+    let message = hints::concurrent_pause(restored, divergent_ids);
     LocalDivergenceWarning {
         kind: DivergenceKind::Concurrent,
         message,
@@ -1406,6 +1391,13 @@ mod tests {
                 .push(format!("merge_into:{bookmark}:{dest}"));
             Ok(())
         }
+        fn first_conflict(&self, revset: &str) -> Result<Option<String>> {
+            let hit = self
+                .conflicted
+                .iter()
+                .find(|n| revset == n.as_str() || revset.ends_with(&format!("::{n}")));
+            Ok(hit.map(|n| format!("ch_{n}")))
+        }
         fn is_conflicted(&self, revset: &str) -> Result<bool> {
             self.calls
                 .lock()
@@ -1782,8 +1774,11 @@ mod tests {
             result
                 .local_warnings
                 .iter()
-                .any(|w| w.message.contains("has conflicts") && w.message.contains("profile")),
-            "should name the conflict and the bookmark: {:?}",
+                .any(|w| w.message.contains("left conflicts")
+                    && w.message.contains("'profile' was not pushed")
+                    && w.message
+                        .contains("jj new ch_profile, fix the files, then jj squash")),
+            "should name the conflict, the bookmark and the resolve command: {:?}",
             result.local_warnings
         );
 
@@ -2497,8 +2492,10 @@ mod tests {
             result
                 .local_warnings
                 .iter()
-                .any(|w| w.message.contains("has conflicts")),
-            "should warn about conflicts: {:?}",
+                .any(|w| w.message.contains("left conflicts")
+                    && w.message
+                        .contains("jj log -r 'conflicts() & trunk()..profile'")),
+            "should warn about conflicts and say how to find them: {:?}",
             result.local_warnings
         );
     }
@@ -3516,7 +3513,8 @@ mod tests {
             result
                 .local_warnings
                 .iter()
-                .any(|w| w.message.contains("divergent")),
+                .any(|w| w.message.contains("divergent")
+                    && w.message.contains("jj log -r 'change_id(")),
             "divergence should still be reported: {:?}",
             result.local_warnings
         );
@@ -3637,7 +3635,8 @@ mod tests {
             result
                 .local_warnings
                 .iter()
-                .any(|w| w.message.contains("divergent") && w.message.contains("ch_root")),
+                .any(|w| w.message.contains("divergent")
+                    && w.message.contains("jj log -r 'change_id(ch_root)'")),
             "the warning must name the divergent root, not the clean tip: {:?}",
             result.local_warnings
         );

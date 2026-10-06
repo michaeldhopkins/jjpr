@@ -1,90 +1,76 @@
 # Recovering from bad state
 
-jjpr changes two places: your local repo and the forge. Every local
-change is a jj operation, so it can be undone. The forge follows your
-local stack the next time you submit. So recovery is nearly always:
-put the local stack right, then run `jjpr submit`.
+Put the local stack right, then run `jjpr submit` and the forge follows
+it. Every jj command, jjpr's included, can be undone:
 
 ```
-jj undo                       # undo the last operation, jjpr's included
-jj op log                     # every operation, newest first
-jj op restore <operation-id>  # put the whole repo back to that point
-jjpr submit                   # make the forge match the local stack
+jj undo                        # undo the last operation
+jj op log                      # list operations, newest first
+jj op restore <operation-id>   # put the repo back to that point
 ```
 
 ## A merged PR's commits are still in the PR above it
 
 The PR below was squash- or rebase-merged on the forge, and the PR
-above it was pushed still sitting on the old commits. Submit normally
-catches this and says `Rebasing 'top' onto main ('bottom' below it was
-merged)`. It misses a merge older than the forge's newest 100 merged PRs
-(50 on Forgejo), and one the forge rewrote before merging (GitLab's
-"Rebase" button).
+above it still carries its commits. Rebase onto trunk, dropping what
+already landed:
 
 ```
-jj log -r 'roots(trunk()..top)'                # the oldest commit above trunk
+jj log -r 'roots(trunk()..top)'      # the oldest commit above trunk
 jj rebase -s <that change> -d main --skip-emptied
 jjpr submit
 ```
 
-`--skip-emptied` drops the commits whose content is already on main.
-
 ## jjpr could not check whether a PR below was merged
 
-```
-  Warning: could not check whether a PR below 'top' was merged: <error>
-```
-
-The forge did not answer, so jjpr pushed without restacking. If nothing
-below was merged, there is nothing to do. If something was, run the
-command the warning prints, then `jjpr submit`. A network or token
-problem shows up in `jjpr auth test`.
+If nothing below was merged, carry on. If something was, run the
+`jj rebase` the warning prints, then `jjpr submit`. If the error repeats,
+run `jjpr auth test`.
 
 ## A merged PR sits under a merge commit
 
-```
-  Warning: 'bottom' below 'top' was merged, but 'top' starts with a merge commit.
-```
-
-jjpr swaps the merged parent for trunk itself when it can. It stops
-when the merge's other parent is also merged work, or when more than
-one of your commits builds on the merged one. Move each commit that
-sat on the merged one, keeping its other parents:
+Move the merge commit onto trunk, keeping each parent that was not
+merged:
 
 ```
-jj log -r 'trunk()..top'                       # find them and their parents
-jj rebase -s <commit> -d main -d <other parent>
+jj log -r 'trunk()..top'                         # find the merge commit's parents
+jj rebase -s <merge commit> -d main -d <unmerged parent>
 jjpr submit
 ```
-
-Leave out any other parent that was itself merged.
 
 ## Merged commits are still in `jj log` after a restack
 
-Harmless: the PR above no longer contains them. jjpr abandons them
-unless a bookmark, your working copy or other work sits on them. To
-drop them anyway, run the `jj abandon` the warning prints.
+They are no longer part of any PR. Remove them with the `jj abandon`
+the warning prints, or leave them.
 
-## A restack left conflicts
+## A bookmark is skipped as stale
 
-```
-Error: cannot push; some commits have unresolved conflicts
-```
-
-Nothing was pushed. Resolve the conflict, or put the stack back as it
-was before the rebase:
+The bookmark points at a commit jj cannot place, usually because its
+PR was merged on the forge. `jjpr submit` removes it once the forge
+confirms the merge. To remove it yourself:
 
 ```
-jj new <change-id>          # resolve on top of it, then: jj squash
-jj op log                   # or find the operation before the rebase
-jj op restore <operation-id>
+jj bookmark forget <name>
+```
+
+## A rebase left conflicts
+
+jjpr pushes nothing that has conflicts. Resolve them on top of the
+conflicted change and fold the fix in:
+
+```
+jj new <change-id>       # the change named in the message
+# fix the conflicted files
+jj squash
 jjpr submit
 ```
 
-## Submit refuses a divergent change
+Or undo the rebase with `jj op log` and `jj op restore`.
 
-Two commits share one change ID, usually after editing the same change
-in two places. Keep one copy, abandon the other:
+## Submit or merge stops on a divergent change
+
+Two commits share one change ID. Keep the one you want and abandon the
+other:
 
 ```
 jj log -r 'change_id(<change-id>)'
@@ -92,16 +78,62 @@ jj abandon <commit-id of the copy to drop>
 jjpr submit
 ```
 
-## A push was rejected
+To keep both as separate changes, run `jj duplicate <commit-id>`, then
+`jj abandon <commit-id>`.
 
-Someone else pushed to the branch, or the forge protects it. Fetch and
-look before pushing again:
+## A push failed
+
+Someone may have pushed to the branch, or the forge may protect it.
+Look before pushing again:
 
 ```
 jj git fetch
 jj log -r '<bookmark> | <bookmark>@origin'
 ```
 
-If the remote copy is the one to keep:
-`jj bookmark set <bookmark> -r <bookmark>@origin`. If yours is, run
-`jjpr submit` again.
+To keep the forge's version, run
+`jj bookmark set <bookmark> -r <bookmark>@origin`. To keep yours, run
+`jjpr submit`.
+
+## Local sync failed
+
+After a merge, jjpr could not update the PRs above it on your machine.
+The merged PR is fine, and the rest stay open. Either rebase them:
+
+```
+jj git fetch
+jj rebase -s <change-id> -d main
+jjpr submit
+```
+
+Or take the forge's version of each bookmark:
+
+```
+jj git fetch
+jj bookmark set <bookmark> -r <bookmark>@origin
+```
+
+Then run `jjpr merge` again. `jjpr watch` picks it up by itself.
+
+## Forge reconcile failed
+
+The merge happened, but a follow-up change on the forge did not (a
+base branch or the stack comment). Run `jjpr merge` again. If it keeps
+failing, see the table below.
+
+## The forge returned an error
+
+| Status | Usually means | Do this |
+|---|---|---|
+| 401 | The token is missing, expired or revoked | `jjpr auth test`, then log in again |
+| 403 | The token lacks a scope, or the organization requires SSO for it | Give it `repo` (GitHub, Forgejo) or `api` (GitLab), or authorize it for the organization |
+| 404 | The token cannot see the repository, or the PR is gone | `jjpr auth test`, and check the remote URL |
+| 405, 409 | The forge refused the merge: checks, reviews or a merge method the repository does not allow | Open the PR on the forge to see what it waits for |
+| 422 | The forge rejected the change, often because a branch it names is gone | `jj git fetch`, then run the command again |
+| 429 | Too many requests | Wait a few minutes, then run again |
+| 500–504 | The forge is having trouble | Run again in a minute |
+
+## Watch gave up
+
+`jjpr watch` stops after 10 errors in a row. The lines above that
+message show the error. Fix it, then start `jjpr watch` again.

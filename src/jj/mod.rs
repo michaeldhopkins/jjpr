@@ -1,4 +1,5 @@
 pub mod runner;
+pub mod stale;
 pub mod templates;
 pub mod types;
 pub mod version;
@@ -57,6 +58,17 @@ pub trait Jj: Send + Sync {
         let _ = (source, destinations);
         anyhow::bail!("rebase_onto_all is not implemented here")
     }
+    /// Bookmarks skipped so far because they point at a missing or conflicted
+    /// commit. Stubs without such bookmarks need not implement it.
+    fn stale_bookmarks(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// `jj bookmark forget <name>`: drop a local bookmark without pushing a
+    /// deletion.
+    fn forget_bookmark(&self, name: &str) -> Result<()> {
+        let _ = name;
+        anyhow::bail!("forget_bookmark is not implemented here")
+    }
     fn abandon(&self, revset: &str) -> Result<()> {
         let _ = revset;
         anyhow::bail!("abandon is not implemented here")
@@ -84,6 +96,13 @@ pub trait Jj: Send + Sync {
     fn resolve_change_id(&self, change_id: &str) -> Result<Vec<String>>;
     /// Check whether the commit at `revset` has unresolved conflicts.
     fn is_conflicted(&self, revset: &str) -> Result<bool>;
+    /// The change id of the oldest conflicted commit in `revset`, to name in
+    /// the resolve command. `None` when there is none or it cannot be told;
+    /// the message then says how to list them instead.
+    fn first_conflict(&self, revset: &str) -> Result<Option<String>> {
+        let _ = revset;
+        Ok(None)
+    }
 
     /// Snapshot the working copy into `@` — capture the user's current edits.
     /// jjpr is otherwise working-copy-agnostic (it never snapshots incidentally);

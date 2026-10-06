@@ -44,9 +44,49 @@ pub fn restack_note(bookmark: &str, trunk: &str, mut merged: Vec<String>) -> Str
     format!("'{bookmark}' onto {trunk} ('{names}' below it {verb} merged)")
 }
 
+/// The error when the restack's own rebase fails: the same rebase, spelled
+/// with the trunk's name, for the user to run once jj's complaint is fixed.
+pub fn rebase_failed(restack: &super::restack::Restack, trunk: &str) -> String {
+    let mut command = format!("jj rebase -s {}", restack.root);
+    for destination in &restack.onto {
+        let destination = if destination == "trunk()" {
+            trunk
+        } else {
+            destination
+        };
+        command.push_str(&format!(" -d {destination}"));
+    }
+    if restack.skip_emptied {
+        command.push_str(" --skip-emptied");
+    }
+    format!(
+        "failed to rebase '{}' onto {trunk}. To do it yourself: {command}",
+        restack.bookmark
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::submit::restack::Restack;
+
+    #[test]
+    fn rebase_failed_spells_out_the_same_rebase() {
+        let mut restack = Restack {
+            bookmark: "top".to_string(),
+            root: "xkqv".to_string(),
+            onto: vec!["trunk()".to_string(), "o1".to_string()],
+            skip_emptied: false,
+            abandon: None,
+        };
+        assert_eq!(
+            rebase_failed(&restack, "main"),
+            "failed to rebase 'top' onto main. To do it yourself: jj rebase -s xkqv -d main -d o1"
+        );
+        restack.onto.truncate(1);
+        restack.skip_emptied = true;
+        assert!(rebase_failed(&restack, "main").ends_with("-s xkqv -d main --skip-emptied"));
+    }
 
     #[test]
     fn restack_note_names_what_merged_in_order_and_agrees_in_number() {

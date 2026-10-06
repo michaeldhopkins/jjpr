@@ -279,6 +279,10 @@ pub fn restack_merged_base(
     before_fetch: &[Bookmark],
     foreign_base: bool,
 ) -> Result<bool> {
+    if !plan.dry_run {
+        let (owner, repo) = (&plan.repo_info.owner, &plan.repo_info.repo);
+        super::stale::forget_merged(jj, forge, owner, repo, plan.forge_kind);
+    }
     let merged: HashSet<&str> = plan
         .bookmarks_already_merged
         .iter()
@@ -326,7 +330,7 @@ pub fn restack_merged_base(
         jj.rebase_onto_all(&restack.root, &restack.onto)
     };
     let bookmark = &restack.bookmark;
-    rebase.with_context(|| format!("failed to rebase '{bookmark}' onto {trunk}"))?;
+    rebase.with_context(|| super::restack_messages::rebase_failed(&restack, trunk))?;
     if let Some(head) = &restack.abandon {
         // The survivor is already safe on trunk; a failure here only leaves
         // the merged commits visible, so it warns rather than stopping submit.
@@ -374,7 +378,9 @@ pub fn refuse_conflicts(segments: &[NarrowedSegment]) -> Result<()> {
         eprintln!("  {change_id} ({bookmark}): {desc}");
     }
     eprintln!();
-    eprintln!("To resolve: jj edit <change_id>, fix the conflicts, then re-run jjpr submit.");
+    eprintln!(
+        "To resolve one: jj new <change_id>, fix the files, then jj squash. Then run jjpr submit again."
+    );
     anyhow::bail!("unresolved conflicts in stack");
 }
 
