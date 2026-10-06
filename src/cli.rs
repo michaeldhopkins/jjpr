@@ -295,6 +295,22 @@ Examples:
         #[arg(long, value_name = "MINUTES")]
         timeout: Option<u64>,
     },
+    /// Take back the last jjpr command: the local repo and what it changed on the forge
+    Undo {
+        /// Also close PRs it opened, and restore what others changed since
+        #[arg(long)]
+        force: bool,
+
+        /// List the recorded commands instead
+        #[arg(long)]
+        list: bool,
+    },
+    /// Put back the last command `jjpr undo` took back
+    Redo {
+        /// Restore what others changed since the undo
+        #[arg(long)]
+        force: bool,
+    },
     /// Manage forge authentication
     #[command(long_about = "\
 Manage forge authentication.

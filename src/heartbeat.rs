@@ -53,11 +53,76 @@ fn write(path: &Path, data: &HeartbeatData) -> Result<()> {
     Ok(())
 }
 
+/// Whether a `jjpr watch` is running in this repo: the process that wrote the
+/// heartbeat is alive, however long ago it last refreshed it (a long poll or
+/// a slow forge is not an exit). A heartbeat a dead watcher left is ignored.
+/// Watchers in other workspaces of the repo are found by their markers in
+/// the shared store.
+pub fn watch_running(repo_root: &Path) -> bool {
+    if matches!(read(&heartbeat_path(repo_root)), Ok(Some(d)) if alive(d.pid)) {
+        return true;
+    }
+    let Some(dir) = watchers_dir(repo_root) else {
+        return false;
+    };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut running = false;
+    for f in read.flatten() {
+        let name = f.file_name().to_string_lossy().into_owned();
+        let Some(pid) = name
+            .strip_prefix("watch-")
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if alive(pid) {
+            running = true;
+        } else {
+            // A watcher that crashed left it; a reused pid would revive it.
+            let _ = std::fs::remove_file(f.path());
+        }
+    }
+    running
+}
+
+/// Where watchers leave their markers: the repo's own store, which every
+/// workspace shares.
+fn watchers_dir(repo_root: &Path) -> Option<PathBuf> {
+    crate::undo::journal::repo_store_dir(repo_root)
+        .ok()
+        .map(|d| d.join("jjpr"))
+}
+
+/// Whether process `pid` is alive. Where that cannot be told, it is assumed
+/// alive, the side that refuses rather than discards.
+pub fn alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return true;
+        };
+        // SAFETY: signal 0 delivers nothing; it only asks whether the process
+        // exists, and touches no memory.
+        let rc = unsafe { libc::kill(pid, 0) };
+        rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// A held watch heartbeat: refreshed while watching, removed on drop.
 pub struct WatchHeartbeat {
     path: PathBuf,
     pid: u32,
     started_at: u64,
+    /// `watch-<pid>` in the repo's shared store, so `jjpr undo` in any
+    /// workspace of the repo sees this watcher.
+    marker: Option<PathBuf>,
 }
 
 impl WatchHeartbeat {
@@ -83,10 +148,16 @@ impl WatchHeartbeat {
                 last_seen: now,
             },
         );
+        let marker = watchers_dir(repo_root).map(|d| d.join(format!("watch-{pid}")));
+        if let Some(m) = &marker {
+            let _ = m.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(m, pid.to_string());
+        }
         Some(Self {
             path,
             pid,
             started_at: now,
+            marker,
         })
     }
 
@@ -112,6 +183,9 @@ impl Drop for WatchHeartbeat {
             && d.pid == self.pid
         {
             let _ = std::fs::remove_file(&self.path);
+        }
+        if let Some(m) = &self.marker {
+            let _ = std::fs::remove_file(m);
         }
     }
 }

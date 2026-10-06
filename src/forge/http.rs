@@ -139,19 +139,18 @@ impl ForgeClient {
         })
     }
 
-    /// POST with a JSON body, return the response JSON.
     pub fn post(&self, path: &str, body: &impl Serialize) -> Result<serde_json::Value> {
         self.request_with_body("POST", path, body)
     }
-
-    /// PATCH with a JSON body, return the response JSON.
     pub fn patch(&self, path: &str, body: &impl Serialize) -> Result<serde_json::Value> {
         self.request_with_body("PATCH", path, body)
     }
-
-    /// PUT with a JSON body, return the response JSON.
     pub fn put(&self, path: &str, body: &impl Serialize) -> Result<serde_json::Value> {
         self.request_with_body("PUT", path, body)
+    }
+    /// GitHub and Forgejo withdraw review requests with a DELETE that has a body.
+    pub fn delete_with_body(&self, path: &str, body: &impl Serialize) -> Result<serde_json::Value> {
+        self.request_with_body("DELETE", path, body)
     }
 
     fn request_with_body(
@@ -163,13 +162,14 @@ impl ForgeClient {
         let url = self.full_url(path).map_err(|e| anyhow::anyhow!("{e}"))?;
         let (header, value) = self.auth_header();
 
-        if !matches!(method, "POST" | "PATCH" | "PUT") {
+        if !matches!(method, "POST" | "PATCH" | "PUT" | "DELETE") {
             anyhow::bail!("unsupported HTTP method: {method}");
         }
         let mut resp = super::backoff::send(method, path, &url, || {
             let request = match method {
                 "POST" => self.agent.post(&url),
                 "PATCH" => self.agent.patch(&url),
+                "DELETE" => self.agent.delete(&url).force_send_body(),
                 _ => self.agent.put(&url),
             };
             let request = request.header(header, &value);

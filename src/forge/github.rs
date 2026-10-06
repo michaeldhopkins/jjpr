@@ -2,12 +2,12 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use super::Forge;
 use super::http::{ForgeClient, HttpError, url_encode};
 use super::types::{
     ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PrStatusBundle, PullRequest,
     ReviewSummary, Stack,
 };
+use super::{Forge, pr_ops};
 
 /// GitHub implementation using direct HTTP via `ForgeClient`.
 pub struct GitHubForge {
@@ -378,13 +378,7 @@ impl Forge for GitHubForge {
         number: u64,
         reviewers: &[String],
     ) -> Result<()> {
-        if reviewers.is_empty() {
-            return Ok(());
-        }
-        let path = format!("repos/{owner}/{repo}/pulls/{number}/requested_reviewers");
-        self.client
-            .post(&path, &serde_json::json!({ "reviewers": reviewers }))?;
-        Ok(())
+        pr_ops::github::reviewers(&self.client, (owner, repo, number), reviewers, true)
     }
 
     fn list_comments(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<IssueComment>> {
@@ -428,18 +422,7 @@ impl Forge for GitHubForge {
     }
 
     fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
-        // GitHub requires GraphQL for marking a PR as ready.
-        // First fetch the node_id from REST, then use it in the mutation.
-        let path = format!("repos/{owner}/{repo}/pulls/{number}");
-        let pr = self.client.get(&path)?;
-        let node_id = pr["node_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("PR response missing node_id field"))?;
-
-        let query = "mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }";
-        self.client
-            .graphql("graphql", query, &serde_json::json!({ "id": node_id }))?;
-        Ok(())
+        pr_ops::github::set_draft(&self.client, owner, repo, number, false)
     }
 
     fn find_merged_pr(&self, owner: &str, repo: &str, head: &str) -> Result<Option<PullRequest>> {
@@ -651,11 +634,25 @@ impl Forge for GitHubForge {
 
     fn get_pr_state(&self, owner: &str, repo: &str, number: u64) -> Result<PrState> {
         let path = format!("repos/{owner}/{repo}/pulls/{number}");
-        let pr = self.client.get(&path)?;
-        Ok(PrState {
-            merged: pr["merged_at"].is_string(),
-            state: pr["state"].as_str().unwrap_or("unknown").to_string(),
-        })
+        Ok(pr_ops::github::state(&self.client.get(&path)?))
+    }
+    fn get_pr(&self, owner: &str, repo: &str, number: u64) -> Result<(PullRequest, PrState)> {
+        pr_ops::github::get_pr(&self.client, owner, repo, number)
+    }
+    fn close_pr(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::github::set_state(&self.client, owner, repo, number, "closed")
+    }
+    fn reopen_pr(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::github::set_state(&self.client, owner, repo, number, "open")
+    }
+    fn convert_to_draft(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::github::set_draft(&self.client, owner, repo, number, true)
+    }
+    fn remove_reviewers(&self, owner: &str, repo: &str, number: u64, who: &[String]) -> Result<()> {
+        pr_ops::github::reviewers(&self.client, (owner, repo, number), who, false)
+    }
+    fn get_branch_head(&self, owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {
+        pr_ops::github::branch_head(&self.client, owner, repo, branch)
     }
 
     fn get_pr_mergeability(&self, owner: &str, repo: &str, number: u64) -> Result<PrMergeability> {

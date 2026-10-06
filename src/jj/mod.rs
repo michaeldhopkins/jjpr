@@ -142,4 +142,8 @@ pub trait Jj: Send + Sync {
     fn restore_operation(&self, _op_id: &str) -> Result<()> {
         Ok(())
     }
+
+    /// `jjpr watch` calls this at the top of each poll. Recording for `jjpr
+    /// undo` starts a new entry here, so each poll is undone on its own.
+    fn checkpoint(&self) {}
 }

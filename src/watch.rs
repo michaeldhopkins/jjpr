@@ -659,8 +659,7 @@ pub fn run_watch_loop(
     let timeout = opts.timeout;
     let poll_interval = opts.poll_interval;
     let is_tty = opts.is_tty;
-    let owner = &repo_info.owner;
-    let repo = &repo_info.repo;
+    let (owner, repo) = (&repo_info.owner, &repo_info.repo);
 
     let mut all_created: Vec<CreatedPr> = Vec::new();
     let mut all_promoted: Vec<PromotedPr> = Vec::new();
@@ -719,8 +718,8 @@ pub fn run_watch_loop(
         if let Some(hb) = heartbeat {
             hb.refresh();
         }
-        // Clear any spinner frame left by the previous poll's sleep before this
-        // iteration prints anything, so real messages never collide with it.
+        jj.checkpoint(); // each poll gets its own `jjpr undo` entry
+        // Clear the last poll's spinner frame first, so real messages never collide with it.
         clear_status_line(&mut std::io::stdout(), is_tty);
         if shutdown.load(Ordering::Relaxed) {
             break;

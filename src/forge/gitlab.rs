@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 
-use super::Forge;
 use super::http::ForgeClient;
 use super::types::{
     ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest, PullRequestRef,
     ReviewSummary,
 };
+use super::{Forge, pr_ops};
 
 /// GitLab implementation using direct HTTP via `ForgeClient`.
 pub struct GitLabForge {
@@ -223,47 +223,7 @@ impl Forge for GitLabForge {
         number: u64,
         reviewers: &[String],
     ) -> Result<()> {
-        if reviewers.is_empty() {
-            return Ok(());
-        }
-
-        let project = Self::encode_project(owner, repo);
-
-        // Batch lookup: fetch all project members in one paginated call
-        // instead of N individual user lookups.
-        let members_path = format!("projects/{project}/members/all?per_page=100");
-        let members = self.client.get_paginated(&members_path)?;
-        let member_map: std::collections::HashMap<&str, u64> = members
-            .iter()
-            .filter_map(|m| {
-                let username = m["username"].as_str()?;
-                let id = m["id"].as_u64()?;
-                Some((username, id))
-            })
-            .collect();
-
-        let mut reviewer_ids = Vec::new();
-        for username in reviewers {
-            if let Some(&id) = member_map.get(username.as_str()) {
-                reviewer_ids.push(id);
-            } else {
-                // Fallback for non-member reviewers (e.g., invited external users)
-                let encoded_user = super::http::url_encode(username);
-                let output = self.client.get(&format!("users?username={encoded_user}"))?;
-                let users: Vec<serde_json::Value> = serde_json::from_value(output)
-                    .context("failed to parse user lookup response")?;
-                let user_id = users
-                    .first()
-                    .and_then(|u| u["id"].as_u64())
-                    .ok_or_else(|| anyhow::anyhow!("user '{username}' not found on GitLab"))?;
-                reviewer_ids.push(user_id);
-            }
-        }
-
-        let path = format!("projects/{project}/merge_requests/{number}");
-        self.client
-            .put(&path, &serde_json::json!({ "reviewer_ids": reviewer_ids }))?;
-        Ok(())
+        pr_ops::gitlab::request_reviewers(&self.client, (owner, repo, number), reviewers)
     }
 
     fn list_comments(&self, owner: &str, repo: &str, number: u64) -> Result<Vec<IssueComment>> {
@@ -317,11 +277,7 @@ impl Forge for GitLabForge {
     }
 
     fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
-        let project = Self::encode_project(owner, repo);
-        let path = format!("projects/{project}/merge_requests/{number}");
-        self.client
-            .put(&path, &serde_json::json!({ "draft": false }))?;
-        Ok(())
+        pr_ops::gitlab::set_draft(&self.client, (owner, repo, number), false)
     }
 
     fn get_authenticated_user(&self) -> Result<String> {
@@ -441,13 +397,25 @@ impl Forge for GitLabForge {
     }
 
     fn get_pr_state(&self, owner: &str, repo: &str, number: u64) -> Result<PrState> {
-        let project = Self::encode_project(owner, repo);
-        let path = format!("projects/{project}/merge_requests/{number}");
-        let mr = self.client.get(&path)?;
-        Ok(PrState {
-            merged: mr["state"].as_str() == Some("merged"),
-            state: mr["state"].as_str().unwrap_or("unknown").to_string(),
-        })
+        Ok(self.get_pr(owner, repo, number)?.1)
+    }
+    fn get_pr(&self, owner: &str, repo: &str, number: u64) -> Result<(PullRequest, PrState)> {
+        pr_ops::gitlab::get_pr(&self.client, (owner, repo, number))
+    }
+    fn close_pr(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::gitlab::state_event(&self.client, (owner, repo, number), "close")
+    }
+    fn reopen_pr(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::gitlab::state_event(&self.client, (owner, repo, number), "reopen")
+    }
+    fn convert_to_draft(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::gitlab::set_draft(&self.client, (owner, repo, number), true)
+    }
+    fn remove_reviewers(&self, owner: &str, repo: &str, number: u64, who: &[String]) -> Result<()> {
+        pr_ops::gitlab::remove_reviewers(&self.client, (owner, repo, number), who)
+    }
+    fn get_branch_head(&self, owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {
+        pr_ops::gitlab::branch_head(&self.client, owner, repo, branch)
     }
 
     fn get_pr_mergeability(&self, owner: &str, repo: &str, number: u64) -> Result<PrMergeability> {

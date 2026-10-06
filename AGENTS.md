@@ -10,6 +10,8 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 - `src/forge/` — Forge trait + backends (GitHub, GitLab, Forgejo) using `ForgeClient` (ureq HTTP wrapper), token resolution, remote URL parsing, PR comment generation
 - `src/graph/` — Change graph construction from bookmarks, traversal toward trunk
 - `src/submit/` — Analyze target stack, resolve multi-bookmark segments, plan submission, execute (push/PR/comments)
+- `src/undo/` — `jjpr undo` / `jjpr redo`: `submit`, `merge` and `watch` record their pushes and forge writes (with the values they replaced) through `RecordingJj` / `RecordingForge` into a journal in `.jj/repo/jjpr/undo/`; undo plans the reverse (`plan.rs`, pure) and runs it. Design, measurements and per-forge findings: `notes/undo.md`
+- `src/connect.rs` — finding the repo root and building the forge client, shared by `main.rs` and undo
 - `src/auth.rs` — Auth test/help commands
 - `notes/forges/` — internal research on forges: feature deep-dives (e.g. GitHub native stacks) and candidate-forge evaluations. Not user docs; those are `docs/src/forges.md`.
 

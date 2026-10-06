@@ -1,13 +1,19 @@
 # Recovering from bad state
 
-Your stack lives in your local repo, and jj records every change to it.
-To go back to an earlier state, find it in the operation log and restore
-it. Then run `jjpr submit`.
+To take back the last jjpr command, locally and on the forge, run
+`jjpr undo`. See [undo and redo](commands/undo.md).
 
 ```
-jj op log                      # list operations, newest first
-jj op restore <operation-id>   # put the repo back to that point
+jjpr undo --dry-run            # what it would take back
+jjpr undo                      # take it back
 ```
+
+## jjpr undo refuses
+
+The message says why. Where it offers `--force`, that is the fix.
+Otherwise, change the stack with jj until it is what you want, then run
+`jjpr submit`, and the forge follows. Close a PR you no longer want on
+the forge.
 
 ## A merged PR's commits are still in the PR above it
 

@@ -217,24 +217,9 @@ pub struct WatchOptions {
 pub(crate) fn local_time_hhmm() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as libc::time_t)
+        .map(|d| d.as_secs())
         .unwrap_or(0);
-
-    // SAFETY: libc::tm is a plain C struct of integers (and, on some platforms, a nullable
-    // pointer), for which all-zero bytes are a valid value.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: both pointers come from live, exclusively borrowed locals for the whole call, and
-    // localtime_r writes only into `tm`.
-    #[cfg(unix)]
-    unsafe {
-        libc::localtime_r(&secs, &mut tm)
-    };
-    // SAFETY: as above; localtime_s writes only into `tm`.
-    #[cfg(windows)]
-    unsafe {
-        libc::localtime_s(&mut tm, &secs)
-    };
-    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    crate::clock::local(secs).1
 }
 
 #[cfg(test)]

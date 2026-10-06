@@ -9,6 +9,7 @@
 - [submit](commands/submit.md)
 - [merge](commands/merge.md)
 - [status](commands/status.md)
+- [undo and redo](commands/undo.md)
 - [auth](commands/auth.md)
 - [config](commands/config.md)
 

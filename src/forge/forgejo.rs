@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 
-use super::Forge;
 use super::http::ForgeClient;
 use super::types::{
     ChecksStatus, IssueComment, MergeMethod, PrMergeability, PrState, PullRequest, ReviewSummary,
 };
+use super::{Forge, pr_ops};
 
 /// Forgejo/Codeberg implementation using direct HTTP via `ForgeClient`.
 pub struct ForgejoForge {
@@ -181,10 +181,7 @@ impl Forge for ForgejoForge {
     }
 
     fn mark_pr_ready(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
-        let path = format!("repos/{owner}/{repo}/pulls/{number}");
-        let json_body = serde_json::json!({ "draft": false });
-        self.client.patch(&path, &json_body)?;
-        Ok(())
+        pr_ops::forgejo::set_draft(&self.client, owner, repo, number, false)
     }
 
     fn get_authenticated_user(&self) -> Result<String> {
@@ -293,6 +290,30 @@ impl Forge for ForgejoForge {
             merged: pr["merged"].as_bool().unwrap_or(false),
             state: pr["state"].as_str().unwrap_or("unknown").to_string(),
         })
+    }
+
+    fn get_pr(&self, owner: &str, repo: &str, number: u64) -> Result<(PullRequest, PrState)> {
+        pr_ops::forgejo::get_pr(&self.client, owner, repo, number)
+    }
+
+    fn close_pr(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::github::set_state(&self.client, owner, repo, number, "closed")
+    }
+
+    fn reopen_pr(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::github::set_state(&self.client, owner, repo, number, "open")
+    }
+
+    fn convert_to_draft(&self, owner: &str, repo: &str, number: u64) -> Result<()> {
+        pr_ops::forgejo::set_draft(&self.client, owner, repo, number, true)
+    }
+
+    fn remove_reviewers(&self, owner: &str, repo: &str, number: u64, who: &[String]) -> Result<()> {
+        pr_ops::github::reviewers(&self.client, (owner, repo, number), who, false)
+    }
+
+    fn get_branch_head(&self, owner: &str, repo: &str, branch: &str) -> Result<Option<String>> {
+        pr_ops::forgejo::branch_head(&self.client, owner, repo, branch)
     }
 
     fn get_pr_mergeability(&self, owner: &str, repo: &str, number: u64) -> Result<PrMergeability> {
@@ -624,20 +645,29 @@ mod tests {
         );
     }
 
+    /// Forgejo ignores a `draft` field; a PR stops being a draft when its
+    /// title loses the `WIP:` marker.
     #[test]
-    fn mark_pr_ready_clears_the_draft_flag() {
-        let server = StubServer::start(vec![route("PATCH", "/repos/o/r/pulls/7", 200, "{}")]);
+    fn mark_pr_ready_drops_the_title_marker() {
+        let server = StubServer::start(vec![
+            route(
+                "GET",
+                "/repos/o/r/pulls/7",
+                200,
+                r#"{"title":"WIP: Add x"}"#,
+            ),
+            route("PATCH", "/repos/o/r/pulls/7", 200, "{}"),
+        ]);
 
         stub_forge(&server)
             .mark_pr_ready("o", "r", 7)
             .expect("200 is success");
 
+        let patch = &server.requests()[1];
+        assert_eq!(patch.method, "PATCH");
         assert_eq!(
-            only_request(&server),
-            (
-                "PATCH /repos/o/r/pulls/7".to_string(),
-                serde_json::json!({ "draft": false })
-            )
+            serde_json::from_str::<serde_json::Value>(&patch.body).unwrap(),
+            serde_json::json!({ "title": "Add x" })
         );
     }
 

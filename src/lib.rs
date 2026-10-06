@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod cli;
+pub mod clock;
 pub mod config;
+pub mod connect;
 pub mod docs;
 pub mod forge;
 pub mod graph;
@@ -11,5 +13,6 @@ pub mod jj;
 pub mod merge;
 pub mod parallel;
 pub mod submit;
+pub mod undo;
 pub mod verbose;
 pub mod watch;

@@ -6,23 +6,18 @@
 )]
 
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::io::IsTerminal;
-use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 
 use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
 use jjpr::config;
+use jjpr::connect::{ResolvedForge, build_forge, find_remote_host, find_repo_root, resolve_forge};
 use jjpr::forge::remote;
 use jjpr::forge::status as forge_status;
-use jjpr::forge::token as forge_token;
 use jjpr::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
-use jjpr::forge::{
-    AuthScheme, Forge, ForgeClient, ForgeKind, ForgejoForge, GitHubForge, GitLabForge,
-    PaginationStyle,
-};
+use jjpr::forge::{Forge, ForgeKind};
 use jjpr::graph::change_graph;
 use jjpr::identity::Identity;
 use jjpr::jj::types::{Bookmark, BookmarkSegment, BranchStack};
@@ -30,6 +25,7 @@ use jjpr::jj::{Jj, JjRunner};
 use jjpr::merge;
 use jjpr::parallel;
 use jjpr::submit::{analyze, execute, plan, resolve, restack};
+use jjpr::undo::{Direction, Options, RecordingForge, RecordingJj};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -137,6 +133,12 @@ fn main() -> Result<()> {
                 ready,
             })
         }
+        Some(Commands::Undo { force, list }) => {
+            jjpr::undo::command(Options::new(Direction::Undo, force, cli.dry_run), list)
+        }
+        Some(Commands::Redo { force }) => {
+            jjpr::undo::command(Options::new(Direction::Redo, force, cli.dry_run), false)
+        }
         Some(Commands::Auth { command }) => match command {
             AuthCommands::Test { remote } => {
                 let detected = detect_forge_for_cwd(remote.as_deref())?;
@@ -178,7 +180,7 @@ fn main() -> Result<()> {
 
 /// Shared setup result used by submit, merge, and watch commands.
 struct ResolvedStack {
-    jj: JjRunner,
+    jj: RecordingJj<JjRunner>,
     forge: Box<dyn Forge>,
     forge_kind: ForgeKind,
     remote_name: String,
@@ -303,9 +305,24 @@ fn resolve_stack(
     let segments = resolve::resolve_bookmark_selections(&analysis.relevant_segments, interactive)?;
     let stack_base = analysis.base_branch;
 
+    // Record from here for `jjpr undo`: after the snapshot and the fetch,
+    // which undo never takes back.
+    let command = match command_verb {
+        "Merging" => "merge",
+        "Watching" => "watch",
+        _ => "submit",
+    };
+    let meta = jjpr::undo::Meta {
+        command: command.to_string(),
+        remote: remote_name.clone(),
+        forge: forge_kind,
+        owner: repo_info.owner.clone(),
+        repo: repo_info.repo.clone(),
+    };
+    let recorder = jjpr::undo::record(&repo_path, meta);
     Ok(Some(ResolvedStack {
-        jj,
-        forge,
+        jj: RecordingJj::new(jj, recorder.clone()),
+        forge: Box::new(RecordingForge::new(forge, recorder)),
         forge_kind,
         remote_name,
         repo_info,
@@ -1243,6 +1260,7 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
             anyhow::bail!("--dry-run is not supported with --watch");
         }
         eprintln!("hint: `jjpr merge --watch` is deprecated. Use `jjpr watch` instead.\n");
+        drop(stack); // watch records its own polls for `jjpr undo`
         return cmd_watch(WatchArgs {
             bookmark: args.bookmark,
             preferred_remote: args.preferred_remote,
@@ -1644,134 +1662,6 @@ fn cmd_config_init_repo() -> Result<()> {
     Ok(())
 }
 
-struct ResolvedForge {
-    forge: Box<dyn Forge>,
-    kind: ForgeKind,
-    remote_name: String,
-    repo_info: RepoInfo,
-}
-
-/// Resolve the forge to use from config + remotes.
-///
-/// When `config.forge` is set, it's authoritative: we use that forge kind
-/// and resolve the token from `config.forge_token_env` (or the forge's default
-/// env var). Errors reflect the config not working, not a detection failure.
-///
-/// When `config.forge` is not set, we auto-detect from remote URLs.
-fn resolve_forge(
-    remotes: &[jjpr::jj::GitRemote],
-    cfg: &config::Config,
-    preferred_remote: Option<&str>,
-) -> Result<ResolvedForge> {
-    if let Some(kind) = cfg.forge {
-        resolve_forge_from_config(
-            remotes,
-            kind,
-            cfg.forge_token_env.as_deref(),
-            preferred_remote,
-        )
-    } else {
-        resolve_forge_auto(remotes, preferred_remote)
-    }
-}
-
-fn resolve_forge_from_config(
-    remotes: &[jjpr::jj::GitRemote],
-    kind: ForgeKind,
-    token_env: Option<&str>,
-    preferred_remote: Option<&str>,
-) -> Result<ResolvedForge> {
-    let env_var = token_env.unwrap_or(kind.token_env_var());
-    let token = std::env::var(env_var).ok().filter(|v| !v.is_empty());
-
-    let remote = remote::pick_remote(remotes, preferred_remote)?;
-    let host = remote::extract_host(&remote.url);
-    let repo_info = remote::parse_url_as(&remote.url, kind).ok_or_else(|| {
-        anyhow::anyhow!(
-            "could not parse owner/repo from remote '{}' URL: {}",
-            remote.name,
-            remote.url
-        )
-    })?;
-
-    let forge = build_forge(kind, host, token, token_env)?;
-    Ok(ResolvedForge {
-        forge,
-        kind,
-        remote_name: remote.name.clone(),
-        repo_info,
-    })
-}
-
-fn resolve_forge_auto(
-    remotes: &[jjpr::jj::GitRemote],
-    preferred_remote: Option<&str>,
-) -> Result<ResolvedForge> {
-    let (remote_name, kind, repo_info) = remote::resolve_remote(remotes, preferred_remote)?;
-    let host = find_remote_host(remotes, &remote_name);
-    let forge = build_forge(kind, host, None, None)?;
-    Ok(ResolvedForge {
-        forge,
-        kind,
-        remote_name,
-        repo_info,
-    })
-}
-
-fn find_remote_host<'a>(remotes: &'a [jjpr::jj::GitRemote], remote_name: &str) -> Option<&'a str> {
-    remotes
-        .iter()
-        .find(|r| r.name == remote_name)
-        .and_then(|r| remote::extract_host(&r.url))
-}
-
-fn build_forge(
-    kind: ForgeKind,
-    host: Option<&str>,
-    token: Option<String>,
-    token_env: Option<&str>,
-) -> Result<Box<dyn Forge>> {
-    let token = match token {
-        Some(t) => t,
-        None => forge_token::resolve_token(kind, host, token_env)?,
-    };
-    match kind {
-        ForgeKind::GitHub => {
-            let client = ForgeClient::new(
-                "https://api.github.com",
-                token,
-                AuthScheme::Bearer,
-                PaginationStyle::LinkHeader,
-            );
-            Ok(Box::new(GitHubForge::new(client)))
-        }
-        ForgeKind::GitLab => {
-            let gitlab_host = host.unwrap_or("gitlab.com");
-            let base_url = format!("https://{gitlab_host}/api/v4");
-            let client = ForgeClient::new(
-                &base_url,
-                token,
-                AuthScheme::Bearer,
-                PaginationStyle::LinkHeader,
-            );
-            Ok(Box::new(GitLabForge::new(client)))
-        }
-        ForgeKind::Forgejo => {
-            let host = host.ok_or_else(|| {
-                anyhow::anyhow!("could not determine Forgejo host from remote URL")
-            })?;
-            let base_url = format!("https://{host}/api/v1");
-            let client = ForgeClient::new(
-                &base_url,
-                token,
-                AuthScheme::Token,
-                PaginationStyle::PageNumber { limit: 50 },
-            );
-            Ok(Box::new(ForgejoForge::new(client)))
-        }
-    }
-}
-
 fn print_forge_detection(detected: &DetectedForge) {
     let source = match &detected.source {
         ForgeSource::Config => "from config".to_string(),
@@ -1841,40 +1731,6 @@ fn detect_forge_for_cwd(preferred_remote: Option<&str>) -> Result<DetectedForge>
         token_env_var: None,
         source: ForgeSource::Remote(remote_name),
     })
-}
-
-fn find_repo_root() -> Result<PathBuf> {
-    let cwd = env::current_dir().context("failed to get current directory")?;
-
-    let mut path = cwd.as_path();
-    loop {
-        if path.join(".jj").is_dir() {
-            return Ok(path.to_path_buf());
-        }
-        match path.parent() {
-            Some(parent) => path = parent,
-            None => {
-                // Check if there's a git repo that could be colocated
-                let mut check = cwd.as_path();
-                loop {
-                    if check.join(".git").exists() {
-                        anyhow::bail!(
-                            "found a git repository but no jj repository. \
-                             Run `jj git init --colocate` to set up jj alongside git."
-                        );
-                    }
-                    match check.parent() {
-                        Some(parent) => check = parent,
-                        None => break,
-                    }
-                }
-                anyhow::bail!(
-                    "not a jj repository (or any parent up to /). \
-                     Run `jj git init` to create one."
-                );
-            }
-        }
-    }
 }
 
 #[cfg(test)]

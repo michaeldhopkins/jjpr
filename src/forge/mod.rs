@@ -5,6 +5,7 @@ pub mod github;
 pub mod gitlab;
 pub mod http;
 pub mod merged;
+mod pr_ops;
 pub mod remote;
 pub mod status;
 #[cfg(test)]
@@ -24,7 +25,7 @@ use anyhow::Result;
 use serde::Deserialize;
 
 /// Which forge a remote points to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ForgeKind {
     GitHub,
@@ -299,6 +300,42 @@ pub trait Forge: Send + Sync {
     ) -> Option<HashMap<u64, PrStatusBundle>> {
         None
     }
+
+    // --- For `jjpr undo`, which compares what jjpr wrote with what is there
+    // now and puts back what it replaced. Stubs that never undo need none. ---
+
+    /// One PR and whether it is open, closed or merged.
+    fn get_pr(&self, _owner: &str, _repo: &str, _number: u64) -> Result<(PullRequest, PrState)> {
+        anyhow::bail!("get_pr is not implemented here")
+    }
+
+    fn close_pr(&self, _owner: &str, _repo: &str, _number: u64) -> Result<()> {
+        anyhow::bail!("close_pr is not implemented here")
+    }
+
+    fn reopen_pr(&self, _owner: &str, _repo: &str, _number: u64) -> Result<()> {
+        anyhow::bail!("reopen_pr is not implemented here")
+    }
+
+    fn convert_to_draft(&self, _owner: &str, _repo: &str, _number: u64) -> Result<()> {
+        anyhow::bail!("convert_to_draft is not implemented here")
+    }
+
+    /// Withdraw review requests. A reviewer no longer requested is not an error.
+    fn remove_reviewers(&self, _o: &str, _r: &str, _number: u64, _who: &[String]) -> Result<()> {
+        anyhow::bail!("remove_reviewers is not implemented here")
+    }
+
+    /// The commit a branch points at on the forge, `None` when there is no
+    /// such branch.
+    fn get_branch_head(&self, _owner: &str, _repo: &str, _branch: &str) -> Result<Option<String>> {
+        anyhow::bail!("get_branch_head is not implemented here")
+    }
+}
+
+/// Whether a PR state reads as open: `open` (GitHub, Forgejo) or `opened` (GitLab).
+pub fn is_open(state: &PrState) -> bool {
+    !state.merged && matches!(state.state.as_str(), "open" | "opened")
 }
 
 #[cfg(test)]
