@@ -1,10 +1,10 @@
 # Recovering from bad state
 
-Put the local stack right, then run `jjpr submit` and the forge follows
-it. Every jj command, jjpr's included, can be undone:
+Your stack lives in your local repo, and jj records every change to it.
+To go back to an earlier state, find it in the operation log and restore
+it. Then run `jjpr submit`.
 
 ```
-jj undo                        # undo the last operation
 jj op log                      # list operations, newest first
 jj op restore <operation-id>   # put the repo back to that point
 ```
