@@ -42,16 +42,9 @@ Rebasing 'top' onto main ('bottom' below it was merged)...
 
 When a PR in the stack was squash- or rebase-merged on the forge,
 submit rebases the PR above it onto trunk before pushing, so it does
-not carry the merged commits. This needs submit's own fetch to be the
-one that removes the merged bookmark; if a separate `jj git fetch`
-removed it first, rebase by hand:
-
-```
-jj rebase -s <oldest commit above trunk> -d main --skip-emptied
-```
-
-`--dry-run` reports the rebase without running it. A stack on a
-foreign base or given `--base` is not rebased.
+not carry the merged commits. `--dry-run` reports the rebase without
+running it. A stack on a foreign base or given `--base` is not
+rebased.
 
 If pushing new commits to an already-approved PR whose base resets
 approvals on push (GitHub's "dismiss stale reviews", GitLab's "reset
