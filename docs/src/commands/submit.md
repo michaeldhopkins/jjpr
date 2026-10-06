@@ -256,7 +256,7 @@ at the bottom of the comment, rendered with strikethrough:
 1. **`feat/profile` <-- this PR**
 1. [`feat/settings`](https://github.com/o/r/pull/43)
 
-<details><summary>2 earlier closed/merged PRs</summary>
+<details><summary>2 earlier merged PRs</summary>
 
 1. ~~[`feat/foundation`](https://github.com/o/r/pull/39)~~
 1. ~~[`feat/migration`](https://github.com/o/r/pull/40)~~
@@ -270,7 +270,7 @@ embedded data (so future submits can reconstruct full history) but
 aren't displayed:
 
 ```
-<summary>7 earlier closed/merged PRs (+3 older entries hidden)</summary>
+<summary>7 earlier merged PRs (+3 older entries hidden)</summary>
 ```
 
 The comment also embeds a base64-encoded JSON payload of the stack

@@ -694,7 +694,7 @@ fn test_merged_bottom_renders_in_fossil_details_block() {
         "expected fossil <details> block, body was:\n{body}"
     );
     assert!(
-        body.contains("earlier closed/merged"),
+        body.contains("earlier merged"),
         "expected fossil summary text, body was:\n{body}"
     );
     assert!(

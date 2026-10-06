@@ -596,10 +596,7 @@ fn retain_settled_previous(
             let keep = match forge.get_pr_state(owner, repo, prev.pr_number) {
                 Ok(state) => state.merged,
                 Err(e) => {
-                    eprintln!(
-                        "  Warning: could not check whether #{} is still open: {e}",
-                        prev.pr_number
-                    );
+                    eprintln!("{}", comment::merge_check_warning(prev.pr_number, &e));
                     true
                 }
             };
@@ -1759,7 +1756,7 @@ mod tests {
             .iter()
             .find(|c| c.starts_with("update_comment:99:"))
             .unwrap_or_else(|| panic!("expected an update: {calls:?}"));
-        assert!(update.contains("1 earlier closed/merged PR"), "{update}");
+        assert!(update.contains("1 earlier merged PR"), "{update}");
         assert!(update.contains("~~[`profile`]"), "{update}");
         assert!(!calls.iter().any(|c| c.starts_with("delete_comment")));
     }
@@ -1820,10 +1817,7 @@ mod tests {
             .iter()
             .find(|c| c.starts_with("update_comment:99:"))
             .unwrap_or_else(|| panic!("expected a rewrite: {calls:?}"));
-        assert!(
-            update.contains("1 earlier closed/merged PR</summary>"),
-            "{update}"
-        );
+        assert!(update.contains("1 earlier merged PR</summary>"), "{update}");
         assert!(update.contains("~~[`settings`]"), "{update}");
         assert!(!update.contains("profile"), "{update}");
     }
@@ -1958,7 +1952,7 @@ mod tests {
         );
         for update in updates {
             assert!(!update.contains("settings"), "{update}");
-            assert!(!update.contains("earlier closed/merged"), "{update}");
+            assert!(!update.contains("earlier merged"), "{update}");
         }
         assert_eq!(
             calls.iter().filter(|c| *c == "get_pr_state:#12").count(),

@@ -47,7 +47,7 @@ pub struct StackEntry {
     pub closed_at: Option<String>,
 }
 
-/// Maximum number of fossil entries (closed/merged PRs no longer in the
+/// Maximum number of fossil entries (merged PRs no longer in the
 /// live local stack) to display in the `<details>` block. Older fossils
 /// beyond this cap are dropped from the rendered comment, but their data
 /// continues to live in `JJPR_DATA` so we can display them again if
@@ -112,11 +112,9 @@ pub fn generate_comment_body(live: &[StackEntry], fossils: &[StackEntry]) -> Str
         let summary_line = if total > shown {
             let hidden = total - shown;
             let entry_label = if hidden == 1 { "entry" } else { "entries" };
-            format!(
-                "{shown} earlier closed/merged {pr_label} (+{hidden} older {entry_label} hidden)"
-            )
+            format!("{shown} earlier merged {pr_label} (+{hidden} older {entry_label} hidden)")
         } else {
-            format!("{shown} earlier closed/merged {pr_label}")
+            format!("{shown} earlier merged {pr_label}")
         };
         body.push_str(&format!("\n<details><summary>{summary_line}</summary>\n\n"));
         for entry in display_fossils {
@@ -168,6 +166,12 @@ pub fn has_navigation(live: &[StackEntry], fossils: &[StackEntry]) -> bool {
     live.len() > 1 || !fossils.is_empty()
 }
 
+/// Printed when the forge cannot say whether a PR that left the stack
+/// merged. The entry is kept as history, so a failed lookup erases nothing.
+pub fn merge_check_warning(pr_number: u64, err: &impl std::fmt::Display) -> String {
+    format!("  Warning: could not check whether #{pr_number} was merged: {err}")
+}
+
 /// Callback signature for `StackNav::update`. Given the previous comment's
 /// data (if any), produce `(live, fossils)` for rendering.
 pub type BuildEntriesFn<'a> =
@@ -192,7 +196,7 @@ pub trait StackNav: Send + Sync {
     /// Returns true if content was written or updated.
     ///
     /// `build_entries` receives the existing stack data (if any) and
-    /// returns `(live, fossils)`: open PRs and closed/merged PRs that
+    /// returns `(live, fossils)`: open PRs and merged PRs that
     /// belong in the collapsible history block, respectively.
     fn update(
         &self,
@@ -370,6 +374,14 @@ pub fn create_stack_nav(mode: crate::config::StackNavMode) -> Box<dyn StackNav> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn merge_check_warning_asks_whether_the_pr_merged() {
+        assert_eq!(
+            merge_check_warning(42, &"HTTP 502"),
+            "  Warning: could not check whether #42 was merged: HTTP 502"
+        );
+    }
+
     fn live_entry(name: &str, number: u64, is_current: bool) -> StackEntry {
         StackEntry {
             bookmark_name: name.to_string(),
@@ -447,7 +459,7 @@ mod tests {
     fn test_no_fossils_means_no_details_block() {
         let body = generate_comment_body(&sample_live(), &[]);
         assert!(!body.contains("<details>"));
-        assert!(!body.contains("earlier closed/merged"));
+        assert!(!body.contains("earlier merged"));
     }
 
     #[test]
@@ -455,7 +467,7 @@ mod tests {
         let live = vec![live_entry("top", 5, true)];
         let fossils = vec![fossil_entry("old1", 1, "2026-01-01T00:00:00Z")];
         let body = generate_comment_body(&live, &fossils);
-        assert!(body.contains("<details><summary>1 earlier closed/merged PR</summary>"));
+        assert!(body.contains("<details><summary>1 earlier merged PR</summary>"));
         assert!(body.contains("</details>"));
         // Fossil rendered as strikethrough link, no icon
         assert!(body.contains("1. ~~[`old1`](https://github.com/o/r/pull/1)~~\n"));
@@ -469,7 +481,7 @@ mod tests {
             fossil_entry("old2", 2, "2026-01-02T00:00:00Z"),
         ];
         let body = generate_comment_body(&live, &fossils);
-        assert!(body.contains("2 earlier closed/merged PRs"));
+        assert!(body.contains("2 earlier merged PRs"));
     }
 
     #[test]
@@ -486,7 +498,7 @@ mod tests {
             .collect();
         let body = generate_comment_body(&live, &fossils);
         assert!(
-            body.contains("7 earlier closed/merged PRs (+3 older entries hidden)"),
+            body.contains("7 earlier merged PRs (+3 older entries hidden)"),
             "expected truncation indicator, got body:\n{body}"
         );
         // First 7 fossils render
