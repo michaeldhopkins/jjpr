@@ -652,3 +652,62 @@ fn a_deleted_merged_middle_above_a_kept_merged_bottom_is_dropped() {
     ]);
     assert_eq!(carried, "Add c\n");
 }
+
+/// `top` is a merge of the merged `bottom` and unmerged side work. jjpr swaps
+/// only the merged parent for trunk, so the side work stays in `top`'s PR and
+/// the merged commit does not.
+#[test]
+fn a_merge_commit_survivor_keeps_its_other_parent_and_drops_the_merged_one() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = common::JjTestRepo::new();
+    repo.commit_and_bookmark("bottom.rs", "// bottom\n", "Add bottom", "bottom");
+    repo.run_jj(&["new", "main", "-m", "Add side"]);
+    repo.write_file("side.rs", "// side\n");
+    repo.run_jj(&["new", "bottom", "@", "-m", "Add top"]);
+    repo.write_file("top.rs", "// top\n");
+    repo.run_jj(&["bookmark", "set", "top", "-r", "@"]);
+    repo.run_jj(&["new"]);
+    let mut push =
+        jjpr::jj::version::push_new_bookmark_args(jjpr::jj::version::installed_jj_version())
+            .to_vec();
+    push.extend(["git", "push", "--remote", "origin"]);
+    push.extend(["--bookmark", "bottom", "--bookmark", "top"]);
+    repo.run_jj(&push);
+    let sha = repo.run_jj(&["log", "--no-graph", "-r", "bottom", "-T", "commit_id"]);
+
+    let forge_side = tempfile::TempDir::new().unwrap();
+    let origin = repo.origin_path().to_str().unwrap().to_string();
+    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
+    let clone = forge_side.path().join("clone");
+    run(
+        &clone,
+        "jj",
+        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
+    );
+    run(&clone, "jj", &["new", "main"]);
+    std::fs::write(clone.join("bottom.rs"), "// bottom, as reviewed\n").unwrap();
+    run(&clone, "jj", &["commit", "-m", "Add bottom (#1)"]);
+    run(&clone, "jj", &["bookmark", "set", "main", "-r", "@-"]);
+    run(&clone, "jj", &["git", "push", "--bookmark", "main"]);
+    run(repo.origin_path(), "git", &["branch", "-D", "bottom"]);
+    repo.run_jj(&["git", "fetch"]);
+
+    let jj = repo.runner();
+    let segments = segments_for(&jj, "top");
+    let forge = MergedForge {
+        merged: vec![],
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
+    };
+    let plan = plan_for(&forge, &segments, false);
+
+    assert!(restack::restack_merged_base(&jj, &forge, &plan, &segments, &[], false).unwrap());
+
+    restack::rebuild_segments(&jj, "top", &segments).expect("no conflict");
+    let mut carried = top_pr_commits(&repo);
+    carried.sort();
+    assert_eq!(carried, vec!["Add side", "Add top"]);
+    assert!(!off_trunk(&repo).contains("Add bottom\n"));
+}

@@ -18,3 +18,4 @@
 - [Forge support](forges.md)
 - [How it works](how-it-works.md)
 - [Troubleshooting](troubleshooting.md)
+- [Recovering from bad state](recovering.md)

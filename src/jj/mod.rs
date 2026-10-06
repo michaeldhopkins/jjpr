@@ -50,6 +50,13 @@ pub trait Jj: Send + Sync {
     /// Abandon every commit in `revset` (`jj abandon`). Restacking drops the
     /// merged commits a survivor no longer sits on this way. Stubs that never
     /// restack need not implement it.
+    /// `jj rebase -s <source> -d <each destination>`: a merge commit keeps its
+    /// other parents while one is swapped for trunk. Stubs that never restack
+    /// need not implement it.
+    fn rebase_onto_all(&self, source: &str, destinations: &[String]) -> Result<()> {
+        let _ = (source, destinations);
+        anyhow::bail!("rebase_onto_all is not implemented here")
+    }
     fn abandon(&self, revset: &str) -> Result<()> {
         let _ = revset;
         anyhow::bail!("abandon is not implemented here")

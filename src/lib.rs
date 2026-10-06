@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod cli;
 pub mod config;
+pub mod docs;
 pub mod forge;
 pub mod graph;
 pub mod heartbeat;

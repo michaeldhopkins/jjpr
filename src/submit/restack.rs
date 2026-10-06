@@ -28,6 +28,9 @@ use std::collections::HashSet;
 use anyhow::{Context, Result};
 
 use super::plan::SubmissionPlan;
+pub use super::restack_messages::{
+    abandon_failed_warning, lookup_failed_warning, merge_commit_warning, restack_note,
+};
 use crate::forge::Forge;
 use crate::forge::merged::{branch_name, merged_from};
 use crate::jj::Jj;
@@ -41,6 +44,8 @@ pub struct Restack {
     pub bookmark: String,
     /// Change id handed to `jj rebase -s`.
     pub root: String,
+    /// The `-d` destinations: trunk, plus a merge commit's other parents.
+    pub onto: Vec<String>,
     /// Whether the rebase drops commits it empties: the fallback when it is
     /// not known which commits merged.
     pub skip_emptied: bool,
@@ -124,31 +129,76 @@ pub fn plan_restack(
         .skip(1)
         .position(|c| below.rewritten.contains(&c.commit_id))
         .map(|i| i + 1);
-    let restack = |root: String, skip_emptied: bool, abandon: Option<String>| {
+    let restack = |root: String, onto: Vec<String>, skip_emptied: bool, abandon: Option<String>| {
         Decision::Rebase(Restack {
             bookmark: live.bookmark.name.clone(),
             root,
+            onto,
             skip_emptied,
             abandon,
         })
     };
+    let trunk = || vec![TRUNK.to_string()];
     match (head, rewritten) {
         (_, Some(r)) if head.is_none_or(|h| r < h) => match ancestry.last() {
-            Some(oldest) => restack(oldest.change_id.clone(), true, None),
+            Some(oldest) => restack(oldest.change_id.clone(), trunk(), true, None),
             None => Decision::Leave,
         },
         (Some(h), _) => {
-            let (child, merged_head) = (&ancestry[h - 1], &ancestry[h]);
-            let id = &merged_head.commit_id;
-            if child.parents.len() != 1 || &child.parents[0] != id {
+            let id = &ancestry[h].commit_id;
+            let Some((child, onto)) = swap_merged_parent(ancestry, h) else {
                 return Decision::CannotTell;
-            }
+            };
             let abandon = (!kept.contains(id.as_str())).then(|| id.clone());
-            restack(child.change_id.clone(), false, abandon)
+            restack(child.change_id.clone(), onto, false, abandon)
         }
-        _ if idx > 0 => restack(rebase_root(live).to_string(), false, None),
+        _ if idx > 0 => restack(rebase_root(live).to_string(), trunk(), false, None),
         _ => Decision::Leave,
     }
+}
+
+/// The revset every restack moves the survivor onto.
+const TRUNK: &str = "trunk()";
+
+/// The one commit above the merged head `ancestry[h]`, and its parents with
+/// that head swapped for trunk. A merge commit keeps its other parents, which
+/// is safe only while none of them is itself merged work (the head or below
+/// it): that would carry what merged, so it gives `None`, as do several
+/// commits building on the head.
+fn swap_merged_parent(ancestry: &[LogEntry], h: usize) -> Option<(&LogEntry, Vec<String>)> {
+    let id = &ancestry[h].commit_id;
+    let mut children = ancestry[..h].iter().filter(|c| c.parents.contains(id));
+    let child = children.next()?;
+    if children.next().is_some() {
+        return None;
+    }
+    let landed = ancestors_within(ancestry, id);
+    let mut onto = Vec::new();
+    for parent in &child.parents {
+        if parent == id {
+            onto.push(TRUNK.to_string());
+        } else if landed.contains(parent.as_str()) {
+            return None;
+        } else {
+            onto.push(parent.clone());
+        }
+    }
+    Some((child, onto))
+}
+
+/// `head` and its ancestors among `ancestry`, following recorded parents.
+fn ancestors_within<'a>(ancestry: &'a [LogEntry], head: &'a str) -> HashSet<&'a str> {
+    let mut seen = HashSet::from([head]);
+    let mut queue = vec![head];
+    while let Some(id) = queue.pop() {
+        let parents = ancestry.iter().filter(|c| c.commit_id == id);
+        for parent in parents.flat_map(|c| &c.parents) {
+            if seen.insert(parent.as_str()) {
+                queue.push(parent.as_str());
+            }
+        }
+    }
+    seen
 }
 
 /// The commits to abandon below a merged `head` once the survivor has moved
@@ -207,10 +257,12 @@ fn find_merged_below(
                 }
             }
         }
-        Err(e) => eprintln!(
-            "  Warning: could not check whether a PR below '{}' was merged: {e}",
-            live.bookmark.name
-        ),
+        Err(e) => {
+            let oldest = ancestry.last().map_or("", |c| c.change_id.as_str());
+            let name = &live.bookmark.name;
+            let warning = lookup_failed_warning(name, &plan.default_branch, oldest, &e.to_string());
+            eprintln!("{warning}");
+        }
     }
     Ok(found)
 }
@@ -267,9 +319,11 @@ pub fn restack_merged_base(
     }
     println!("Rebasing {note}...\n");
     let rebase = if restack.skip_emptied {
-        jj.rebase_onto_skipping_emptied(&restack.root, "trunk()")
+        jj.rebase_onto_skipping_emptied(&restack.root, TRUNK)
+    } else if restack.onto == [TRUNK] {
+        jj.rebase_onto(&restack.root, TRUNK)
     } else {
-        jj.rebase_onto(&restack.root, "trunk()")
+        jj.rebase_onto_all(&restack.root, &restack.onto)
     };
     let bookmark = &restack.bookmark;
     rebase.with_context(|| format!("failed to rebase '{bookmark}' onto {trunk}"))?;
@@ -277,29 +331,10 @@ pub fn restack_merged_base(
         // The survivor is already safe on trunk; a failure here only leaves
         // the merged commits visible, so it warns rather than stopping submit.
         if let Err(e) = jj.abandon(&abandon_revset(head)) {
-            eprintln!("  Warning: could not abandon the merged commits below '{bookmark}': {e}");
+            eprintln!("{}", abandon_failed_warning(bookmark, head, &e.to_string()));
         }
     }
     Ok(true)
-}
-
-/// Said instead of rebasing when [`Decision::CannotTell`]. `merged` is sorted.
-pub fn merge_commit_warning(bookmark: &str, trunk: &str, merged: &[String]) -> String {
-    let verb = if merged.len() == 1 { "was" } else { "were" };
-    let names = merged.join("', '");
-    format!(
-        "  Warning: '{names}' below '{bookmark}' {verb} merged, but '{bookmark}' \
-         starts with a merge commit; rebase it onto {trunk} yourself."
-    )
-}
-
-/// `'top' onto main ('bottom' below it was merged)`: what the restack does and
-/// why, after "Rebasing" or "Would rebase".
-pub fn restack_note(bookmark: &str, trunk: &str, mut merged: Vec<String>) -> String {
-    merged.sort();
-    let verb = if merged.len() == 1 { "was" } else { "were" };
-    let names = merged.join("', '");
-    format!("'{bookmark}' onto {trunk} ('{names}' below it {verb} merged)")
 }
 
 /// The target's segments rebuilt after a restack, keeping the bookmark chosen
@@ -406,9 +441,19 @@ mod tests {
     }
 
     fn rebase(root: &str, skip_emptied: bool, abandon: Option<&str>) -> Decision {
+        rebase_onto(root, &["trunk()"], skip_emptied, abandon)
+    }
+
+    fn rebase_onto(
+        root: &str,
+        onto: &[&str],
+        skip_emptied: bool,
+        abandon: Option<&str>,
+    ) -> Decision {
         Decision::Rebase(Restack {
             bookmark: "top".to_string(),
             root: root.to_string(),
+            onto: onto.iter().map(|d| d.to_string()).collect(),
             skip_emptied,
             abandon: abandon.map(str::to_string),
         })
@@ -463,13 +508,43 @@ mod tests {
         );
     }
 
-    /// A merged head whose child has a second parent: which commits are the
-    /// survivor's own is unclear, so jjpr does not guess.
+    /// The survivor starts with a merge of the merged head and other work.
+    /// Swapping only the merged parent for trunk keeps the other parent, so
+    /// jjpr does it itself.
     #[test]
-    fn a_merge_commit_above_the_merged_head_cannot_be_told_apart() {
+    fn a_merge_commit_above_the_merged_head_keeps_its_other_parent() {
+        let segments = [segment("top", &["t2"])];
+        let mut ancestry = changes(&["t2", "t1", "o1", "b1"]);
+        ancestry[1].parents = vec!["b1".to_string(), "o1".to_string()];
+        ancestry[2].parents = vec![];
+        assert_eq!(
+            plan_restack(&segments, &set(&[]), &below(&["b1"], &[]), &ancestry),
+            rebase_onto("ch_t1", &["trunk()", "o1"], false, Some("b1"))
+        );
+    }
+
+    /// The merge's other parent is itself merged work (below the merged head):
+    /// keeping it would carry what merged, and dropping it would change the
+    /// merge. jjpr does not guess.
+    #[test]
+    fn a_merge_whose_other_parent_also_merged_cannot_be_told_apart() {
         let segments = [segment("top", &["t1"])];
-        let mut ancestry = changes(&["t1", "b1"]);
-        ancestry[0].parents.push("other".to_string());
+        let mut ancestry = changes(&["t1", "b2", "b1"]);
+        ancestry[0].parents = vec!["b2".to_string(), "b1".to_string()];
+        assert_eq!(
+            plan_restack(&segments, &set(&[]), &below(&["b2"], &[]), &ancestry),
+            Decision::CannotTell
+        );
+    }
+
+    /// Two commits of the survivor's both build on the merged head: no single
+    /// rebase root, so jjpr does not guess.
+    #[test]
+    fn two_children_of_the_merged_head_cannot_be_told_apart() {
+        let segments = [segment("top", &["t3"])];
+        let mut ancestry = changes(&["t3", "t2", "t1", "b1"]);
+        ancestry[0].parents = vec!["t2".to_string(), "t1".to_string()];
+        ancestry[1].parents = vec!["b1".to_string()];
         assert_eq!(
             plan_restack(&segments, &set(&[]), &below(&["b1"], &[]), &ancestry),
             Decision::CannotTell
@@ -592,6 +667,7 @@ mod tests {
                     match (&restack.abandon, root) {
                         (Some(gone), Some(root)) => {
                             assert_eq!(root.parents, vec![gone.clone()], "{ctx}");
+                            assert_eq!(restack.onto, vec!["trunk()".to_string()], "{ctx}");
                             assert!(found.heads.contains(gone), "{ctx}");
                             assert!(
                                 !found.heads.contains(&root.commit_id) || root.commit_id == "c2"
@@ -606,29 +682,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn restack_note_names_what_merged_in_order_and_agrees_in_number() {
-        assert_eq!(
-            restack_note("top", "main", vec!["bottom".to_string()]),
-            "'top' onto main ('bottom' below it was merged)"
-        );
-        assert_eq!(
-            restack_note("top", "main", vec!["b".to_string(), "a".to_string()]),
-            "'top' onto main ('a', 'b' below it were merged)"
-        );
-    }
-
-    #[test]
-    fn merge_commit_warning_names_what_merged_and_what_to_do() {
-        assert_eq!(
-            merge_commit_warning("top", "main", &["bottom".to_string()]),
-            "  Warning: 'bottom' below 'top' was merged, but 'top' starts with a merge \
-             commit; rebase it onto main yourself."
-        );
-        let two = ["a".to_string(), "b".to_string()];
-        assert!(merge_commit_warning("top", "main", &two).contains("'a', 'b' below 'top' were"));
     }
 
     #[test]

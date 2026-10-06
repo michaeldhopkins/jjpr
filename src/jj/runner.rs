@@ -291,6 +291,15 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn rebase_onto_all(&self, source: &str, destinations: &[String]) -> Result<()> {
+        let mut args = vec!["rebase", "-s", source];
+        for destination in destinations {
+            args.extend(["-d", destination.as_str()]);
+        }
+        self.run_stack_op(source, &args)?;
+        Ok(())
+    }
+
     fn abandon(&self, revset: &str) -> Result<()> {
         self.run_stack_op(revset, &["abandon", revset])?;
         Ok(())
