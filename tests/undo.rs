@@ -766,6 +766,17 @@ fn a_restack_is_undone_whole() {
         "jj",
         &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
     );
+    // CI has no global jj identity, and its bare origin's HEAD names `master`,
+    // so the clone makes no local `main` until it tracks the origin's.
+    run(
+        &clone,
+        "jj",
+        &["config", "set", "--repo", "user.name", "Forge"],
+    );
+    let _ = Command::new("jj")
+        .args(["bookmark", "track", "main@origin"])
+        .current_dir(&clone)
+        .output();
     run(&clone, "jj", &["new", "main"]);
     std::fs::write(clone.join("bottom.rs"), "// bottom\n").unwrap();
     run(&clone, "jj", &["commit", "-m", "Add bottom (#1)"]);
