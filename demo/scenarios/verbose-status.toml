@@ -1,0 +1,12 @@
+# jjpr --verbose on a three-PR stack. Render from the repository root: record.sh verbose-status
+title = "jjpr --verbose on a three-PR stack"
+caption = "jjpr --verbose on a three-PR GitHub stack: one GraphQL query covers every PR's status (the forge is a stand-in that answers after 80 ms)"
+width = 1500
+height = 640
+cwd = "app"
+setup = "../setup/github-stack.sh"
+setup_inputs = "src Cargo.toml Cargo.lock"
+mask = "\\[ *[0-9]+ms\\]|[0-9a-f]{12,40}"   # timings, and the commit ids jj_stack makes
+steps = """
+run jjpr --verbose
+"""

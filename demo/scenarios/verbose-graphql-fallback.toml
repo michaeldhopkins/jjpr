@@ -1,0 +1,13 @@
+# jjpr --verbose when GitHub refuses the GraphQL status query. Render: record.sh verbose-graphql-fallback
+title = "jjpr --verbose when GraphQL is refused"
+caption = "The same stack with a token SAML enforcement refuses for GraphQL: the note says why, and each PR's status then comes from REST"
+width = 1500
+height = 900
+cwd = "app"
+setup = "../setup/github-stack.sh"
+setup_inputs = "src Cargo.toml Cargo.lock"
+env = "GITHUB_TOKEN=demo-saml"
+mask = "\\[ *[0-9]+ms\\]|[0-9a-f]{7,40}"   # timings, and the commit ids jj_stack makes
+steps = """
+run jjpr --verbose
+"""
