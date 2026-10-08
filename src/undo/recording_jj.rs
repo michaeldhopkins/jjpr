@@ -24,7 +24,11 @@ impl<J: Jj> RecordingJj<J> {
 
 impl<J> Drop for RecordingJj<J> {
     fn drop(&mut self) {
-        self.recorder.finish();
+        if self.recorder.finish()
+            && let Some(hint) = super::report::after_command(self.recorder.command())
+        {
+            println!("{hint}");
+        }
     }
 }
 

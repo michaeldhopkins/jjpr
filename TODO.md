@@ -595,3 +595,11 @@ stale) and is owed whole. Each gets a test or an exclusion with its reason:
 - `src/undo/recording_jj.rs` 65, 73, 79: delegations no test reads
 - `src/forge/pr_ops.rs` 210: GitLab `request_reviewers`
 - `src/connect.rs` 56, 96: `resolve_forge_from_config`'s `!`, `find_remote_host`
+
+## Idea: an MCP server (owner, 2026-10-08: list it, don't build it yet)
+
+jjpr's commands as MCP tools, so an agent sees them without being told jjpr exists. Weigh it
+against the cheaper levers first (the agent snippet on the installation page, hint lines,
+help examples), measured with the blind small-model round. If built, it follows the house MCP
+rules (the `mcp-servers` skill): a rules test over its own `tools/list`, a 15-tool ceiling,
+read-only and destructive hints, and a blind evaluation.

@@ -296,6 +296,13 @@ Examples:
         timeout: Option<u64>,
     },
     /// Take back the last jjpr command: the local repo and what it changed on the forge
+    #[command(after_help = "\
+Examples:
+  jjpr undo --dry-run    What it would take back, and anything in the way
+  jjpr undo              Take back the last jjpr command, or change nothing and say why
+  jjpr undo --force      The same, also closing the PRs the command opened
+  jjpr undo --list       The commands it can take back, newest first
+  jjpr redo              Put back what the last undo took back")]
     Undo {
         /// Also close PRs it opened, and write over what others changed since. Undo lists each of these first; it never changes anything else
         #[arg(long)]
@@ -306,6 +313,11 @@ Examples:
         list: bool,
     },
     /// Put back the last command `jjpr undo` took back
+    #[command(after_help = "\
+Examples:
+  jjpr redo --dry-run    What it would put back, and anything in the way
+  jjpr redo              Put back what the last undo took back
+  jjpr undo              Take it back again")]
     Redo {
         /// Write over what others changed since the undo. Redo lists each of these first; it never changes anything else
         #[arg(long)]

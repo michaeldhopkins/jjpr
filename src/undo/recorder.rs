@@ -121,17 +121,18 @@ impl Recorder {
     /// the top of each poll, so each poll that changes anything is its own
     /// entry.
     pub fn checkpoint(&self) {
-        self.finish();
+        let _ = self.finish();
         self.begin();
     }
 
     /// Close the current entry: record where the command ended, and drop it
-    /// if it changed nothing.
+    /// if it changed nothing. Returns whether it kept one that undo can take
+    /// back.
     ///
     /// The entry ends at jjpr's own last operation, not at whatever the repo
     /// is at now: anything run after it (in `watch`'s sleep, say) is the
     /// user's, and the fingerprint check at undo time protects it.
-    pub fn finish(&self) {
+    pub fn finish(&self) -> bool {
         let (entry, last_own, written, worked) = {
             let mut inner = self.lock();
             (
@@ -142,14 +143,14 @@ impl Recorder {
             )
         };
         let Some(mut entry) = entry else {
-            return;
+            return false;
         };
         let nothing = entry.actions.is_empty() && entry.missed.is_empty();
         if nothing && !worked {
             if written && let Err(e) = self.journal.remove(&entry.id) {
                 warn(&self.warned, &e);
             }
-            return;
+            return false;
         }
         entry.end_view = self.repo.view_fingerprint_at(&last_own).ok();
         entry.end_op = Some(last_own);
@@ -161,6 +162,12 @@ impl Recorder {
         {
             warn(&self.warned, &e);
         }
+        entry.merged().is_none()
+    }
+
+    /// The command being recorded: `submit`, `merge` or `watch`.
+    pub fn command(&self) -> &str {
+        &self.meta.command
     }
 
     /// Whether the repo changed between the previous recorded command and
@@ -464,7 +471,7 @@ pub(crate) mod tests {
     #[test]
     fn a_command_that_changed_nothing_leaves_no_entry() {
         let (dir, _repo, rec) = setup();
-        rec.finish();
+        assert!(!rec.finish(), "nothing to take back, so no hint");
         assert!(entries(&dir).is_empty());
     }
 
@@ -477,7 +484,7 @@ pub(crate) mod tests {
             Ok(())
         })
         .unwrap();
-        rec.finish();
+        assert!(rec.finish(), "kept, and undo can take it back");
         let es = entries(&dir);
         assert_eq!(es.len(), 1);
         assert_eq!(es[0].start_op, "op1");
@@ -691,7 +698,7 @@ pub(crate) mod tests {
             meta(),
         );
         rec.intent(Action::Merge { number: 5 });
-        rec.finish();
+        assert!(!rec.finish(), "a merge cannot be taken back, so no hint");
         let es = entries(&dir);
         assert_eq!(es.len(), 1, "{es:?}");
         assert_eq!(es[0].merged(), Some(5));

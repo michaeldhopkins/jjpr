@@ -476,3 +476,29 @@ fn timed_lines(stderr: &str) -> Vec<&str> {
         })
         .collect()
 }
+
+#[test]
+fn undo_and_redo_help_end_with_examples() {
+    jjpr()
+        .args(["undo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Examples:\n  jjpr undo --dry-run"))
+        .stdout(predicate::str::contains("jjpr undo --force"));
+    jjpr()
+        .args(["redo", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Examples:\n  jjpr redo --dry-run"));
+}
+
+#[test]
+fn an_unknown_command_lists_the_real_ones() {
+    jjpr()
+        .arg("list")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unrecognized subcommand 'list'"))
+        .stderr(predicate::str::contains("jjpr's commands:\n  submit"))
+        .stderr(predicate::str::contains("  undo    "));
+}

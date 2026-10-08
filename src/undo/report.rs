@@ -210,6 +210,12 @@ pub fn blocked(b: &Blocked, entry: &Entry, direction: Direction, now: u64) -> St
     }
 }
 
+/// The line a command ends with once it has recorded something undo can take
+/// back. Only submit: a merge cannot be undone, and watch runs on.
+pub fn after_command(command: &str) -> Option<&'static str> {
+    (command == "submit").then_some("To take it back: jjpr undo")
+}
+
 pub fn done(entry: &Entry, direction: Direction, now: u64) -> String {
     match direction {
         Direction::Undo => format!("Undid {}. To put it back: jjpr redo", name(entry, now)),
@@ -466,6 +472,13 @@ mod tests {
         let t = 1_700_000_000;
         assert_eq!(when(t, t).len(), 5);
         assert!(when(t, t + 3 * 86_400).starts_with("2023-11-"));
+    }
+
+    #[test]
+    fn only_a_submit_ends_with_the_undo_hint() {
+        assert_eq!(after_command("submit"), Some("To take it back: jjpr undo"));
+        assert_eq!(after_command("merge"), None);
+        assert_eq!(after_command("watch"), None);
     }
 
     #[test]
