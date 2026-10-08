@@ -18,9 +18,10 @@ const INSTRUCTIONS_LIMIT: usize = 24 * 1024;
 const TOPIC_LIMIT: usize = 8 * 1024;
 const TOPICS: &str = "docs/agents";
 
-/// Instruction files over the limit, each pinned at its size in bytes.
+/// Instruction files over the limit, each pinned at its size in bytes. None today: AGENTS.md
+/// was pinned at 41,385 bytes until its detail moved into `docs/agents/`.
 fn pinned() -> HashMap<&'static str, usize> {
-    HashMap::from([("AGENTS.md", 41385)])
+    HashMap::new()
 }
 
 /// What is wrong with the instruction files, given each one's path and size, the pins, the topic
@@ -131,6 +132,7 @@ fn instruction_files_stay_within_budget_and_every_topic_is_named() {
         instructions.iter().any(|(p, _)| p == "AGENTS.md"),
         "found no root AGENTS.md; the walk is looking in the wrong place"
     );
+    assert!(!topics.is_empty(), "found no {TOPICS} files");
     let index = std::fs::read_to_string(root.join("AGENTS.md")).expect("read AGENTS.md");
     let found = problems(&instructions, &pinned(), &topics, &index);
     assert!(found.is_empty(), "{}", found.join("\n"));
