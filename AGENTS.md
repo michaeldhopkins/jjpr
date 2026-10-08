@@ -24,6 +24,7 @@ Rust CLI tool (`jjpr`) for managing stacked pull requests in Jujutsu (jj) reposi
 - Edition 2024 with let-chains for collapsible if-let patterns
 - Requires jj 0.36+. Where a spelling differs across that range, `src/jj/version.rs` picks it from `jj --version` (today only pushing a new bookmark, which 0.36/0.37 refuse without `git.push-new-bookmarks`). `tests/jj_compat.rs` parses real output captured from jj 0.33.0, 0.36.0, 0.37.0, 0.38.0, 0.40.0 and 0.45.1 (`tests/fixtures/jj/`, recapture command in the file's header), and CI's `jj-versions` job runs the suite against 0.36 through 0.45.1. Spellings that do NOT span the range, and so must not be used: the `divergent()` revset (0.38+), `<change>/N` (0.37+), `all:` (gone in 0.38; use `change_id(x)`), `--allow-new` (gone in 0.36)
 - `jj bookmark list` prints one line per *ref* (local, each tracked remote pointing elsewhere, a differing `@git`), so `BOOKMARK_TEMPLATE` emits `remote` (null for local) and only local lines become bookmarks. Captured on every version above; see `parse_bookmark_output`
+- Dependencies move through the owner's `jjpr-deps` upkeep job, never Dependabot; it also adopts each new release of vcs-runner.
 
 ## Testing
 
@@ -80,7 +81,7 @@ Subject ≤ 70 chars. Body explains *why* and lists any breaking migration steps
 
 ## Before pushing
 
-Every push must pass these steps. CI runs `cargo fmt --check`, `cargo check --locked`, `cargo test`, `cargo clippy --locked --tests -- -D warnings`, and `cargo deny` — a stale lockfile, a formatting difference, or a single clippy warning fails the build. `release.yml` duplicates all of them as the publish gate, so a gate added to one must be added to the other.
+Every push must pass these steps. CI runs `cargo fmt --check`, `cargo check --locked`, `cargo test`, `cargo clippy --locked --tests -- -D warnings`, and `cargo deny check` (advisories, bans, licenses and sources; `tests/ci_rules.rs` fails if a workflow narrows it) — a stale lockfile, a formatting difference, or a single clippy warning fails the build. `release.yml` duplicates all of them as the publish gate, so a gate added to one must be added to the other.
 
 None of this should be news by the time you get here: fmt and clippy belong to *every code change* (see above), and this list is the final check, not the first time you run them.
 

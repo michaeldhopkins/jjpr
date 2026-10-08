@@ -1,3 +1,13 @@
+# Supply-chain policy, enforced in CI via `cargo deny check` (advisories, bans, licenses, sources).
+# See https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+version = 2
+# Unmaintained advisories fail only for our own direct dependencies: a transitive crate going
+# unmaintained is upstream's to replace.
+unmaintained = "workspace"
+yanked = "warn"
+
 [licenses]
 allow = [
     "MIT",
@@ -7,3 +17,7 @@ allow = [
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
 ]
+
+[bans]
+# Defaults are fine; this section exists so `cargo deny check bans` has a home.
+multiple-versions = "allow"

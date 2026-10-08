@@ -70,8 +70,8 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-deny
 
-      - name: cargo deny check licenses
-        run: cargo deny check licenses
+      - name: cargo deny check
+        run: cargo deny check
 
   # jjpr supports jj 0.36 and later. The job above pins one release; this one runs
   # every test that shells out to jj against the floor, the releases where a

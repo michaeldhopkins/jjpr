@@ -96,8 +96,8 @@ jobs:
 
       - uses: taiki-e/install-action@cargo-deny
 
-      - name: cargo deny check licenses
-        run: cargo deny check licenses
+      - name: cargo deny check
+        run: cargo deny check
 
       - name: Generate distribution assets
         run: cargo run --locked --example generate_assets
