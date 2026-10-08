@@ -3,7 +3,7 @@
 
 use super::restack::abandon_revset;
 
-/// Said instead of rebasing when [`Decision::CannotTell`]. `merged` is sorted.
+/// Said instead of rebasing when [`Decision::CannotTell`](super::restack::Decision::CannotTell). `merged` is sorted.
 /// No single command is safe here, so it points at the recovery page.
 pub fn merge_commit_warning(bookmark: &str, trunk: &str, merged: &[String]) -> String {
     let verb = if merged.len() == 1 { "was" } else { "were" };
