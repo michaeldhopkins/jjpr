@@ -609,6 +609,39 @@ fn a_bookmark_submit_deleted_with_a_matching_head_restacks_without_conflict() {
     assert!(!off_trunk(&repo).contains("Add bottom\n"));
 }
 
+/// The same deleted bookmark, but the forge fails both to look it up and to
+/// list what merged: submit warns and leaves the stack as it was.
+#[test]
+fn a_failed_lookup_for_a_deleted_bookmark_leaves_the_stack_alone() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = squash_merged_stack(true, "// bottom, as reviewed\n");
+    let mut jj = repo.runner();
+    jj.set_fetch_remote(Some("origin".to_string()));
+    let before = jj.get_my_bookmarks().unwrap();
+    jj.git_fetch().unwrap();
+    let segments = segments_for(&jj, "top");
+    let forge = MergedForge {
+        merged: vec!["bottom"],
+        open: Some(vec![]),
+        lookups: Mutex::new(vec![]),
+        recent: None,
+    };
+    let plan = plan_for(&forge, &segments, false);
+
+    assert!(!restack::restack_merged_base(&jj, &forge, &plan, &segments, &before, false).unwrap());
+
+    assert!(
+        forge
+            .lookups
+            .lock()
+            .unwrap()
+            .contains(&"bottom".to_string())
+    );
+    assert_eq!(top_pr_commits(&repo), vec!["Add top", "Add bottom"]);
+}
+
 /// Three stacked PRs; the forge squash-merged the bottom two, keeping `a`'s
 /// branch and deleting `b`'s. A plain fetch then folds `b`'s commit into
 /// `c`'s segment. The kept `a` alone would move `c` from just above `a`,
