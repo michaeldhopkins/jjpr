@@ -100,6 +100,16 @@ impl<'a> Planner<'a> {
                 from,
                 to: to.clone(),
             };
+            let on_pr = pr.or_else(|| self.created_on(bookmark));
+            if !self.undo()
+                && let Some(n) = on_pr
+                && let Some(&count) = self.observed.approvals.get(&n)
+                && count > 0
+            {
+                self.plan
+                    .kept
+                    .push(Kept::ApprovalsDismissed { number: n, count });
+            }
             // The branch of a PR the entry opened goes after the PR is closed.
             if self.undo() && to.is_none() && self.created_on(bookmark).is_some() {
                 self.late.push(step);
@@ -311,8 +321,31 @@ impl<'a> Planner<'a> {
                 // Before any branch deletion in `late`.
                 self.late.insert(0, Step::Close { record, number });
             }
-            Direction::Redo if !open => self.late.push(Step::Reopen { record, number }),
+            Direction::Redo if !open => self.reopen(record, number),
             _ => {}
+        }
+    }
+
+    /// Redo reopens a PR undo closed: after its branch is pushed back, and only
+    /// onto a base branch the forge still has.
+    fn reopen(&mut self, record: usize, number: u64) {
+        let base = self
+            .seen(number)
+            .map(|p| p.base.clone())
+            .unwrap_or_default();
+        // A base this redo pushes back itself (the bottom of the same stack) is
+        // there again by the time the PR reopens.
+        let pushed_here = self.entry.actions.iter().any(|r| {
+            r.undone && matches!(&r.action, Action::Push { bookmark, .. } if *bookmark == base)
+        });
+        if self.observed.branches.get(&base) == Some(&None) && !pushed_here {
+            self.block(Blocker::ReopenBaseGone { number, base });
+            return;
+        }
+        self.late.push(Step::Reopen { record, number });
+        let count = self.observed.activity.get(&number).copied().unwrap_or(0);
+        if count > 0 {
+            self.plan.kept.push(Kept::Activity { number, count });
         }
     }
 
@@ -340,6 +373,10 @@ impl<'a> Planner<'a> {
                 who,
             });
         } else {
+            self.plan.kept.push(Kept::RequestedAgain {
+                number,
+                who: who.clone(),
+            });
             self.plan.steps.push(Step::Request {
                 record,
                 number,

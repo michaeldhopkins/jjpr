@@ -56,6 +56,9 @@ pub struct Observed {
     pub comments: HashMap<u64, HashMap<u64, String>>,
     /// For each PR the entry opened: comments and reviews by anyone but jjpr.
     pub activity: HashMap<u64, usize>,
+    /// Redo: for each PR whose branch it pushes, the approvals that push would
+    /// dismiss.
+    pub approvals: HashMap<u64, u32>,
 }
 
 /// One change to make. `record` is the journal action it takes back or
@@ -143,6 +146,12 @@ pub enum Step {
 pub enum Kept {
     /// Review requests already sent; withdrawing one does not unsend it.
     Notified { number: u64, who: Vec<String> },
+    /// Redo: approvals the push to this PR's branch will dismiss.
+    ApprovalsDismissed { number: u64, count: u32 },
+    /// Redo: a PR it reopens has comments or reviews from others.
+    Activity { number: u64, count: usize },
+    /// Redo: review requests it sends again.
+    RequestedAgain { number: u64, who: Vec<String> },
 }
 
 /// A forge object someone changed after jjpr wrote it.
@@ -185,6 +194,15 @@ pub enum Blocker {
     RepoChanged { since: Vec<Operation> },
     /// jj recorded work that was not jjpr's while the command ran.
     Absorbed(Vec<String>),
+    /// Undo would step back over jj work since the command, and that takes
+    /// these edits off the disk; `--force` goes ahead (`jjpr redo` brings
+    /// them back).
+    EditsOnDisk { files: Vec<String> },
+    /// The work since the command reached beyond this workspace's local repo
+    /// (a fetch, a push, another workspace), so undo cannot step back over it.
+    NotLocal { what: String },
+    /// Redo cannot reopen a PR whose base branch the forge no longer has.
+    ReopenBaseGone { number: u64, base: String },
 }
 
 impl Blocker {
@@ -192,7 +210,10 @@ impl Blocker {
     pub fn forceable(&self) -> bool {
         matches!(
             self,
-            Self::Changed(_) | Self::Close { .. } | Self::BaseGone { .. }
+            Self::Changed(_)
+                | Self::Close { .. }
+                | Self::BaseGone { .. }
+                | Self::EditsOnDisk { .. }
         )
     }
 }
@@ -442,6 +463,26 @@ mod tests {
         let plan = plan(&e, Direction::Undo, &Observed::default());
         assert_eq!(plan.blockers, vec![Blocker::Merged { number: 4 }]);
         assert!(!plan.runs(true));
+    }
+
+    #[test]
+    fn a_pushed_branch_whose_pr_merged_since_blocks() {
+        let e = entry(vec![push("a", Some("old"), "new", Some(3))]);
+        let observed = Observed {
+            branches: branches(&[("a", Some("new"))]),
+            prs: HashMap::from([(
+                3,
+                SeenPr {
+                    status: Status::Merged,
+                    ..SeenPr::default()
+                },
+            )]),
+            ..Observed::default()
+        };
+        assert_eq!(
+            plan(&e, Direction::Undo, &observed).blockers,
+            vec![Blocker::MergedSince { number: 3 }]
+        );
     }
 
     #[test]
@@ -1009,5 +1050,186 @@ mod tests {
         assert!(!plan(vec![close, moved]).runs(true));
         assert_eq!(Direction::Undo.opposite(), Direction::Redo);
         assert_eq!(Direction::Redo.opposite(), Direction::Undo);
+    }
+
+    fn redo_created(base_there: Option<&str>, pushes_base: bool) -> Plan {
+        let mut actions = vec![
+            push("b", None, "c1", None),
+            Action::CreatePr {
+                number: 7,
+                head: "b".into(),
+            },
+        ];
+        if pushes_base {
+            actions.insert(0, push("a", None, "c0", None));
+        }
+        let e = undone(entry(actions));
+        let mut observed = Observed {
+            branches: branches(&[("b", None), ("a", base_there)]),
+            prs: HashMap::from([(
+                7,
+                SeenPr {
+                    base: "a".into(),
+                    status: Status::Closed,
+                    ..SeenPr::default()
+                },
+            )]),
+            activity: HashMap::from([(7, 2)]),
+            ..Observed::default()
+        };
+        observed.approvals.insert(7, 1);
+        plan(&e, Direction::Redo, &observed)
+    }
+
+    #[test]
+    fn redo_will_not_reopen_onto_a_base_branch_the_forge_lost() {
+        let p = redo_created(None, false);
+        assert_eq!(
+            p.blockers,
+            vec![Blocker::ReopenBaseGone {
+                number: 7,
+                base: "a".into()
+            }]
+        );
+        assert!(!p.runs(true));
+        assert!(!p.steps.iter().any(|s| matches!(s, Step::Reopen { .. })));
+    }
+
+    #[test]
+    fn a_base_the_same_redo_pushes_back_does_not_block() {
+        let p = redo_created(None, true);
+        assert!(p.blockers.is_empty(), "{:?}", p.blockers);
+        assert!(matches!(
+            p.steps.last(),
+            Some(Step::Reopen { number: 7, .. })
+        ));
+    }
+
+    #[test]
+    fn redo_names_what_it_cannot_put_back_without_blocking() {
+        let p = redo_created(Some("c0"), false);
+        assert!(p.blockers.is_empty());
+        assert_eq!(
+            p.kept,
+            vec![
+                Kept::ApprovalsDismissed {
+                    number: 7,
+                    count: 1
+                },
+                Kept::Activity {
+                    number: 7,
+                    count: 2
+                },
+            ]
+        );
+        let p = plan(
+            &undone(created_pr_entry()),
+            Direction::Undo,
+            &created_pr_observed(0),
+        );
+        assert!(
+            !p.kept
+                .iter()
+                .any(|k| matches!(k, Kept::ApprovalsDismissed { .. } | Kept::Activity { .. })),
+            "undo names neither"
+        );
+    }
+
+    #[test]
+    fn redo_names_review_requests_it_sends_again() {
+        let e = undone(entry(vec![Action::Reviewers {
+            number: 3,
+            added: vec!["bob".into()],
+        }]));
+        let observed = Observed {
+            prs: HashMap::from([(3, open_pr("main"))]),
+            ..Observed::default()
+        };
+        let p = plan(&e, Direction::Redo, &observed);
+        assert_eq!(
+            p.kept,
+            vec![Kept::RequestedAgain {
+                number: 3,
+                who: vec!["bob".into()]
+            }]
+        );
+    }
+
+    #[test]
+    fn edits_on_disk_need_force_and_the_rest_nothing_clears() {
+        let edits = Blocker::EditsOnDisk {
+            files: vec!["a.txt".into()],
+        };
+        assert!(edits.forceable());
+        assert!(
+            !Blocker::NotLocal {
+                what: String::new()
+            }
+            .forceable()
+        );
+        assert!(
+            !Blocker::ReopenBaseGone {
+                number: 1,
+                base: String::new()
+            }
+            .forceable()
+        );
+    }
+
+    #[test]
+    fn redo_restores_the_local_repo_only_when_undo_had() {
+        let mut e = undone(entry(vec![Action::Ready { number: 3 }]));
+        e.local_undone = false;
+        e.state = State::PartlyUndone;
+        let p = plan(&e, Direction::Redo, &Observed::default());
+        assert!(!p.steps.iter().any(|s| matches!(s, Step::Local { .. })));
+    }
+
+    #[test]
+    fn only_the_branch_of_a_pr_the_entry_opened_waits_for_its_close() {
+        let e = entry(vec![
+            push("a", None, "c0", None),
+            push("b", None, "c1", None),
+            Action::CreatePr {
+                number: 7,
+                head: "b".into(),
+            },
+        ]);
+        let observed = Observed {
+            branches: branches(&[("a", Some("c0")), ("b", Some("c1"))]),
+            prs: HashMap::from([(7, open_pr("main"))]),
+            ..Observed::default()
+        };
+        let order: Vec<String> = plan(&e, Direction::Undo, &observed)
+            .steps
+            .iter()
+            .map(|s| match s {
+                Step::Local { .. } => "local".to_string(),
+                Step::Push { bookmark, .. } => format!("push {bookmark}"),
+                Step::Close { number, .. } => format!("close {number}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(order, ["local", "push a", "close 7", "push b"]);
+    }
+
+    #[test]
+    fn no_approvals_to_dismiss_is_not_worth_a_note() {
+        let e = undone(entry(vec![push("a", Some("old"), "new", Some(5))]));
+        let mut observed = Observed {
+            branches: branches(&[("a", Some("old"))]),
+            prs: HashMap::from([(5, open_pr("main"))]),
+            ..Observed::default()
+        };
+        observed.approvals.insert(5, 0);
+        assert!(plan(&e, Direction::Redo, &observed).kept.is_empty());
+        observed.approvals.insert(5, 2);
+        assert_eq!(
+            plan(&e, Direction::Redo, &observed).kept,
+            vec![Kept::ApprovalsDismissed {
+                number: 5,
+                count: 2
+            }]
+        );
     }
 }

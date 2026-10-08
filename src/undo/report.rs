@@ -7,11 +7,11 @@ use super::plan::{Direction, Kept, Step, touched_prs};
 
 /// "`jjpr submit` from 14:02".
 pub fn name(entry: &Entry, now: u64) -> String {
-    format!(
-        "`jjpr {}` from {}",
-        entry.command,
-        when(entry.started_at, now)
-    )
+    let at = when(entry.started_at, now);
+    if entry.command == super::step_back::COMMAND {
+        return format!("the jj operations stepped back over at {at}");
+    }
+    format!("`jjpr {}` from {at}", entry.command)
 }
 
 fn verb(direction: Direction) -> &'static str {
@@ -46,8 +46,13 @@ pub fn step(step: &Step, entry: &Entry, direction: Direction, fk: ForgeKind) -> 
     let text = match step {
         Step::Local { op } => {
             let side = if undo { "before" } else { "after" };
+            let what = if cmd == super::step_back::COMMAND {
+                "jj operations"
+            } else {
+                cmd.as_str()
+            };
             format!(
-                "Restore the local repo to operation {}, from {side} the {cmd}",
+                "Restore the local repo to operation {}, from {side} the {what}",
                 short(op)
             )
         }
@@ -120,6 +125,26 @@ pub fn kept(kept: &Kept, fk: ForgeKind) -> String {
             who.join(", "),
             fk.format_ref(*number)
         ),
+        Kept::ApprovalsDismissed { number, count } => {
+            let s = if *count == 1 { "" } else { "s" };
+            format!(
+                "  {}: pushing its branch dismisses its {count} approval{s}",
+                fk.format_ref(*number)
+            )
+        }
+        Kept::Activity { number, count } => {
+            let s = if *count == 1 { "" } else { "s" };
+            format!(
+                "  {} has {count} comment{s} or review{s} from others; they show again once it reopens",
+                fk.format_ref(*number)
+            )
+        }
+        Kept::RequestedAgain { number, who } => format!(
+            "  {} {} the review request on {} again",
+            who.join(", "),
+            if who.len() == 1 { "gets" } else { "get" },
+            fk.format_ref(*number)
+        ),
     }
 }
 
@@ -131,8 +156,11 @@ pub fn abandoned(entry: &Entry, now: u64) -> String {
     )
 }
 
-pub fn kept_heading() -> &'static str {
-    "Not undone:"
+pub fn kept_heading(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Undo => "Not undone:",
+        Direction::Redo => "Worth knowing:",
+    }
 }
 
 /// The last line of a dry run, which takes no snapshot of the working copy.
@@ -401,7 +429,8 @@ mod tests {
             ),
             "  alice already had the review request on #3"
         );
-        assert_eq!(kept_heading(), "Not undone:");
+        assert_eq!(kept_heading(Direction::Undo), "Not undone:");
+        assert_eq!(kept_heading(Direction::Redo), "Worth knowing:");
     }
 
     #[test]

@@ -13,6 +13,8 @@ pub mod execute;
 pub mod explain;
 pub mod failed;
 pub mod journal;
+#[cfg(test)]
+mod model;
 mod observe;
 pub mod plan;
 mod planner;
@@ -22,6 +24,8 @@ pub mod recording_jj;
 pub mod repo;
 pub mod report;
 pub mod rollback;
+mod show;
+pub mod step_back;
 #[cfg(test)]
 mod world;
 
@@ -129,9 +133,16 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
         anyhow::bail!("{text}");
     }
     let mut blockers = check_local(cx, &entry, opts)?;
-    let observed = match (cx.forge_for)(&entry)
-        .and_then(|forge| observe::observe(forge.as_ref(), &entry, opts).map(|o| (forge, o)))
-    {
+    // An entry that touched only the local repo (a step back over jj work)
+    // needs no forge.
+    let found = if entry.actions.is_empty() {
+        Ok((None, Observed::default()))
+    } else {
+        (cx.forge_for)(&entry).and_then(|forge| {
+            observe::observe(forge.as_ref(), &entry, opts).map(|o| (Some(forge), o))
+        })
+    };
+    let (forge, observed) = match found {
         Ok(found) => found,
         // What the repo alone shows is reason enough; say that, not the forge's trouble.
         Err(e) if !blockers.is_empty() => {
@@ -140,12 +151,16 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
         }
         Err(e) => return Err(e),
     };
-    let (forge, observed) = observed;
     let mut plan = plan::plan(&entry, opts.direction, &observed);
     blockers.append(&mut plan.blockers);
     plan.blockers = blockers;
+    if opts.direction == Direction::Undo
+        && step_back::try_it(cx, &entry, &mut plan.blockers, opts, out)?
+    {
+        return Ok(());
+    }
     if opts.dry_run {
-        return print_dry_run(out, &entry, &plan, opts, cx.now);
+        return show::dry_run(out, &entry, &plan, opts, cx.now);
     }
     if let Some(text) = refuse(&plan.blockers) {
         anyhow::bail!("{text}");
@@ -162,25 +177,28 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
     }
     let target = execute::Target {
         repo: cx.repo,
-        forge: forge.as_ref(),
+        forge: forge.as_deref(),
         journal: cx.journal,
     };
     let expected = cx.repo.view_fingerprint().ok();
     if let Err(stopped) = execute::run(&target, &mut entry, &plan, opts.direction, out) {
-        let text = after_failure(
-            cx,
-            &entry,
-            opts,
-            forge.as_ref(),
-            &observed,
-            expected,
-            stopped,
-        );
-        anyhow::bail!("{text}");
+        let check = Check {
+            forge: forge.as_deref(),
+            before: &observed,
+            view_before: expected,
+        };
+        anyhow::bail!("{}", after_failure(cx, &entry, opts, check, stopped));
     }
-    print_kept(out, &plan, &entry)?;
+    show::kept(out, &plan, &entry, opts.direction)?;
     writeln!(out, "{}", report::done(&entry, opts.direction, cx.now))?;
     Ok(())
+}
+
+/// What a failed run is compared with afterwards.
+struct Check<'a> {
+    forge: Option<&'a dyn Forge>,
+    before: &'a Observed,
+    view_before: Option<String>,
 }
 
 /// What to say once a run failed at a step: how far putting it back got,
@@ -189,9 +207,7 @@ fn after_failure(
     cx: &Context,
     entry: &Entry,
     opts: Options,
-    forge: &dyn Forge,
-    before: &Observed,
-    view_before: Option<String>,
+    check: Check,
     stopped: execute::Stopped,
 ) -> String {
     let cause = format!("{:#}", stopped.cause);
@@ -199,57 +215,16 @@ fn after_failure(
         return failed::stopped_partway(entry, opts.direction, cx.now, &cause, &format!("{e:#}"));
     }
     let mut left = Vec::new();
-    if cx.repo.view_fingerprint().ok() != view_before {
+    if cx.repo.view_fingerprint().ok() != check.view_before {
         left.push(rollback::Difference::Local);
     }
-    match observe::observe(forge, entry, opts) {
-        Ok(after) => left.extend(rollback::differences(before, &after)),
-        Err(e) => eprintln!("  Warning: could not check the forge afterwards: {e:#}"),
-    }
-    failed::stopped_and_put_back(entry, opts.direction, cx.now, &cause, &left)
-}
-
-fn print_dry_run(
-    out: &mut dyn Write,
-    entry: &Entry,
-    plan: &plan::Plan,
-    opts: Options,
-    now: u64,
-) -> Result<()> {
-    writeln!(out, "{}", report::header(entry, opts.direction, true, now))?;
-    if opts.force {
-        for b in &plan.blockers {
-            if let Some(line) = explain::overridden(b, entry) {
-                writeln!(out, "{line}")?;
-            }
+    if let Some(forge) = check.forge {
+        match observe::observe(forge, entry, opts) {
+            Ok(after) => left.extend(rollback::differences(check.before, &after)),
+            Err(e) => eprintln!("  Warning: could not check the forge afterwards: {e:#}"),
         }
     }
-    for step in &plan.steps {
-        writeln!(
-            out,
-            "{}",
-            report::step(step, entry, opts.direction, entry.forge)
-        )?;
-    }
-    print_kept(out, plan, entry)?;
-    if let Some(text) =
-        explain::dry_run_blockers(&plan.blockers, entry, opts.direction, opts.force, now)
-    {
-        writeln!(out, "{text}")?;
-    }
-    writeln!(out, "{}", report::DRY_RUN_NOTE)?;
-    Ok(())
-}
-
-fn print_kept(out: &mut dyn Write, plan: &plan::Plan, entry: &Entry) -> Result<()> {
-    if plan.kept.is_empty() {
-        return Ok(());
-    }
-    writeln!(out, "{}", report::kept_heading())?;
-    for k in &plan.kept {
-        writeln!(out, "{}", report::kept(k, entry.forge))?;
-    }
-    Ok(())
+    failed::stopped_and_put_back(entry, opts.direction, cx.now, &cause, &left)
 }
 
 /// The process that recorded `entry` died before finishing it (Ctrl-C, a

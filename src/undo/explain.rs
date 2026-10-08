@@ -6,6 +6,7 @@ use crate::forge::ForgeKind;
 
 use super::journal::Entry;
 use super::plan::{Blocker, Changed, Direction};
+use super::repo::Operation;
 use super::report::{name, short};
 
 fn verb(direction: Direction) -> &'static str {
@@ -85,12 +86,62 @@ pub fn reason(b: &Blocker, entry: &Entry) -> String {
             }
             text
         }
+        Blocker::EditsOnDisk { files } => format!(
+            "undoing it first takes back the jj work since, and that takes your edits to {} off \
+             the disk (`jjpr redo` brings them back)",
+            listed(files)
+        ),
+        Blocker::NotLocal { what } => {
+            format!("{what} since, so jjpr can't take back the jj work since on its own")
+        }
+        Blocker::ReopenBaseGone { number, base } => format!(
+            "{} can't be reopened: {remote} no longer has its base branch '{base}'",
+            pr(number)
+        ),
         Blocker::Absorbed(what) => format!(
             "while it ran, jj also recorded work that wasn't jjpr's ({}), and that work \
              would be lost",
             what.join(", ")
         ),
     }
+}
+
+/// Up to five names, then how many more.
+fn listed(names: &[String]) -> String {
+    let mut text = names.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    if names.len() > 5 {
+        text.push_str(&format!(" and {} more", names.len() - 5));
+    }
+    text
+}
+
+/// What `jjpr undo` says when it steps back over the jj work since `name`,
+/// or in a dry run would.
+pub fn stepping_back(since: &[Operation], name: &str, dry_run: bool) -> String {
+    let n = since.len();
+    let ops = if n == 1 {
+        "1 jj operation".to_string()
+    } else {
+        format!("{n} jj operations")
+    };
+    let mut text = if dry_run {
+        format!("Would undo {ops} since {name}, so that the next `jjpr undo` reaches it:")
+    } else {
+        format!("Undid {ops} since {name}:")
+    };
+    for op in since.iter().take(5) {
+        text.push_str(&format!("\n  {} {}", short(&op.id), op.description));
+    }
+    if n > 5 {
+        text.push_str(&format!("\n  and {} more", n - 5));
+    }
+    if !dry_run {
+        let them = if n == 1 { "it" } else { "them" };
+        text.push_str(&format!(
+            "\nTo put {them} back: jjpr redo. To undo {name}: jjpr undo"
+        ));
+    }
+    text
 }
 
 fn activity_text(count: usize) -> String {
@@ -145,16 +196,26 @@ fn stopping(blockers: &[Blocker], force: bool) -> Vec<&Blocker> {
 }
 
 /// The way out, after the list of reasons.
-fn way_out(stops: &[&Blocker], direction: Direction) -> String {
+fn way_out(stops: &[&Blocker], direction: Direction, remote: &str) -> String {
     if stops.iter().all(|b| b.forceable()) {
-        format!(
-            "Rerun with --force to {} all of it: jjpr {} --force",
+        return format!(
+            "Nothing else stands in the way. Rerun with --force to {} all of it: jjpr {} --force",
             verb(direction),
             verb(direction)
-        )
-    } else {
-        "Use jj to get the stack into the state you want, then run `jjpr submit`.".to_string()
+        );
     }
+    let mut text =
+        "Use jj to get the stack into the state you want, then run `jjpr submit`.".to_string();
+    // Someone else's commits on a branch: the way to keep them.
+    for b in stops {
+        if let Blocker::BranchMoved { bookmark, .. } = b {
+            text.push_str(&format!(
+                "\nTo keep the commits on '{bookmark}': run `jj git fetch`, rebase onto \
+                 `{bookmark}@{remote}`, then run `jjpr submit`."
+            ));
+        }
+    }
+    text
 }
 
 /// "jjpr can't undo all of `jjpr submit` from 14:02 without --force".
@@ -195,7 +256,7 @@ pub fn refused(
         "{}, so it changed nothing:{}\n{}",
         lead(&stops, entry, direction, now),
         reasons(&stops, entry),
-        way_out(&stops, direction)
+        way_out(&stops, direction, &entry.remote)
     ))
 }
 
@@ -217,7 +278,7 @@ pub fn dry_run_blockers(
         "{}, so the real run would change nothing:{}\n{}",
         lead(&stops, entry, direction, now),
         reasons(&all, entry),
-        way_out(&stops, direction)
+        way_out(&stops, direction, &entry.remote)
     ))
 }
 
@@ -373,6 +434,29 @@ mod tests {
     }
 
     #[test]
+    fn stepping_back_names_the_operations_and_both_ways_on() {
+        let op = |id: &str, d: &str| Operation {
+            id: id.into(),
+            description: d.into(),
+        };
+        let one = [op("60449576ff81aa", "describe commit 83c5")];
+        assert_eq!(
+            stepping_back(&one, "`jjpr submit` from 14:02", false),
+            "Undid 1 jj operation since `jjpr submit` from 14:02:\n  60449576ff81 describe \
+             commit 83c5\nTo put it back: jjpr redo. To undo `jjpr submit` from 14:02: jjpr undo"
+        );
+        let seven: Vec<Operation> = (0..7)
+            .map(|i| op(&format!("{i}00000000000"), "x"))
+            .collect();
+        let text = stepping_back(&seven, "it", true);
+        assert!(text.starts_with(
+            "Would undo 7 jj operations since it, so that the next `jjpr undo` reaches it:"
+        ));
+        assert!(text.ends_with("\n  and 2 more"), "{text}");
+        assert!(stepping_back(&seven[..2], "it", false).contains("To put them back"));
+    }
+
+    #[test]
     fn a_changed_repo_lists_the_operations_since_up_to_five() {
         let op = |i: usize| Operation {
             id: format!("{i}abcdef0123456789"),
@@ -404,7 +488,7 @@ mod tests {
                 "jjpr can't undo all of `jjpr submit` from {} without --force, so it changed \
                  nothing:\n  - #44, which the submit opened, would be closed, and it has 2 \
                  comments or reviews from others\n  - #43, which the submit opened, would be \
-                 closed\nRerun with --force to undo all of it: jjpr undo --force",
+                 closed\nNothing else stands in the way. Rerun with --force to undo all of it: jjpr undo --force",
                 at()
             )
         );
@@ -426,7 +510,8 @@ mod tests {
                     "jjpr can't redo all of `jjpr submit` from {}, so it changed nothing:\n  \
                      - 'auth' changed on origin after jjpr last pushed it (jjpr expected \
                      9e8f7a6b; origin has 3c4d5e6f)\nUse jj to get the stack into the state you \
-                     want, then run `jjpr submit`.",
+                     want, then run `jjpr submit`.\nTo keep the commits on 'auth': run `jj git fetch`, rebase \
+                     onto `auth@origin`, then run `jjpr submit`.",
                     at()
                 )
             );
@@ -445,7 +530,8 @@ mod tests {
                  nothing:\n  - #44, which the submit opened, would be closed\n  - 'auth' changed \
                  on origin after jjpr last pushed it (jjpr expected 9e8f7a6b; origin has \
                  3c4d5e6f)\nUse jj to get the stack into the state you want, then run `jjpr \
-                 submit`.",
+                 submit`.\nTo keep the commits on 'auth': run `jj git fetch`, rebase onto \
+                 `auth@origin`, then run `jjpr submit`.",
                 at()
             )
         );

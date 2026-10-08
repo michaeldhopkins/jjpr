@@ -230,7 +230,6 @@ mod tests {
 
     use super::*;
     use crate::undo::plan::SeenPr;
-    use crate::undo::world;
 
     fn step() -> impl Strategy<Value = Step> {
         let text = || prop::sample::select(vec!["a", "b", "c"]).prop_map(String::from);
@@ -348,9 +347,9 @@ mod tests {
         fn a_step_then_its_inverse_changes_nothing(step in step()) {
             let start = before(&step);
             let mut forge = start.clone();
-            world::apply(&mut forge, &step);
+            crate::undo::model::apply(&mut forge, &step);
             let back = inverse(&step, "op0", Some(5));
-            world::apply(&mut forge, &back);
+            crate::undo::model::apply(&mut forge, &back);
             prop_assert_eq!(differences(&start, &forge), vec![]);
         }
 

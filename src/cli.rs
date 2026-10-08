@@ -297,7 +297,7 @@ Examples:
     },
     /// Take back the last jjpr command: the local repo and what it changed on the forge
     Undo {
-        /// Also close PRs it opened, and restore what others changed since
+        /// Also close PRs it opened, and write over what others changed since. Undo lists each of these first; it never changes anything else
         #[arg(long)]
         force: bool,
 
@@ -307,7 +307,7 @@ Examples:
     },
     /// Put back the last command `jjpr undo` took back
     Redo {
-        /// Restore what others changed since the undo
+        /// Write over what others changed since the undo. Redo lists each of these first; it never changes anything else
         #[arg(long)]
         force: bool,
     },

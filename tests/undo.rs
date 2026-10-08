@@ -855,6 +855,9 @@ fn a_change_to_the_repo_since_blocks_undo_and_changes_nothing() {
     let forge = ModelForge::new(repo.origin_path());
     submit(&repo, &forge, "b", &[]);
     repo.run_jj(&["describe", "b", "-m", "Add b, later"]);
+    // Someone moves 'b' on the remote too: the jj work is not all that
+    // stands in the way, so undo does not step back over it.
+    run(repo.origin_path(), "git", &["branch", "-f", "b", "main"]);
     let op = head_op(&repo);
     let message = err(undo(&repo, &forge, true));
     assert!(
@@ -862,6 +865,7 @@ fn a_change_to_the_repo_since_blocks_undo_and_changes_nothing() {
         "{message}"
     );
     assert!(message.contains("describe commit"), "{message}");
+    assert!(message.contains("'b' changed on origin"), "{message}");
     assert_eq!(head_op(&repo), op, "nothing was changed");
     assert!(forge.pr(1).open);
 }
@@ -877,7 +881,7 @@ fn uncommitted_edits_block_undo_and_stay_on_disk() {
     repo.write_file("wip.txt", "precious\n");
     let message = err(undo(&repo, &forge, false));
     assert!(
-        message.contains("the repo changed since, and that work would be lost"),
+        message.contains("takes your edits to wip.txt off the disk"),
         "{message}"
     );
     assert!(repo.path().join("wip.txt").exists());
@@ -1536,4 +1540,222 @@ fn a_local_blocker_is_reported_even_when_the_forge_is_unreachable() {
         message.contains("(jjpr could not check the forge as well: could not resolve host)"),
         "{message}"
     );
+}
+
+fn description(repo: &common::JjTestRepo, rev: &str) -> String {
+    repo.run_jj(&["log", "--no-graph", "-r", rev, "-T", "description"])
+        .trim()
+        .to_string()
+}
+
+/// `jj describe` after a submit: the first undo takes back the describe on
+/// its own, the second the submit, and redo puts them back in order.
+#[test]
+fn undo_steps_back_over_jj_work_since_then_undoes_the_command() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "b", &[]);
+    repo.run_jj(&["describe", "b", "-m", "Add b, reworded"]);
+
+    let out = ok(undo(&repo, &forge, false));
+    assert!(
+        out.contains("Undid 1 jj operation since `jjpr submit`"),
+        "{out}"
+    );
+    assert!(out.contains("describe commit"), "{out}");
+    assert!(
+        out.contains("To put it back: jjpr redo. To undo `jjpr submit`"),
+        "{out}"
+    );
+    assert_eq!(description(&repo, "b"), "Add b");
+    assert!(forge.pr(1).open, "the forge is untouched");
+
+    ok(undo(&repo, &forge, true));
+    assert!(!forge.pr(1).open);
+
+    ok(redo(&repo, &forge));
+    assert!(forge.pr(1).open);
+    assert_eq!(description(&repo, "b"), "Add b");
+    let out = ok(redo(&repo, &forge));
+    assert!(out.contains("Redoing the jj operations"), "{out}");
+    assert_eq!(description(&repo, "b"), "Add b, reworded");
+    assert_eq!(redo(&repo, &forge).out.trim(), "Nothing to redo.");
+}
+
+/// Edits on disk since the submit leave the disk only with --force, and redo
+/// brings them back.
+#[test]
+fn stepping_back_over_edits_on_disk_needs_force() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "b", &[]);
+    repo.write_file("wip.txt", "precious\n");
+    let message = err(undo(&repo, &forge, false));
+    assert!(
+        message.contains("takes your edits to wip.txt off the disk (`jjpr redo` brings them back)"),
+        "{message}"
+    );
+    assert!(repo.path().join("wip.txt").exists());
+    ok(undo(&repo, &forge, true));
+    assert!(!repo.path().join("wip.txt").exists());
+    ok(redo(&repo, &forge));
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("wip.txt")).expect("test fixture"),
+        "precious\n"
+    );
+}
+
+/// Work since that reached a remote is not stepped back over.
+#[test]
+fn a_fetch_since_keeps_the_refusal() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "b", &[]);
+    // Someone else's branch appears on the remote.
+    run(repo.origin_path(), "git", &["branch", "theirs", "main"]);
+    repo.run_jj(&["git", "fetch"]);
+    repo.run_jj(&["describe", "b", "-m", "Add b, reworded"]);
+    let message = err(undo(&repo, &forge, true));
+    assert!(message.contains("fetch from git remote"), "{message}");
+    assert!(
+        message.contains("so jjpr can't take back the jj work since on its own"),
+        "{message}"
+    );
+    assert_eq!(
+        description(&repo, "b"),
+        "Add b, reworded",
+        "nothing changed"
+    );
+}
+
+/// Another workspace's work is never undone from this one.
+#[test]
+fn another_workspace_changed_since_keeps_the_refusal() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "b", &[]);
+    let other = repo.path().with_file_name(format!(
+        "{}-w2",
+        repo.path()
+            .file_name()
+            .expect("test fixture")
+            .to_string_lossy()
+    ));
+    repo.run_jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "w2",
+        other.to_str().expect("test fixture"),
+    ]);
+    let message = err(undo(&repo, &forge, true));
+    assert!(message.contains("workspace 'w2' changed"), "{message}");
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+/// Redo says what it cannot restore: comments left while the PR was closed,
+/// review requests it sends again.
+#[test]
+fn redo_names_what_it_cannot_put_back() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "a", &["alice".to_string()]);
+    ok(undo(&repo, &forge, true));
+    forge
+        .create_comment("o", "r", 1, "why was this closed?")
+        .expect("test fixture");
+    let out = ok(redo(&repo, &forge));
+    assert!(out.contains("Worth knowing:"), "{out}");
+    assert!(
+        out.contains("#1 has 1 comment or review from others; they show again once it reopens"),
+        "{out}"
+    );
+    assert!(
+        out.contains("alice gets the review request on #1 again"),
+        "{out}"
+    );
+}
+
+/// Redo will not reopen a PR whose base branch someone deleted.
+#[test]
+fn redo_refuses_to_reopen_onto_a_deleted_base() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "a", &[]);
+    submit(&repo, &forge, "b", &[]);
+    ok(undo(&repo, &forge, true));
+    run(repo.origin_path(), "git", &["branch", "-D", "a"]);
+    let message = err(redo(&repo, &forge));
+    assert!(
+        message.contains("#2 can't be reopened: origin no longer has its base branch 'a'"),
+        "{message}"
+    );
+}
+
+/// Someone pushed to a branch undo put back: redo refuses and says how to keep
+/// their commits.
+#[test]
+fn redo_over_a_coworkers_push_says_how_to_keep_it() {
+    if !common::jj_available() {
+        return;
+    }
+    let repo = two_bookmarks();
+    let forge = ModelForge::new(repo.origin_path());
+    submit(&repo, &forge, "a", &[]);
+    repo.run_jj(&["describe", "a", "-m", "Add a, amended"]);
+    submit(&repo, &forge, "a", &[]);
+    ok(undo(&repo, &forge, false));
+    // A coworker pushes a fix on top of the branch undo put back.
+    let side = tempfile::TempDir::new().expect("test fixture");
+    let origin = repo
+        .origin_path()
+        .to_str()
+        .expect("test fixture")
+        .to_string();
+    run(
+        side.path(),
+        "git",
+        &["clone", "-q", "-b", "a", &origin, "clone"],
+    );
+    let clone = side.path().join("clone");
+    let id = ["-c", "user.name=Coworker", "-c", "user.email=x@jjpr.dev"];
+    run(
+        &clone,
+        "git",
+        &[
+            &id[..],
+            &["commit", "-q", "--allow-empty", "-m", "their fix"],
+        ]
+        .concat(),
+    );
+    run(&clone, "git", &["push", "-q", "origin", "a"]);
+    for force in [false, true] {
+        let message = err(act(&repo, &forge, Direction::Redo, force, false));
+        assert!(message.contains("'a' changed on origin"), "{message}");
+        assert!(
+            message.contains(
+                "To keep the commits on 'a': run `jj git fetch`, rebase onto `a@origin`, then \
+                 run `jjpr submit`."
+            ),
+            "{message}"
+        );
+    }
 }

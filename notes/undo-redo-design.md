@@ -1,7 +1,8 @@
 # Undo and redo: open design questions
 
 Two questions the owner raised on 2026-10-08, after undo and redo became all
-or nothing. Neither is built yet. Each section ends with a recommendation.
+or nothing. He approved both recommendations the same day, and both are
+built (`src/undo/step_back.rs`, the redo checks in `planner.rs`). Each section ends with a recommendation.
 Facts marked *measured* were run against real forges (`tests/undo_e2e.rs`,
 2026-10-06) or a real jj (0.45.1, 2026-10-08); the rest is each forge's
 documented behaviour.

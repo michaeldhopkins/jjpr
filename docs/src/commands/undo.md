@@ -59,7 +59,7 @@ $ jjpr undo
 Error: jjpr can't undo all of `jjpr submit` from 14:02 without --force, so it changed nothing:
   - #44, which the submit opened, would be closed
   - #43, which the submit opened, would be closed
-Rerun with --force to undo all of it: jjpr undo --force
+Nothing else stands in the way. Rerun with --force to undo all of it: jjpr undo --force
 ```
 
 ## When undo refuses
@@ -67,9 +67,9 @@ Rerun with --force to undo all of it: jjpr undo --force
 Undo changes nothing when it would destroy work, or when it can't take back
 all of the command. It refuses when:
 
-- **The repo changed since the command.** A commit was amended, or the
-  working copy has edits. Undoing would discard them. The message lists the jj
-  operations since. To keep that work, change the stack with jj until it is
+- **The repo changed since the command, and not only here.** A fetch, a
+  push, or another workspace's work since would be lost. The message lists the
+  jj operations since. To keep that work, change the stack with jj until it is
   what you want, then run `jjpr submit`.
 - **Someone pushed to a branch since.** Undo never overwrites commits jjpr
   did not push, even with `--force`.
@@ -81,6 +81,32 @@ all of the command. It refuses when:
 - **`jjpr watch` is running in the repo**, in any of its workspaces. It
   would redo the work on its next poll. Stop it first.
 - **Another jjpr command is changing the repo.** Wait for it to finish.
+
+## jj work since the command
+
+If you amended or reworded a commit after the command, the first `jjpr undo`
+takes back only that jj work, and the second takes back the command.
+`jjpr redo` puts back each in turn.
+
+```
+$ jj describe profile -m "Add profile page and avatar"
+$ jjpr undo
+Undid 1 jj operation since `jjpr submit` from 14:02:
+  0711f01f23f4 describe commit 613b9b054cb0
+To put it back: jjpr redo. To undo `jjpr submit` from 14:02: jjpr undo
+```
+
+Edits on disk that you haven't committed leave the disk too, so they need
+`--force`; `jjpr redo` brings them back.
+
+## Redo
+
+`jjpr redo` puts back what undo took back, and checks first in the same
+way. Someone else's commits on a branch block it, even with `--force`, and
+the message says how to keep them. It reopens the PRs undo closed once their
+branches are back, but not onto a base branch the forge has since deleted.
+It ends by naming what it can't restore: approvals its pushes dismiss,
+comments left while a PR was closed, and review requests it sends again.
 
 ## How far back
 

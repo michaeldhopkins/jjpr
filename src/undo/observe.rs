@@ -66,9 +66,9 @@ pub(super) fn observe(forge: &dyn Forge, entry: &Entry, opts: Options) -> Result
             .collect();
         observed.comments.insert(pr, bodies);
     }
-    if opts.direction == Direction::Undo {
-        for record in &entry.actions {
-            if let Action::CreatePr { number, .. } = record.action {
+    for record in &entry.actions {
+        if let Action::CreatePr { number, .. } = record.action {
+            {
                 let others = forge
                     .list_comments(owner, repo, number)?
                     .iter()
@@ -81,5 +81,47 @@ pub(super) fn observe(forge: &dyn Forge, entry: &Entry, opts: Options) -> Result
             }
         }
     }
+    if opts.direction == Direction::Redo {
+        redo_extras(forge, entry, &mut observed)?;
+    }
     Ok(observed)
+}
+
+/// What only redo needs: the base branch of each PR it would reopen, and the
+/// approvals each of its pushes would dismiss.
+fn redo_extras(forge: &dyn Forge, entry: &Entry, observed: &mut Observed) -> Result<()> {
+    let (owner, repo) = (&entry.owner, &entry.repo);
+    let created = |bookmark: &str| {
+        entry.actions.iter().find_map(|r| match &r.action {
+            Action::CreatePr { number, head } if head == bookmark => Some(*number),
+            _ => None,
+        })
+    };
+    for record in &entry.actions {
+        if let Action::CreatePr { number, .. } = record.action
+            && let Some(base) = observed.prs.get(&number).map(|p| p.base.clone())
+            && !observed.branches.contains_key(&base)
+        {
+            let head = forge.get_branch_head(owner, repo, &base)?;
+            observed.branches.insert(base, head);
+        }
+    }
+    let mut cache = HashMap::new();
+    for record in entry.actions.iter().filter(|r| r.undone) {
+        let Action::Push { bookmark, pr, .. } = &record.action else {
+            continue;
+        };
+        let Some(n) = pr.or_else(|| created(bookmark)) else {
+            continue;
+        };
+        let Some(base) = observed.prs.get(&n).map(|p| p.base.clone()) else {
+            continue;
+        };
+        if let Some(count) =
+            crate::forge::approvals_dismissed_by_push(forge, owner, repo, &base, n, &mut cache)
+        {
+            observed.approvals.insert(n, count);
+        }
+    }
+    Ok(())
 }

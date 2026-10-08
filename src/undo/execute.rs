@@ -20,7 +20,8 @@ use super::rollback;
 
 pub struct Target<'a> {
     pub repo: &'a dyn UndoRepo,
-    pub forge: &'a dyn Forge,
+    /// `None` for an entry that touched only the local repo.
+    pub forge: Option<&'a dyn Forge>,
     pub journal: &'a Journal,
 }
 
@@ -225,7 +226,11 @@ fn apply(
     undone: bool,
     renames: &mut Renames,
 ) -> Result<Option<u64>> {
-    let (owner, repo, forge) = (entry.owner.clone(), entry.repo.clone(), t.forge);
+    let (owner, repo) = (entry.owner.clone(), entry.repo.clone());
+    let forge = || {
+        t.forge
+            .ok_or_else(|| anyhow::anyhow!("this step needs the forge, and there is none"))
+    };
     match step {
         Step::Local { op } => {
             t.repo.restore_repo_only(op)?;
@@ -237,25 +242,25 @@ fn apply(
             to,
             ..
         } => push(t.repo, bookmark, remote, to.as_deref())?,
-        Step::Reopen { number, .. } => forge.reopen_pr(&owner, &repo, *number)?,
-        Step::Close { number, .. } => forge.close_pr(&owner, &repo, *number)?,
-        Step::Base { number, to, .. } => forge.update_pr_base(&owner, &repo, *number, to)?,
-        Step::DeleteComment { id, .. } => forge.delete_comment(&owner, &repo, *id)?,
-        Step::EditComment { id, to, .. } => forge.update_comment(&owner, &repo, *id, to)?,
+        Step::Reopen { number, .. } => forge()?.reopen_pr(&owner, &repo, *number)?,
+        Step::Close { number, .. } => forge()?.close_pr(&owner, &repo, *number)?,
+        Step::Base { number, to, .. } => forge()?.update_pr_base(&owner, &repo, *number, to)?,
+        Step::DeleteComment { id, .. } => forge()?.delete_comment(&owner, &repo, *id)?,
+        Step::EditComment { id, to, .. } => forge()?.update_comment(&owner, &repo, *id, to)?,
         Step::PostComment { pr, id, body, .. } => {
-            let posted = forge.create_comment(&owner, &repo, *pr, body)?;
+            let posted = forge()?.create_comment(&owner, &repo, *pr, body)?;
             renames.insert((*pr, *id), posted.id);
             rename_comment(t, entry, *pr, *id, posted.id);
             return Ok(Some(posted.id));
         }
-        Step::Body { number, to, .. } => forge.update_pr_body(&owner, &repo, *number, to)?,
-        Step::Draft { number, .. } => forge.convert_to_draft(&owner, &repo, *number)?,
-        Step::Ready { number, .. } => forge.mark_pr_ready(&owner, &repo, *number)?,
+        Step::Body { number, to, .. } => forge()?.update_pr_body(&owner, &repo, *number, to)?,
+        Step::Draft { number, .. } => forge()?.convert_to_draft(&owner, &repo, *number)?,
+        Step::Ready { number, .. } => forge()?.mark_pr_ready(&owner, &repo, *number)?,
         Step::Unrequest { number, who, .. } => {
-            forge.remove_reviewers(&owner, &repo, *number, who)?;
+            forge()?.remove_reviewers(&owner, &repo, *number, who)?;
         }
         Step::Request { number, who, .. } => {
-            forge.request_reviewers(&owner, &repo, *number, who)?;
+            forge()?.request_reviewers(&owner, &repo, *number, who)?;
         }
     }
     Ok(None)
@@ -327,6 +332,15 @@ mod tests {
     }
 
     impl UndoRepo for Log {
+        fn files_changed_since(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn working_copies(&self, _: Option<&str>) -> Result<Vec<(String, String)>> {
+            Ok(Vec::new())
+        }
+        fn own_working_copies(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
         fn current_op(&self) -> Result<String> {
             Ok(format!("op{}", self.op.lock().unwrap()))
         }
@@ -649,7 +663,7 @@ mod all_or_nothing {
         let mut after = forge.clone();
         for (record, &(kind, pick)) in choices.iter().enumerate() {
             let step = step_for(&after, record, kind, pick);
-            world::apply(&mut after, &step);
+            crate::undo::model::apply(&mut after, &step);
             steps.push(step);
         }
         let dir = tempfile::TempDir::new().unwrap();
@@ -677,7 +691,7 @@ mod all_or_nothing {
     fn run_case(c: &mut Case) -> Result<(), Stopped> {
         let t = Target {
             repo: &c.world,
-            forge: &c.world,
+            forge: Some(&c.world),
             journal: &c.journal,
         };
         run(&t, &mut c.entry, &c.plan, c.direction, &mut Vec::new())
@@ -746,7 +760,7 @@ mod all_or_nothing {
         let mut out = Vec::new();
         let t = Target {
             repo: &c.world,
-            forge: &c.world,
+            forge: Some(&c.world),
             journal: &c.journal,
         };
         let stopped = run(&t, &mut c.entry, &c.plan, Direction::Undo, &mut out).unwrap_err();

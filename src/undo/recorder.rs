@@ -388,6 +388,15 @@ pub(crate) mod tests {
     }
 
     impl UndoRepo for Arc<FakeRepo> {
+        fn files_changed_since(&self, _: &str) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn working_copies(&self, _: Option<&str>) -> Result<Vec<(String, String)>> {
+            Ok(Vec::new())
+        }
+        fn own_working_copies(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
         fn current_op(&self) -> Result<String> {
             Ok(self.op.lock().unwrap().clone())
         }

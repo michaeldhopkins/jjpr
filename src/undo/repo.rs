@@ -52,6 +52,13 @@ pub trait UndoRepo: Send + Sync {
     fn delete_bookmark(&self, bookmark: &str) -> Result<()>;
     /// Push `bookmark` to `remote`: its new target, or its deletion.
     fn push_bookmark(&self, bookmark: &str, remote: &str) -> Result<()>;
+    /// Files whose working copy differs from what `@` held at `op`: the edits a
+    /// restore to `op` would take off the disk.
+    fn files_changed_since(&self, op: &str) -> Result<Vec<String>>;
+    /// Each workspace's working-copy commit as `(name, commit)`, at `op`, or now.
+    fn working_copies(&self, op: Option<&str>) -> Result<Vec<(String, String)>>;
+    /// The workspaces whose working copy is `@`: this one, and any sharing its commit.
+    fn own_working_copies(&self) -> Result<Vec<String>>;
 }
 
 /// How far back undo looks for what changed since an entry.
@@ -64,6 +71,9 @@ const LOCAL_BOOKMARKS: &str = r#"if(remote, "", name ++ "	" ++ if(conflict, "con
 const OWN_HEADS: &str = "(visible_heads() ~ ::remote_bookmarks()) | working_copies()";
 
 const OP_LINE: &str = r#"id ++ "	" ++ description.first_line() ++ "\n""#;
+
+/// Each working-copy commit with the workspaces on it (`a@ b@`).
+const WORKING_COPIES: &str = r#"working_copies ++ "\t" ++ commit_id ++ "\n""#;
 
 pub struct JjRepo {
     path: PathBuf,
@@ -154,6 +164,50 @@ impl UndoRepo for JjRepo {
         self.read(&args)?;
         Ok(())
     }
+
+    fn files_changed_since(&self, op: &str) -> Result<Vec<String>> {
+        let then = self.read(&[
+            "--at-op",
+            op,
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            "commit_id",
+        ])?;
+        let out = self.read(&["diff", "--from", then.trim(), "--to", "@", "--name-only"])?;
+        Ok(out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect())
+    }
+
+    fn working_copies(&self, op: Option<&str>) -> Result<Vec<(String, String)>> {
+        let at: Vec<&str> = op.map(|op| vec!["--at-op", op]).unwrap_or_default();
+        let args = [
+            at.as_slice(),
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                "working_copies()",
+                "-T",
+                WORKING_COPIES,
+            ],
+        ]
+        .concat();
+        Ok(parse_working_copies(&self.read(&args)?))
+    }
+
+    fn own_working_copies(&self) -> Result<Vec<String>> {
+        let out = self.read(&["log", "--no-graph", "-r", "@", "-T", WORKING_COPIES])?;
+        Ok(parse_working_copies(&out)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
+    }
 }
 
 impl JjRepo {
@@ -211,6 +265,22 @@ pub fn fingerprint(bookmarks: &str, heads: &str) -> String {
     format!("bookmarks:\n{}\nheads:\n{}\n", b.join("\n"), h.join("\n"))
 }
 
+/// `(workspace, commit)` pairs from the working-copies template output, one per workspace.
+pub fn parse_working_copies(text: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for line in text.lines() {
+        let Some((names, commit)) = line.split_once('\t') else {
+            continue;
+        };
+        for name in names.split_whitespace() {
+            let name = name.strip_suffix('@').unwrap_or(name);
+            pairs.push((name.to_string(), commit.to_string()));
+        }
+    }
+    pairs.sort();
+    pairs
+}
+
 /// The operations before `op` in `log` (newest first, one `id<TAB>description`
 /// per line), or `None` when `op` is not there. `op` may be a prefix.
 pub fn parse_ops_since(log: &str, op: &str) -> Option<Vec<Operation>> {
@@ -255,6 +325,20 @@ mod tests {
     fn ops_since_is_none_when_the_operation_is_not_found() {
         assert_eq!(parse_ops_since("o3\tx\no2\ty\n", "o9"), None);
         assert_eq!(parse_ops_since("o3\tx\n", ""), None);
+    }
+
+    #[test]
+    fn working_copies_split_names_sharing_a_commit() {
+        let text = "verbose@\tc1\ndefault@ undo@\tc2\n\nnot a line\n";
+        assert_eq!(
+            parse_working_copies(text),
+            vec![
+                ("default".to_string(), "c2".to_string()),
+                ("undo".to_string(), "c2".to_string()),
+                ("verbose".to_string(), "c1".to_string()),
+            ]
+        );
+        assert!(parse_working_copies("").is_empty());
     }
 
     #[test]
