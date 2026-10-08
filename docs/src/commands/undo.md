@@ -93,7 +93,8 @@ $ jj describe profile -m "Add profile page and avatar"
 $ jjpr undo
 Undid 1 jj operation since `jjpr submit` from 14:02:
   0711f01f23f4 describe commit 613b9b054cb0
-To put it back: jjpr redo. To undo `jjpr submit` from 14:02: jjpr undo
+The submit is not undone yet. Run jjpr undo again to take it back.
+To put the jj work back instead: jjpr redo
 ```
 
 Edits on disk that you haven't committed leave the disk too, so they need

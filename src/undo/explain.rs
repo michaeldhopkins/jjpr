@@ -117,7 +117,7 @@ fn listed(names: &[String]) -> String {
 
 /// What `jjpr undo` says when it steps back over the jj work since `name`,
 /// or in a dry run would.
-pub fn stepping_back(since: &[Operation], name: &str, dry_run: bool) -> String {
+pub fn stepping_back(since: &[Operation], name: &str, command: &str, dry_run: bool) -> String {
     let n = since.len();
     let ops = if n == 1 {
         "1 jj operation".to_string()
@@ -136,9 +136,9 @@ pub fn stepping_back(since: &[Operation], name: &str, dry_run: bool) -> String {
         text.push_str(&format!("\n  and {} more", n - 5));
     }
     if !dry_run {
-        let them = if n == 1 { "it" } else { "them" };
         text.push_str(&format!(
-            "\nTo put {them} back: jjpr redo. To undo {name}: jjpr undo"
+            "\nThe {command} is not undone yet. Run jjpr undo again to take it back.\nTo put \
+             the jj work back instead: jjpr redo"
         ));
     }
     text
@@ -441,19 +441,23 @@ mod tests {
         };
         let one = [op("60449576ff81aa", "describe commit 83c5")];
         assert_eq!(
-            stepping_back(&one, "`jjpr submit` from 14:02", false),
+            stepping_back(&one, "`jjpr submit` from 14:02", "submit", false),
             "Undid 1 jj operation since `jjpr submit` from 14:02:\n  60449576ff81 describe \
-             commit 83c5\nTo put it back: jjpr redo. To undo `jjpr submit` from 14:02: jjpr undo"
+             commit 83c5\nThe submit is not undone yet. Run jjpr undo again to take it back.\nTo \
+             put the jj work back instead: jjpr redo"
         );
         let seven: Vec<Operation> = (0..7)
             .map(|i| op(&format!("{i}00000000000"), "x"))
             .collect();
-        let text = stepping_back(&seven, "it", true);
+        let text = stepping_back(&seven, "it", "submit", true);
         assert!(text.starts_with(
             "Would undo 7 jj operations since it, so that the next `jjpr undo` reaches it:"
         ));
         assert!(text.ends_with("\n  and 2 more"), "{text}");
-        assert!(stepping_back(&seven[..2], "it", false).contains("To put them back"));
+        assert!(
+            stepping_back(&seven[..2], "it", "watch", false)
+                .contains("The watch is not undone yet.")
+        );
     }
 
     #[test]

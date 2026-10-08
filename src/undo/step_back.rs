@@ -114,7 +114,11 @@ pub(super) fn try_it(
     }
     let name = report::name(entry, cx.now);
     if opts.dry_run {
-        writeln!(out, "{}", explain::stepping_back(&since, &name, true))?;
+        writeln!(
+            out,
+            "{}",
+            explain::stepping_back(&since, &name, &entry.command, true)
+        )?;
         writeln!(out, "{}", report::DRY_RUN_NOTE)?;
         return Ok(true);
     }
@@ -140,7 +144,11 @@ pub(super) fn try_it(
         };
         anyhow::bail!("{text}");
     }
-    writeln!(out, "{}", explain::stepping_back(&since, &name, false))?;
+    writeln!(
+        out,
+        "{}",
+        explain::stepping_back(&since, &name, &entry.command, false)
+    )?;
     Ok(true)
 }
 

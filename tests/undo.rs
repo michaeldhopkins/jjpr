@@ -1578,7 +1578,7 @@ fn undo_steps_back_over_jj_work_since_then_undoes_the_command() {
     );
     assert!(out.contains("describe commit"), "{out}");
     assert!(
-        out.contains("To put it back: jjpr redo. To undo `jjpr submit`"),
+        out.contains("The submit is not undone yet. Run jjpr undo again to take it back."),
         "{out}"
     );
     assert_eq!(description(&repo, "b"), "Add b");
