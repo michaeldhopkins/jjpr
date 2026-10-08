@@ -168,3 +168,16 @@ PR over cannot reopen it, so on GitHub undo refuses such an entry whole.
   only once it has written its entry (at its first push or forge write). A
   submit still planning, or started during an undo, is not stopped; the
   fingerprint and push checks of the next undo catch what it changed.
+
+## Small-model check (2026-10-08)
+
+Five scenarios, each a user's opening message, run blind in a scratch repo against a stand-in
+forge with only jjpr's help and docs. Haiku 5.5, as the mid reference, scored 60-100% (two
+runs each). Two small open models scored far lower: `qwen/qwen3-30b-a3b-instruct-2507` 0-58% and
+`mistralai/mistral-small-3.2-24b-instruct` 0-83%. Most of their runs never ran `jjpr` at all.
+They reached for `git reset`, `gh`, `jj undo` or an imagined `jj pr`. When they did run
+`jjpr undo`, they mostly finished. Two things changed because of the rounds:
+
+- `--force`'s help, which read as an unbounded risk.
+- An unknown command (`jjpr list`) now lists the real ones. One model had read clap's bare usage
+  line as jjpr being unable to help.
