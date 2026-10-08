@@ -35,27 +35,37 @@ abandon and a push, and one undo takes back all three.
 - **Dismissed approvals.** A force-push can dismiss approvals, and putting the
   old commit back does not restore them.
 
+## All or nothing
+
+Undo takes back the whole command or changes nothing. It checks the repo
+and the forge before it starts, and when anything would stop part of the
+undo it lists everything that would, and changes nothing. `--dry-run` shows
+the steps and what blocks them.
+
+If a step fails once it has started (the forge stops answering, say), undo
+puts back the steps it already took. If it cannot put them back either, it
+says the command is partly undone: run `jjpr undo` again to finish, or
+`jjpr redo` to put back what it did.
+
+Redo works the same way.
+
 ## Closing PRs needs `--force`
 
-A PR is public, so undo leaves the PRs a command opened, and their
-branches, until you ask:
+A PR is public, so undo closes the PRs a command opened, and deletes their
+branches, only when you ask:
 
 ```
 $ jjpr undo
-Undoing `jjpr submit` from 14:02:
-  Restore the local repo to operation 4f2a9c1e0b7d, from before the submit
-  Delete the stack comment on #44
-  Delete the stack comment on #43
-Not undone:
-  #44 and its branch 'profile' stay open: closing a PR needs --force
-  #43 and its branch 'auth' stay open: closing a PR needs --force
-To close them too: jjpr undo --force
-Undid `jjpr submit` from 14:02. To put it back: jjpr redo
+Error: jjpr can't undo all of `jjpr submit` from 14:02 without --force, so it changed nothing:
+  - #44, which the submit opened, would be closed
+  - #43, which the submit opened, would be closed
+Rerun with --force to undo all of it: jjpr undo --force
 ```
 
 ## When undo refuses
 
-Undo changes nothing when it would destroy work. It refuses when:
+Undo changes nothing when it would destroy work, or when it can't take back
+all of the command. It refuses when:
 
 - **The repo changed since the command.** A commit was amended, or the
   working copy has edits. Undoing would discard them. The message lists the jj
@@ -63,6 +73,8 @@ Undo changes nothing when it would destroy work. It refuses when:
   what you want, then run `jjpr submit`.
 - **Someone pushed to a branch since.** Undo never overwrites commits jjpr
   did not push, even with `--force`.
+- **GitHub would have to reopen a PR the command's push closed.** GitHub
+  won't reopen a PR whose branch moved while it was closed.
 - **Something jjpr wrote was changed on the forge.** A comment was edited, or
   a PR was retargeted. `--force` restores it anyway and names each item in a
   warning.

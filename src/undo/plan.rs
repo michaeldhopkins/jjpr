@@ -1,16 +1,30 @@
 //! What undoing or redoing one entry takes, decided from the entry and what
 //! the forge holds now. Pure: the command layer gathers [`Observed`] and runs
 //! the [`Plan`].
+//!
+//! A plan is all or nothing. Everything that would stop part of it is a
+//! [`Blocker`], and a real run starts only when no blocker is left (`--force`
+//! clears the ones it may). A dry run shows the steps and the blockers both.
 
 use std::collections::HashMap;
 
 use super::journal::{Action, Entry};
 use super::planner::Planner;
+use super::repo::Operation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Undo,
     Redo,
+}
+
+impl Direction {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Undo => Self::Redo,
+            Self::Redo => Self::Undo,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,7 +59,9 @@ pub struct Observed {
 }
 
 /// One change to make. `record` is the journal action it takes back or
-/// redoes, marked when the step succeeds.
+/// redoes, marked when the step succeeds. Each step carries what it replaces,
+/// so a run that fails partway can put back the steps it already took
+/// ([`super::rollback::inverse`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// Put the local repo back to this operation, remote-tracking refs aside.
@@ -78,11 +94,14 @@ pub enum Step {
         record: usize,
         pr: u64,
         id: u64,
+        /// What the comment says now.
+        body: String,
     },
     EditComment {
         record: usize,
         pr: u64,
         id: u64,
+        from: String,
         to: String,
     },
     PostComment {
@@ -96,6 +115,7 @@ pub enum Step {
     Body {
         record: usize,
         number: u64,
+        from: String,
         to: String,
     },
     Draft {
@@ -118,106 +138,112 @@ pub enum Step {
     },
 }
 
-/// Something the entry did that this run leaves as it is.
+/// Something done that no undo can take back, named so nobody expects it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kept {
-    /// A PR the entry opened, left open without `--force`.
-    OpenPr { number: u64 },
     /// Review requests already sent; withdrawing one does not unsend it.
     Notified { number: u64, who: Vec<String> },
-    /// The base to put back is a branch the forge no longer has.
-    BaseGone { number: u64, base: String },
 }
 
-/// A forge object someone changed after jjpr wrote it. `--force` writes over it.
+/// A forge object someone changed after jjpr wrote it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Changed {
-    Base {
-        number: u64,
-        now: String,
-    },
-    Comment {
-        pr: u64,
-    },
-    CommentGone {
-        pr: u64,
-    },
-    Body {
-        number: u64,
-    },
-    /// A PR the entry opened has comments or reviews from others.
-    Activity {
-        number: u64,
-        count: usize,
-    },
+    Base { number: u64, now: String },
+    Comment { pr: u64 },
+    CommentGone { pr: u64 },
+    Body { number: u64 },
 }
 
+/// Why a run cannot take back (or put back) the whole entry. The first group
+/// `--force` clears; the rest nothing does.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Refusal {
-    Merged {
-        number: u64,
-    },
-    /// The PR was merged after the entry ran.
-    MergedSince {
-        number: u64,
-    },
+pub enum Blocker {
+    /// Someone changed a forge object jjpr wrote; `--force` writes over it.
+    Changed(Changed),
+    /// Undo would close a PR the entry opened. A PR is public, so closing one
+    /// takes `--force`. `activity`: comments and reviews from others.
+    Close { number: u64, activity: usize },
+    /// The base to put back is a branch the forge no longer has; `--force`
+    /// leaves the PR on the base it has now.
+    BaseGone { number: u64, base: String },
+    /// The entry merged a PR.
+    Merged { number: u64 },
+    /// A PR the entry acted on was merged since.
+    MergedSince { number: u64 },
+    /// Someone pushed to a branch since jjpr did.
     BranchMoved {
         bookmark: String,
         expected: Option<String>,
         now: Option<String>,
     },
-    Changed(Vec<Changed>),
+    /// GitHub will not reopen a PR whose branch moved while it was closed,
+    /// which is what undoing the push that closed it would need.
+    WontReopen { number: u64 },
+    /// A write jjpr made without learning what it replaced.
+    Missed(String),
+    /// The local repo changed since: undoing would discard it.
+    RepoChanged { since: Vec<Operation> },
+    /// jj recorded work that was not jjpr's while the command ran.
+    Absorbed(Vec<String>),
+}
+
+impl Blocker {
+    /// Whether `--force` clears it.
+    pub fn forceable(&self) -> bool {
+        matches!(
+            self,
+            Self::Changed(_) | Self::Close { .. } | Self::BaseGone { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
     pub steps: Vec<Step>,
     pub kept: Vec<Kept>,
-    /// What `--force` is writing over.
-    pub overridden: Vec<Changed>,
-    /// Records this run leaves as they are (a PR kept open, and its branch).
-    pub left: Vec<usize>,
+    pub blockers: Vec<Blocker>,
 }
 
-pub fn plan(
-    entry: &Entry,
-    direction: Direction,
-    observed: &Observed,
-    force: bool,
-) -> Result<Plan, Refusal> {
-    if let Some(number) = entry.merged() {
-        return Err(Refusal::Merged { number });
+impl Plan {
+    /// Whether a real run may start: every blocker is one `force` clears.
+    pub fn runs(&self, force: bool) -> bool {
+        self.blockers.iter().all(|b| force && b.forceable())
     }
-    for number in prs_needing_open(entry) {
-        if observed
-            .prs
-            .get(&number)
-            .is_some_and(|p| p.status == Status::Merged)
-        {
-            return Err(Refusal::MergedSince { number });
-        }
-    }
+}
+
+/// The whole plan for `direction`, with every blocker found. Steps a blocker
+/// stands in for are left out, so a dry run lists what would go through.
+pub fn plan(entry: &Entry, direction: Direction, observed: &Observed) -> Plan {
     let mut p = Planner {
         entry,
         direction,
         observed,
-        force,
         plan: Plan::default(),
-        changed: Vec::new(),
         late: Vec::new(),
         comments: observed.comments.clone(),
     };
+    if let Some(number) = entry.merged() {
+        p.plan.blockers.push(Blocker::Merged { number });
+    }
+    for number in prs_needing_open(entry) {
+        let merged = observed
+            .prs
+            .get(&number)
+            .is_some_and(|p| p.status == Status::Merged);
+        if merged && !p.plan.blockers.contains(&Blocker::MergedSince { number }) {
+            p.plan.blockers.push(Blocker::MergedSince { number });
+        }
+    }
+    if direction == Direction::Undo {
+        for what in &entry.missed {
+            p.plan.blockers.push(Blocker::Missed(what.clone()));
+        }
+    }
     p.local();
-    p.pushes()?;
+    p.pushes();
     p.forge_writes();
     p.plan.steps.append(&mut p.late);
-    if !p.changed.is_empty() {
-        if !force {
-            return Err(Refusal::Changed(p.changed));
-        }
-        p.plan.overridden = p.changed;
-    }
-    Ok(p.plan)
+    p.plan
 }
 
 /// PRs whose undo only makes sense while they are unmerged: their base,
@@ -334,6 +360,10 @@ mod tests {
             .collect()
     }
 
+    fn local() -> Step {
+        Step::Local { op: "start".into() }
+    }
+
     #[test]
     fn undo_restores_the_local_repo_first_and_pushes_the_old_head() {
         let e = entry(vec![push("a", Some("old"), "new", Some(1))]);
@@ -342,11 +372,11 @@ mod tests {
             prs: HashMap::from([(1, open_pr("main"))]),
             ..Observed::default()
         };
-        let plan = plan(&e, Direction::Undo, &observed, false).unwrap();
+        let plan = plan(&e, Direction::Undo, &observed);
         assert_eq!(
             plan.steps,
             vec![
-                Step::Local { op: "start".into() },
+                local(),
                 Step::Push {
                     record: 0,
                     bookmark: "a".into(),
@@ -356,7 +386,7 @@ mod tests {
                 },
             ]
         );
-        assert!(plan.kept.is_empty() && plan.left.is_empty());
+        assert!(plan.blockers.is_empty() && plan.runs(false));
     }
 
     #[test]
@@ -366,7 +396,7 @@ mod tests {
             branches: branches(&[("a", Some("old"))]),
             ..Observed::default()
         };
-        let plan = plan(&e, Direction::Redo, &observed, false).unwrap();
+        let plan = plan(&e, Direction::Redo, &observed);
         assert_eq!(plan.steps[0], Step::Local { op: "end".into() });
         assert!(matches!(
             &plan.steps[1],
@@ -375,22 +405,23 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_that_moved_since_refuses_even_with_force() {
+    fn a_branch_that_moved_since_blocks_even_with_force() {
         let e = entry(vec![push("a", Some("old"), "new", None)]);
         let observed = Observed {
             branches: branches(&[("a", Some("theirs"))]),
             ..Observed::default()
         };
-        for force in [false, true] {
-            assert_eq!(
-                plan(&e, Direction::Undo, &observed, force),
-                Err(Refusal::BranchMoved {
-                    bookmark: "a".into(),
-                    expected: Some("new".into()),
-                    now: Some("theirs".into()),
-                })
-            );
-        }
+        let plan = plan(&e, Direction::Undo, &observed);
+        assert_eq!(
+            plan.blockers,
+            vec![Blocker::BranchMoved {
+                bookmark: "a".into(),
+                expected: Some("new".into()),
+                now: Some("theirs".into()),
+            }]
+        );
+        assert!(!plan.runs(false) && !plan.runs(true));
+        assert_eq!(plan.steps, vec![local()], "the push it blocks is left out");
     }
 
     #[test]
@@ -400,38 +431,43 @@ mod tests {
             branches: branches(&[("a", Some("old"))]),
             ..Observed::default()
         };
-        let plan = plan(&e, Direction::Undo, &observed, false).unwrap();
-        assert_eq!(plan.steps, vec![Step::Local { op: "start".into() }]);
+        let plan = plan(&e, Direction::Undo, &observed);
+        assert_eq!(plan.steps, vec![local()]);
+        assert!(plan.runs(false));
     }
 
     #[test]
     fn a_merge_is_never_undone() {
         let e = entry(vec![Action::Merge { number: 4 }]);
-        for force in [false, true] {
-            assert_eq!(
-                plan(&e, Direction::Undo, &Observed::default(), force),
-                Err(Refusal::Merged { number: 4 })
-            );
-        }
+        let plan = plan(&e, Direction::Undo, &Observed::default());
+        assert_eq!(plan.blockers, vec![Blocker::Merged { number: 4 }]);
+        assert!(!plan.runs(true));
     }
 
     #[test]
-    fn a_pr_merged_since_refuses() {
-        let e = entry(vec![Action::Ready { number: 3 }]);
+    fn a_pr_merged_since_blocks_once() {
+        let e = entry(vec![
+            Action::Ready { number: 3 },
+            Action::Base {
+                number: 3,
+                before: "a".into(),
+                after: "main".into(),
+            },
+        ]);
         let observed = Observed {
             prs: HashMap::from([(
                 3,
                 SeenPr {
                     status: Status::Merged,
+                    base: "main".into(),
                     ..SeenPr::default()
                 },
             )]),
             ..Observed::default()
         };
-        assert_eq!(
-            plan(&e, Direction::Undo, &observed, true),
-            Err(Refusal::MergedSince { number: 3 })
-        );
+        let plan = plan(&e, Direction::Undo, &observed);
+        assert_eq!(plan.blockers, vec![Blocker::MergedSince { number: 3 }]);
+        assert!(!plan.runs(true));
     }
 
     fn created_pr_entry() -> Entry {
@@ -454,34 +490,16 @@ mod tests {
     }
 
     #[test]
-    fn without_force_a_created_pr_and_its_branch_are_left_alone() {
+    fn closing_a_created_pr_needs_force_and_comes_before_deleting_its_branch() {
         let plan = plan(
             &created_pr_entry(),
             Direction::Undo,
             &created_pr_observed(0),
-            false,
-        )
-        .unwrap();
-        assert_eq!(plan.steps, vec![Step::Local { op: "start".into() }]);
-        assert_eq!(plan.kept, vec![Kept::OpenPr { number: 7 }]);
-        let mut left = plan.left.clone();
-        left.sort_unstable();
-        assert_eq!(left, vec![0, 1]);
-    }
-
-    #[test]
-    fn with_force_the_created_pr_closes_before_its_branch_is_deleted() {
-        let plan = plan(
-            &created_pr_entry(),
-            Direction::Undo,
-            &created_pr_observed(0),
-            true,
-        )
-        .unwrap();
+        );
         assert_eq!(
             plan.steps,
             vec![
-                Step::Local { op: "start".into() },
+                local(),
                 Step::Close {
                     record: 1,
                     number: 7
@@ -495,21 +513,43 @@ mod tests {
                 },
             ]
         );
-        assert!(plan.overridden.is_empty() && plan.left.is_empty());
+        assert_eq!(
+            plan.blockers,
+            vec![Blocker::Close {
+                number: 7,
+                activity: 0
+            }]
+        );
+        assert!(!plan.runs(false), "no partial undo that leaves the PR open");
+        assert!(plan.runs(true));
     }
 
     #[test]
-    fn closing_a_pr_others_have_commented_on_is_named_when_forced() {
-        let e = created_pr_entry();
-        let observed = created_pr_observed(2);
-        let plan = plan(&e, Direction::Undo, &observed, true).unwrap();
+    fn closing_a_pr_others_have_commented_on_names_the_activity() {
+        let plan = plan(
+            &created_pr_entry(),
+            Direction::Undo,
+            &created_pr_observed(2),
+        );
         assert_eq!(
-            plan.overridden,
-            vec![Changed::Activity {
+            plan.blockers,
+            vec![Blocker::Close {
                 number: 7,
-                count: 2
+                activity: 2
             }]
         );
+    }
+
+    #[test]
+    fn a_created_pr_someone_closed_already_needs_nothing() {
+        let mut observed = created_pr_observed(0);
+        observed.prs.get_mut(&7).unwrap().status = Status::Closed;
+        let plan = plan(&created_pr_entry(), Direction::Undo, &observed);
+        assert!(plan.blockers.is_empty());
+        assert!(matches!(
+            plan.steps.last(),
+            Some(Step::Push { to: None, .. })
+        ));
     }
 
     #[test]
@@ -526,7 +566,7 @@ mod tests {
             )]),
             ..Observed::default()
         };
-        let plan = plan(&e, Direction::Redo, &observed, false).unwrap();
+        let plan = plan(&e, Direction::Redo, &observed);
         assert!(matches!(&plan.steps[1], Step::Push { to: Some(t), .. } if t == "c1"));
         assert_eq!(
             plan.steps[2],
@@ -535,32 +575,61 @@ mod tests {
                 number: 7
             }
         );
+        assert!(plan.blockers.is_empty());
     }
 
-    #[test]
-    fn undo_reopens_a_pr_its_push_closed() {
+    fn closed_by_push(forge: ForgeKind) -> Entry {
         let mut e = entry(vec![push("a", Some("old"), "new", Some(5))]);
         e.closed_by_push = vec![5];
-        let observed = Observed {
+        e.forge = forge;
+        e
+    }
+
+    fn closed_observed() -> Observed {
+        Observed {
             branches: branches(&[("a", Some("new"))]),
             prs: HashMap::from([(5, SeenPr::default())]),
             ..Observed::default()
-        };
-        let p = plan(&e, Direction::Undo, &observed, false).unwrap();
-        assert_eq!(
-            p.steps.last(),
-            Some(&Step::Reopen {
-                record: 0,
-                number: 5
-            })
+        }
+    }
+
+    #[test]
+    fn undo_reopens_a_pr_its_push_closed_where_the_forge_allows() {
+        for forge in [ForgeKind::GitLab, ForgeKind::Forgejo] {
+            let p = plan(&closed_by_push(forge), Direction::Undo, &closed_observed());
+            assert_eq!(
+                p.steps.last(),
+                Some(&Step::Reopen {
+                    record: 0,
+                    number: 5
+                })
+            );
+            assert!(p.blockers.is_empty());
+        }
+    }
+
+    #[test]
+    fn github_will_not_reopen_so_undo_cannot_take_it_back() {
+        let p = plan(
+            &closed_by_push(ForgeKind::GitHub),
+            Direction::Undo,
+            &closed_observed(),
         );
+        assert_eq!(p.blockers, vec![Blocker::WontReopen { number: 5 }]);
+        assert!(!p.runs(true));
+    }
+
+    #[test]
+    fn a_pr_someone_else_closed_stays_closed() {
+        let mut e = closed_by_push(ForgeKind::GitLab);
         e.closed_by_push.clear();
-        let p = plan(&e, Direction::Undo, &observed, false).unwrap();
+        let p = plan(&e, Direction::Undo, &closed_observed());
         assert!(
             !p.steps.iter().any(|s| matches!(s, Step::Reopen { .. })),
-            "someone else closed it: {:?}",
+            "{:?}",
             p.steps
         );
+        assert!(p.blockers.is_empty());
     }
 
     fn base_entry() -> Entry {
@@ -580,7 +649,7 @@ mod tests {
 
     #[test]
     fn a_base_is_put_back() {
-        let plan = plan(&base_entry(), Direction::Undo, &with_base("main"), false).unwrap();
+        let plan = plan(&base_entry(), Direction::Undo, &with_base("main"));
         assert_eq!(
             plan.steps[1],
             Step::Base {
@@ -594,22 +663,41 @@ mod tests {
 
     #[test]
     fn a_base_someone_changed_needs_force_and_is_named() {
+        let plan = plan(&base_entry(), Direction::Undo, &with_base("dev"));
         assert_eq!(
-            plan(&base_entry(), Direction::Undo, &with_base("dev"), false),
-            Err(Refusal::Changed(vec![Changed::Base {
+            plan.blockers,
+            vec![Blocker::Changed(Changed::Base {
                 number: 2,
                 now: "dev".into()
-            }]))
+            })]
         );
-        let plan = plan(&base_entry(), Direction::Undo, &with_base("dev"), true).unwrap();
-        assert_eq!(plan.overridden.len(), 1);
-        assert!(matches!(plan.steps[1], Step::Base { .. }));
+        assert!(!plan.runs(false) && plan.runs(true));
+        assert!(
+            matches!(&plan.steps[1], Step::Base { from, .. } if from == "dev"),
+            "the step carries what is there now, so a failed run can put it back"
+        );
     }
 
     #[test]
     fn a_base_already_back_is_skipped() {
-        let plan = plan(&base_entry(), Direction::Undo, &with_base("a"), false).unwrap();
+        let plan = plan(&base_entry(), Direction::Undo, &with_base("a"));
         assert_eq!(plan.steps.len(), 1);
+    }
+
+    #[test]
+    fn a_base_the_forge_no_longer_has_needs_force() {
+        let mut observed = with_base("main");
+        observed.branches.insert("a".into(), None);
+        let p = plan(&base_entry(), Direction::Undo, &observed);
+        assert_eq!(p.steps.len(), 1, "only the local restore");
+        assert_eq!(
+            p.blockers,
+            vec![Blocker::BaseGone {
+                number: 2,
+                base: "a".into()
+            }]
+        );
+        assert!(!p.runs(false) && p.runs(true));
     }
 
     fn comments(pr: u64, pairs: &[(u64, &str)]) -> HashMap<u64, HashMap<u64, String>> {
@@ -640,7 +728,7 @@ mod tests {
             comments: comments(1, &[(10, "new"), (11, "mid")]),
             ..Observed::default()
         };
-        let plan = plan(&e, Direction::Undo, &observed, false).unwrap();
+        let plan = plan(&e, Direction::Undo, &observed);
         assert_eq!(
             plan.steps[1..],
             [
@@ -654,19 +742,22 @@ mod tests {
                     record: 1,
                     pr: 1,
                     id: 11,
+                    from: "mid".into(),
                     to: "old".into()
                 },
                 Step::DeleteComment {
                     record: 0,
                     pr: 1,
-                    id: 10
+                    id: 10,
+                    body: "new".into()
                 },
             ]
         );
+        assert!(plan.blockers.is_empty());
     }
 
     #[test]
-    fn an_edited_or_deleted_comment_needs_force() {
+    fn an_edited_comment_needs_force_and_a_deleted_one_is_posted_again_with_it() {
         let e = entry(vec![Action::CommentUpdate {
             pr: 1,
             id: 11,
@@ -677,13 +768,24 @@ mod tests {
             comments: comments(1, &[(11, "someone's")]),
             ..Observed::default()
         };
+        let p = plan(&e, Direction::Undo, &edited);
         assert_eq!(
-            plan(&e, Direction::Undo, &edited, false),
-            Err(Refusal::Changed(vec![Changed::Comment { pr: 1 }]))
+            p.blockers,
+            vec![Blocker::Changed(Changed::Comment { pr: 1 })]
+        );
+        let p = plan(&e, Direction::Undo, &Observed::default());
+        assert_eq!(
+            p.blockers,
+            vec![Blocker::Changed(Changed::CommentGone { pr: 1 })]
         );
         assert_eq!(
-            plan(&e, Direction::Undo, &Observed::default(), false),
-            Err(Refusal::Changed(vec![Changed::CommentGone { pr: 1 }]))
+            p.steps[1],
+            Step::PostComment {
+                record: 0,
+                pr: 1,
+                id: 11,
+                body: "old".into()
+            }
         );
     }
 
@@ -705,18 +807,64 @@ mod tests {
             )]),
             ..Observed::default()
         };
-        let p = plan(&e, Direction::Undo, &seen("b1"), false).unwrap();
+        let p = plan(&e, Direction::Undo, &seen("b1"));
         assert_eq!(
             p.steps[1],
             Step::Body {
                 record: 0,
                 number: 3,
+                from: "b1".into(),
                 to: "b0".into()
             }
         );
+        let p = plan(&e, Direction::Undo, &seen("edited"));
         assert_eq!(
-            plan(&e, Direction::Undo, &seen("edited"), false),
-            Err(Refusal::Changed(vec![Changed::Body { number: 3 }]))
+            p.blockers,
+            vec![Blocker::Changed(Changed::Body { number: 3 })]
+        );
+    }
+
+    #[test]
+    fn every_blocker_is_found_not_only_the_first() {
+        let e = entry(vec![
+            push("a", Some("old"), "new", None),
+            Action::Body {
+                number: 3,
+                before: "b0".into(),
+                after: "b1".into(),
+            },
+        ]);
+        let mut observed = Observed {
+            branches: branches(&[("a", Some("theirs"))]),
+            ..Observed::default()
+        };
+        observed.prs.insert(
+            3,
+            SeenPr {
+                body: "edited".into(),
+                status: Status::Open,
+                ..SeenPr::default()
+            },
+        );
+        let p = plan(&e, Direction::Undo, &observed);
+        assert_eq!(p.blockers.len(), 2, "{:?}", p.blockers);
+        assert!(p.steps.iter().any(|s| matches!(s, Step::Body { .. })));
+    }
+
+    #[test]
+    fn a_write_jjpr_could_not_record_blocks_undo_but_not_redo() {
+        let mut e = entry(vec![]);
+        e.missed = vec!["the description of #3".into()];
+        let p = plan(&e, Direction::Undo, &Observed::default());
+        assert_eq!(
+            p.blockers,
+            vec![Blocker::Missed("the description of #3".into())]
+        );
+        assert!(!p.runs(true));
+        assert!(
+            plan(&undone(e), Direction::Redo, &Observed::default())
+                .blockers
+                .is_empty()
         );
     }
 
@@ -734,7 +882,7 @@ mod tests {
             )]),
             ..Observed::default()
         };
-        let p = plan(&e, Direction::Undo, &seen(false), false).unwrap();
+        let p = plan(&e, Direction::Undo, &seen(false));
         assert_eq!(
             p.steps[1],
             Step::Draft {
@@ -742,14 +890,8 @@ mod tests {
                 number: 3
             }
         );
-        assert_eq!(
-            plan(&e, Direction::Undo, &seen(true), false)
-                .unwrap()
-                .steps
-                .len(),
-            1
-        );
-        let p = plan(&undone(e), Direction::Redo, &seen(true), false).unwrap();
+        assert_eq!(plan(&e, Direction::Undo, &seen(true)).steps.len(), 1);
+        let p = plan(&undone(e), Direction::Redo, &seen(true));
         assert_eq!(
             p.steps[1],
             Step::Ready {
@@ -776,7 +918,7 @@ mod tests {
             )]),
             ..Observed::default()
         };
-        let p = plan(&e, Direction::Undo, &observed, false).unwrap();
+        let p = plan(&e, Direction::Undo, &observed);
         assert_eq!(
             p.steps[1],
             Step::Unrequest {
@@ -792,7 +934,7 @@ mod tests {
                 who: vec!["alice".into()]
             }]
         );
-        let p = plan(&undone(e), Direction::Redo, &observed, false).unwrap();
+        let p = plan(&undone(e), Direction::Redo, &observed);
         assert_eq!(
             p.steps[1],
             Step::Request {
@@ -808,7 +950,7 @@ mod tests {
         let mut e = created_pr_entry();
         e.local_undone = true;
         e.state = State::PartlyUndone;
-        let plan = plan(&e, Direction::Undo, &created_pr_observed(0), true).unwrap();
+        let plan = plan(&e, Direction::Undo, &created_pr_observed(0));
         assert!(matches!(plan.steps[0], Step::Close { .. }));
     }
 
@@ -824,21 +966,6 @@ mod tests {
             },
         ]);
         assert_eq!(touched_prs(&e), vec![1, 2]);
-    }
-
-    #[test]
-    fn a_base_the_forge_no_longer_has_is_kept_and_named() {
-        let mut observed = with_base("main");
-        observed.branches.insert("a".into(), None);
-        let p = plan(&base_entry(), Direction::Undo, &observed, false).unwrap();
-        assert_eq!(p.steps.len(), 1, "only the local restore");
-        assert_eq!(
-            p.kept,
-            vec![Kept::BaseGone {
-                number: 2,
-                base: "a".into()
-            }]
-        );
     }
 
     #[test]
@@ -860,7 +987,27 @@ mod tests {
             comments: comments(1, &[(11, "mid")]),
             ..Observed::default()
         };
-        let p = plan(&e, Direction::Undo, &observed, false).unwrap();
+        let p = plan(&e, Direction::Undo, &observed);
         assert!(matches!(p.steps[1], Step::EditComment { .. }));
+        assert!(p.blockers.is_empty());
+    }
+
+    #[test]
+    fn only_the_forceable_blockers_are_cleared_by_force() {
+        let close = Blocker::Close {
+            number: 1,
+            activity: 0,
+        };
+        let moved = Blocker::WontReopen { number: 1 };
+        let plan = |blockers: Vec<Blocker>| Plan {
+            blockers,
+            ..Plan::default()
+        };
+        assert!(plan(vec![]).runs(false));
+        assert!(!plan(vec![close.clone()]).runs(false));
+        assert!(plan(vec![close.clone()]).runs(true));
+        assert!(!plan(vec![close, moved]).runs(true));
+        assert_eq!(Direction::Undo.opposite(), Direction::Redo);
+        assert_eq!(Direction::Redo.opposite(), Direction::Undo);
     }
 }

@@ -2,16 +2,16 @@
 
 use std::collections::HashMap;
 
+use crate::forge::ForgeKind;
+
 use super::journal::{Action, Entry};
-use super::plan::{Changed, Direction, Kept, Observed, Plan, Refusal, SeenPr, Status, Step};
+use super::plan::{Blocker, Changed, Direction, Kept, Observed, Plan, SeenPr, Status, Step};
 
 pub(super) struct Planner<'a> {
     pub(super) entry: &'a Entry,
     pub(super) direction: Direction,
     pub(super) observed: &'a Observed,
-    pub(super) force: bool,
     pub(super) plan: Plan,
-    pub(super) changed: Vec<Changed>,
     /// Steps that must come last: closing the PRs the entry opened, then
     /// deleting their branches (deleting first would close them as deleted).
     pub(super) late: Vec<Step>,
@@ -23,6 +23,10 @@ pub(super) struct Planner<'a> {
 impl<'a> Planner<'a> {
     fn undo(&self) -> bool {
         self.direction == Direction::Undo
+    }
+
+    fn block(&mut self, b: Blocker) {
+        self.plan.blockers.push(b);
     }
 
     /// The records this run acts on, in the order it takes them: newest first
@@ -61,7 +65,7 @@ impl<'a> Planner<'a> {
         })
     }
 
-    pub(super) fn pushes(&mut self) -> Result<(), Refusal> {
+    pub(super) fn pushes(&mut self) {
         for (record, action) in self.records() {
             let Action::Push {
                 bookmark,
@@ -77,23 +81,17 @@ impl<'a> Planner<'a> {
                 Direction::Undo => (Some(after.clone()), before.clone()),
                 Direction::Redo => (before.clone(), Some(after.clone())),
             };
-            // Without --force, the branch of a PR the entry opened stays, and
-            // so does the PR (see `forge_writes`).
-            let kept_open = self.undo() && to.is_none() && self.created_on(bookmark).is_some();
-            if kept_open && !self.force {
-                self.plan.left.push(record);
-                continue;
-            }
             let now = self.observed.branches.get(bookmark).cloned().flatten();
             if now == to {
                 continue;
             }
             if now != from {
-                return Err(Refusal::BranchMoved {
+                self.block(Blocker::BranchMoved {
                     bookmark: bookmark.clone(),
                     expected: from,
                     now,
                 });
+                continue;
             }
             let step = Step::Push {
                 record,
@@ -102,7 +100,8 @@ impl<'a> Planner<'a> {
                 from,
                 to: to.clone(),
             };
-            if kept_open {
+            // The branch of a PR the entry opened goes after the PR is closed.
+            if self.undo() && to.is_none() && self.created_on(bookmark).is_some() {
                 self.late.push(step);
             } else {
                 self.plan.steps.push(step);
@@ -118,10 +117,13 @@ impl<'a> Planner<'a> {
                     .get(n)
                     .is_some_and(|p| p.status == Status::Closed)
             {
-                self.plan.steps.push(Step::Reopen { record, number: *n });
+                if self.entry.forge == ForgeKind::GitHub {
+                    self.block(Blocker::WontReopen { number: *n });
+                } else {
+                    self.plan.steps.push(Step::Reopen { record, number: *n });
+                }
             }
         }
-        Ok(())
     }
 
     fn seen(&self, number: u64) -> Option<&SeenPr> {
@@ -141,36 +143,7 @@ impl<'a> Planner<'a> {
                     number,
                     before,
                     after,
-                } => {
-                    let (from, to) = self.sides(before, after);
-                    let Some(now) = self.seen(*number).map(|p| p.base.clone()) else {
-                        continue;
-                    };
-                    if now == to {
-                        continue;
-                    }
-                    // A PR cannot target a branch the forge no longer has: the
-                    // merged base of a restack, usually.
-                    if self.observed.branches.get(&to) == Some(&None) {
-                        self.plan.kept.push(Kept::BaseGone {
-                            number: *number,
-                            base: to,
-                        });
-                        continue;
-                    }
-                    if now != from {
-                        self.changed.push(Changed::Base {
-                            number: *number,
-                            now,
-                        });
-                    }
-                    self.plan.steps.push(Step::Base {
-                        record,
-                        number: *number,
-                        from,
-                        to,
-                    });
-                }
+                } => self.base(record, *number, before, after),
                 Action::Body {
                     number,
                     before,
@@ -184,11 +157,12 @@ impl<'a> Planner<'a> {
                         continue;
                     }
                     if !same(&now, &from) {
-                        self.changed.push(Changed::Body { number: *number });
+                        self.block(Blocker::Changed(Changed::Body { number: *number }));
                     }
                     self.plan.steps.push(Step::Body {
                         record,
                         number: *number,
+                        from: now,
                         to,
                     });
                 }
@@ -197,25 +171,7 @@ impl<'a> Planner<'a> {
                     id,
                     before,
                     after,
-                } => {
-                    let (from, to) = self.sides(before, after);
-                    match self.comment(*pr, *id).cloned() {
-                        None => self.changed.push(Changed::CommentGone { pr: *pr }),
-                        Some(now) if same(&now, &to) => {}
-                        Some(now) => {
-                            if !same(&now, &from) {
-                                self.changed.push(Changed::Comment { pr: *pr });
-                            }
-                            self.set_comment(*pr, *id, Some(to.clone()));
-                            self.plan.steps.push(Step::EditComment {
-                                record,
-                                pr: *pr,
-                                id: *id,
-                                to,
-                            });
-                        }
-                    }
-                }
+                } => self.comment_update(record, *pr, *id, before, after),
                 Action::CommentCreate { pr, id, body } => {
                     self.comment_exists(record, *pr, *id, body, self.undo());
                 }
@@ -243,6 +199,65 @@ impl<'a> Planner<'a> {
         }
     }
 
+    fn base(&mut self, record: usize, number: u64, before: &str, after: &str) {
+        let (from, to) = self.sides(before, after);
+        let Some(now) = self.seen(number).map(|p| p.base.clone()) else {
+            return;
+        };
+        if now == to {
+            return;
+        }
+        // A PR cannot target a branch the forge no longer has: the merged
+        // base of a restack, usually.
+        if self.observed.branches.get(&to) == Some(&None) {
+            self.block(Blocker::BaseGone { number, base: to });
+            return;
+        }
+        if now != from {
+            self.block(Blocker::Changed(Changed::Base {
+                number,
+                now: now.clone(),
+            }));
+        }
+        self.plan.steps.push(Step::Base {
+            record,
+            number,
+            from: now,
+            to,
+        });
+    }
+
+    fn comment_update(&mut self, record: usize, pr: u64, id: u64, before: &str, after: &str) {
+        let (from, to) = self.sides(before, after);
+        match self.comment(pr, id).cloned() {
+            // Someone deleted it; `--force` posts it again.
+            None => {
+                self.block(Blocker::Changed(Changed::CommentGone { pr }));
+                self.set_comment(pr, id, Some(to.clone()));
+                self.plan.steps.push(Step::PostComment {
+                    record,
+                    pr,
+                    id,
+                    body: to,
+                });
+            }
+            Some(now) if same(&now, &to) => {}
+            Some(now) => {
+                if !same(&now, &from) {
+                    self.block(Blocker::Changed(Changed::Comment { pr }));
+                }
+                self.set_comment(pr, id, Some(to.clone()));
+                self.plan.steps.push(Step::EditComment {
+                    record,
+                    pr,
+                    id,
+                    from: now,
+                    to,
+                });
+            }
+        }
+    }
+
     /// `(from, to)` for a value jjpr changed from `before` to `after`.
     fn sides(&self, before: &str, after: &str) -> (String, String) {
         match self.direction {
@@ -256,15 +271,17 @@ impl<'a> Planner<'a> {
     fn comment_exists(&mut self, record: usize, pr: u64, id: u64, body: &str, remove: bool) {
         let now = self.comment(pr, id).cloned();
         if remove {
-            match now {
-                None => {}
-                Some(now) => {
-                    if !same(&now, body) {
-                        self.changed.push(Changed::Comment { pr });
-                    }
-                    self.set_comment(pr, id, None);
-                    self.plan.steps.push(Step::DeleteComment { record, pr, id });
+            if let Some(now) = now {
+                if !same(&now, body) {
+                    self.block(Blocker::Changed(Changed::Comment { pr }));
                 }
+                self.set_comment(pr, id, None);
+                self.plan.steps.push(Step::DeleteComment {
+                    record,
+                    pr,
+                    id,
+                    body: now,
+                });
             }
         } else if now.is_none() {
             self.set_comment(pr, id, Some(body.to_string()));
@@ -288,15 +305,9 @@ impl<'a> Planner<'a> {
     fn created(&mut self, record: usize, number: u64) {
         let open = self.seen(number).is_some_and(|p| p.status == Status::Open);
         match self.direction {
-            Direction::Undo if open && !self.force => {
-                self.plan.kept.push(Kept::OpenPr { number });
-                self.plan.left.push(record);
-            }
             Direction::Undo if open => {
-                let count = self.observed.activity.get(&number).copied().unwrap_or(0);
-                if count > 0 {
-                    self.changed.push(Changed::Activity { number, count });
-                }
+                let activity = self.observed.activity.get(&number).copied().unwrap_or(0);
+                self.block(Blocker::Close { number, activity });
                 // Before any branch deletion in `late`.
                 self.late.insert(0, Step::Close { record, number });
             }
@@ -340,7 +351,7 @@ impl<'a> Planner<'a> {
 
 /// Text the forge may hand back changed in form only: GitLab drops a
 /// comment's final newline, and line endings can come back as CRLF.
-fn same(a: &str, b: &str) -> bool {
+pub(super) fn same(a: &str, b: &str) -> bool {
     let norm = |s: &str| s.replace("\r\n", "\n").trim_end().to_string();
     norm(a) == norm(b)
 }

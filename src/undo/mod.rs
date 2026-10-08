@@ -2,11 +2,16 @@
 //! local repo and what it changed on the forge, or put it back again.
 //!
 //! `submit`, `merge` and `watch` record as they go ([`Recorder`], fed by
-//! [`RecordingJj`] and [`RecordingForge`]). Undo checks that nobody has acted
-//! since, plans the reverse of each recorded change ([`plan`]), and carries it
-//! out ([`execute`]). The design and its measurements are in `notes/undo.md`.
+//! [`RecordingJj`] and [`RecordingForge`]). Undo checks everything first: that
+//! nobody has acted since, and that every recorded change can be reversed
+//! ([`plan`], which names each [`plan::Blocker`]). It changes nothing unless
+//! it can take back the whole command. Then it carries the plan out
+//! ([`execute`]), and if a step fails it puts back the steps it took
+//! ([`rollback`]). The design and its measurements are in `notes/undo.md`.
 
 pub mod execute;
+pub mod explain;
+pub mod failed;
 pub mod journal;
 mod observe;
 pub mod plan;
@@ -16,6 +21,9 @@ pub mod recording_forge;
 pub mod recording_jj;
 pub mod repo;
 pub mod report;
+pub mod rollback;
+#[cfg(test)]
+mod world;
 
 use std::io::Write;
 use std::path::Path;
@@ -32,7 +40,7 @@ pub use recording_jj::RecordingJj;
 pub use repo::{JjRepo, UndoRepo};
 
 use journal::{Entry, State};
-use plan::Kept;
+use plan::{Blocker, Observed};
 use report::Blocked;
 
 #[derive(Debug, Clone, Copy)]
@@ -76,7 +84,7 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
         );
     }
     let target = match opts.direction {
-        Direction::Undo => journal::undo_target(&loaded.entries, opts.force),
+        Direction::Undo => journal::undo_target(&loaded.entries),
         Direction::Redo => journal::redo_target(&loaded.entries),
     };
     let Some(target) = target else {
@@ -84,8 +92,6 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
         return Ok(());
     };
     let mut entry = target.clone();
-    let blocked =
-        |b: Blocked| anyhow::anyhow!("{}", report::blocked(&b, &entry, opts.direction, cx.now));
     // A submit or watch recording right now would race the restore and the
     // pushes. The entry it is writing says so.
     let me = std::process::id();
@@ -96,22 +102,15 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
         .filter_map(|e| journal::pid_of(&e.id))
         .find(|&pid| pid != me && journal::alive(pid))
     {
-        return Err(blocked(Blocked::Busy(pid)));
-    }
-    if entry.state == State::KeptOpen
-        && let Some(older) = loaded
-            .entries
-            .iter()
-            .find(|e| e.id < entry.id && e.state.undone())
-    {
-        return Err(blocked(Blocked::RedoFirst(report::name(older, cx.now))));
+        let text = report::blocked(&Blocked::Busy(pid), &entry, opts.direction, cx.now);
+        anyhow::bail!("{text}");
     }
     if entry.state == State::Running && !journal::pid_of(&entry.id).is_some_and(journal::alive) {
         finish_abandoned(cx, &mut entry, opts)?;
         writeln!(out, "{}", report::abandoned(&entry, cx.now))?;
     }
     let say = |b: Blocked| report::blocked(&b, &entry, opts.direction, cx.now);
-    if let Some(b) = check_local(cx, &entry, opts)? {
+    if let Some(b) = check_ready(cx, &entry, opts)? {
         // jj dropped the operation, so this entry can never be acted on; an
         // undo cannot reach anything older either.
         if let (Blocked::OpGone(_), false) = (&b, opts.dry_run) {
@@ -122,85 +121,133 @@ pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
         }
         anyhow::bail!("{}", say(b));
     }
+    let refuse = |blockers: &[Blocker]| {
+        explain::refused(blockers, &entry, opts.direction, opts.force, cx.now)
+    };
     if let Some(number) = entry.merged() {
-        let r = plan::Refusal::Merged { number };
-        anyhow::bail!("{}", report::refusal(&r, &entry, opts.direction, cx.now));
+        let text = refuse(&[Blocker::Merged { number }]).unwrap_or_default();
+        anyhow::bail!("{text}");
     }
-    let forge = (cx.forge_for)(&entry)?;
-    let observed = observe::observe(forge.as_ref(), &entry, opts)?;
-    let plan = plan::plan(&entry, opts.direction, &observed, opts.force)
-        .map_err(|r| anyhow::anyhow!("{}", report::refusal(&r, &entry, opts.direction, cx.now)))?;
-    print_plan(out, &entry, &plan, opts, cx.now)?;
-    if opts.dry_run || (plan.steps.is_empty() && !plan.left.is_empty()) {
-        return Ok(());
+    let mut blockers = check_local(cx, &entry, opts)?;
+    let observed = match (cx.forge_for)(&entry)
+        .and_then(|forge| observe::observe(forge.as_ref(), &entry, opts).map(|o| (forge, o)))
+    {
+        Ok(found) => found,
+        // What the repo alone shows is reason enough; say that, not the forge's trouble.
+        Err(e) if !blockers.is_empty() => {
+            let text = refuse(&blockers).unwrap_or_default();
+            anyhow::bail!("{text}\n(jjpr could not check the forge as well: {e:#})");
+        }
+        Err(e) => return Err(e),
+    };
+    let (forge, observed) = observed;
+    let mut plan = plan::plan(&entry, opts.direction, &observed);
+    blockers.append(&mut plan.blockers);
+    plan.blockers = blockers;
+    if opts.dry_run {
+        return print_dry_run(out, &entry, &plan, opts, cx.now);
+    }
+    if let Some(text) = refuse(&plan.blockers) {
+        anyhow::bail!("{text}");
+    }
+    writeln!(
+        out,
+        "{}",
+        report::header(&entry, opts.direction, false, cx.now)
+    )?;
+    for b in &plan.blockers {
+        if let Some(line) = explain::overridden(b, &entry) {
+            writeln!(out, "{line}")?;
+        }
     }
     let target = execute::Target {
         repo: cx.repo,
         forge: forge.as_ref(),
         journal: cx.journal,
     };
-    execute::run(&target, &mut entry, &plan, opts.direction, out)?;
-    print_kept(out, &entry, &plan, opts.direction)?;
+    let expected = cx.repo.view_fingerprint().ok();
+    if let Err(stopped) = execute::run(&target, &mut entry, &plan, opts.direction, out) {
+        let text = after_failure(
+            cx,
+            &entry,
+            opts,
+            forge.as_ref(),
+            &observed,
+            expected,
+            stopped,
+        );
+        anyhow::bail!("{text}");
+    }
+    print_kept(out, &plan, &entry)?;
     writeln!(out, "{}", report::done(&entry, opts.direction, cx.now))?;
     Ok(())
 }
 
-fn print_plan(
+/// What to say once a run failed at a step: how far putting it back got,
+/// and, when it got all the way, whether the forge agrees.
+fn after_failure(
+    cx: &Context,
+    entry: &Entry,
+    opts: Options,
+    forge: &dyn Forge,
+    before: &Observed,
+    view_before: Option<String>,
+    stopped: execute::Stopped,
+) -> String {
+    let cause = format!("{:#}", stopped.cause);
+    if let Err(e) = &stopped.put_back {
+        return failed::stopped_partway(entry, opts.direction, cx.now, &cause, &format!("{e:#}"));
+    }
+    let mut left = Vec::new();
+    if cx.repo.view_fingerprint().ok() != view_before {
+        left.push(rollback::Difference::Local);
+    }
+    match observe::observe(forge, entry, opts) {
+        Ok(after) => left.extend(rollback::differences(before, &after)),
+        Err(e) => eprintln!("  Warning: could not check the forge afterwards: {e:#}"),
+    }
+    failed::stopped_and_put_back(entry, opts.direction, cx.now, &cause, &left)
+}
+
+fn print_dry_run(
     out: &mut dyn Write,
     entry: &Entry,
     plan: &plan::Plan,
     opts: Options,
     now: u64,
 ) -> Result<()> {
-    let fk = entry.forge;
-    if plan.steps.is_empty() && !plan.left.is_empty() {
+    writeln!(out, "{}", report::header(entry, opts.direction, true, now))?;
+    if opts.force {
+        for b in &plan.blockers {
+            if let Some(line) = explain::overridden(b, entry) {
+                writeln!(out, "{line}")?;
+            }
+        }
+    }
+    for step in &plan.steps {
         writeln!(
             out,
-            "Nothing more to undo in {} without --force.",
-            report::name(entry, now)
+            "{}",
+            report::step(step, entry, opts.direction, entry.forge)
         )?;
-        return print_kept(out, entry, plan, opts.direction);
     }
-    writeln!(
-        out,
-        "{}",
-        report::header(entry, opts.direction, opts.dry_run, now)
-    )?;
-    for c in &plan.overridden {
-        writeln!(out, "{}", report::overridden(c, fk))?;
+    print_kept(out, plan, entry)?;
+    if let Some(text) =
+        explain::dry_run_blockers(&plan.blockers, entry, opts.direction, opts.force, now)
+    {
+        writeln!(out, "{text}")?;
     }
-    if opts.dry_run {
-        for step in &plan.steps {
-            writeln!(out, "{}", report::step(step, entry, opts.direction, fk))?;
-        }
-        print_kept(out, entry, plan, opts.direction)?;
-        writeln!(out, "{}", report::DRY_RUN_NOTE)?;
-    }
+    writeln!(out, "{}", report::DRY_RUN_NOTE)?;
     Ok(())
 }
 
-fn print_kept(out: &mut dyn Write, entry: &Entry, plan: &plan::Plan, d: Direction) -> Result<()> {
-    let missed: &[String] = match d {
-        Direction::Undo => &entry.missed,
-        Direction::Redo => &[],
-    };
-    if plan.kept.is_empty() && missed.is_empty() {
+fn print_kept(out: &mut dyn Write, plan: &plan::Plan, entry: &Entry) -> Result<()> {
+    if plan.kept.is_empty() {
         return Ok(());
     }
-    writeln!(out, "{}", report::kept_heading(d))?;
+    writeln!(out, "{}", report::kept_heading())?;
     for k in &plan.kept {
-        writeln!(out, "{}", report::kept(k, entry, entry.forge))?;
-    }
-    for what in missed {
-        writeln!(out, "{}", report::missed(what))?;
-    }
-    let open = plan
-        .kept
-        .iter()
-        .filter(|k| matches!(k, Kept::OpenPr { .. }))
-        .count();
-    if open > 0 {
-        writeln!(out, "{}", report::close_hint(open))?;
+        writeln!(out, "{}", report::kept(k, entry.forge))?;
     }
     Ok(())
 }
@@ -222,32 +269,46 @@ fn finish_abandoned(cx: &Context, entry: &mut Entry, opts: Options) -> Result<()
     Ok(())
 }
 
-/// The checks that need only jj: is the entry finished, does jj still have
-/// its operation, and is the repo exactly as the entry (or the last undo of
-/// it) left it.
-fn check_local(cx: &Context, entry: &Entry, opts: Options) -> Result<Option<Blocked>> {
-    let direction = opts.direction;
+/// What stops undo before anything else is looked at: a watch running, an
+/// entry still being recorded, or one jj can no longer restore.
+fn check_ready(cx: &Context, entry: &Entry, opts: Options) -> Result<Option<Blocked>> {
     if cx.watch_running {
         return Ok(Some(Blocked::WatchRunning));
     }
     if entry.state == State::Running {
         return Ok(Some(Blocked::StillRunning));
     }
-    if direction == Direction::Undo && !entry.local_undone && !entry.absorbed.is_empty() {
-        return Ok(Some(Blocked::Absorbed(entry.absorbed.clone())));
+    let Some((_, restore_to)) = local_targets(entry) else {
+        return Ok(Some(Blocked::NoEnd));
+    };
+    let restores = (opts.direction == Direction::Undo) != entry.local_undone;
+    if restores && !cx.repo.op_exists(restore_to)? {
+        return Ok(Some(Blocked::OpGone(restore_to.clone())));
     }
+    Ok(None)
+}
+
+/// The fingerprint the repo must still have, and the operation the local
+/// restore goes to.
+fn local_targets(entry: &Entry) -> Option<(&String, &String)> {
     let (expected, restore_to) = if entry.local_undone {
         (entry.undone_view.as_ref(), entry.end_op.as_ref())
     } else {
         (entry.end_view.as_ref(), Some(&entry.start_op))
     };
-    let (Some(expected), Some(restore_to)) = (expected, restore_to) else {
-        return Ok(Some(Blocked::NoEnd));
-    };
-    let restores = (direction == Direction::Undo) != entry.local_undone;
-    if restores && !cx.repo.op_exists(restore_to)? {
-        return Ok(Some(Blocked::OpGone(restore_to.clone())));
+    Some((expected?, restore_to?))
+}
+
+/// What jj shows that would be lost: work recorded while the command ran,
+/// and any change to the repo since it (or the last undo of it) ended.
+fn check_local(cx: &Context, entry: &Entry, opts: Options) -> Result<Vec<Blocker>> {
+    let mut blockers = Vec::new();
+    if opts.direction == Direction::Undo && !entry.local_undone && !entry.absorbed.is_empty() {
+        blockers.push(Blocker::Absorbed(entry.absorbed.clone()));
     }
+    let Some((expected, _)) = local_targets(entry) else {
+        return Ok(blockers);
+    };
     // A dry run changes nothing, so it leaves edits on disk unseen (and says so).
     if !opts.dry_run {
         cx.repo.snapshot()?;
@@ -261,9 +322,9 @@ fn check_local(cx: &Context, entry: &Entry, opts: Options) -> Result<Option<Bloc
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        return Ok(Some(Blocked::RepoChanged { since }));
+        blockers.push(Blocker::RepoChanged { since });
     }
-    Ok(None)
+    Ok(blockers)
 }
 
 /// `jjpr undo` / `jjpr redo` from the command line.

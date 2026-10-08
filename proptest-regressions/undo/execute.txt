@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ffd8aa89c7aefd6b765ed41c83f88e7bc3282cf97d2bfe33ccbfe08051513c9a # shrinks to forge = Observed { branches: {"b0": None, "b1": None, "b2": None}, prs: {1: SeenPr { base: "main", body: "x", draft: false, status: Closed, reviewers: [] }}, comments: {1: {}}, activity: {} }, choices = [(0, 0), (22, 0), (86, 0)], with_local = false, fail = 4
+cc 39da1ef877024e277879c79c97268c40bd5f31f04b12abe1632cfb629f63c4fd # shrinks to forge = Observed { branches: {"b1": None, "b2": None, "b0": None}, prs: {1: SeenPr { base: "main", body: "x", draft: false, status: Closed, reviewers: [] }}, comments: {1: {}}, activity: {} }, choices = [(1, 0), (1, 0), (104, 717094814596297135)], with_local = true, fail = 4
+cc d49c604412f103004176ac8793f085faec83eb42a5b78318411d923192440655 # shrinks to forge = Observed { branches: {"b0": None, "b2": None, "b1": None}, prs: {1: SeenPr { base: "main", body: "x", draft: false, status: Closed, reviewers: [] }}, comments: {1: {}}, activity: {}, approvals: {} }, choices = [], with_local = true, redo = false, fail = 0

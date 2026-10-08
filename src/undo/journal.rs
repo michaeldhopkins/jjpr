@@ -90,17 +90,16 @@ pub enum State {
     Running,
     Done,
     Undone,
-    /// Undone except for what needs `--force`: closing the PRs it opened. A
-    /// plain `jjpr undo` moves on to the entry before it.
-    KeptOpen,
-    /// An undo or redo stopped partway; running it again finishes it.
+    /// An undo or redo failed at a step and could not put back the steps it
+    /// had taken. `jjpr undo` and `jjpr redo` each plan from where it stopped:
+    /// one finishes it, the other takes it back.
     PartlyUndone,
 }
 
 impl State {
-    /// Whether undo took this entry back, wholly or all but its open PRs.
+    /// Whether undo took this entry back, wholly or in part.
     pub fn undone(self) -> bool {
-        matches!(self, Self::Undone | Self::KeptOpen | Self::PartlyUndone)
+        matches!(self, Self::Undone | Self::PartlyUndone)
     }
 }
 
@@ -145,7 +144,7 @@ pub struct Entry {
     #[serde(default)]
     pub closed_by_push: Vec<u64>,
     /// Writes jjpr could not record, for want of the value they replaced.
-    /// Undo leaves them and says so.
+    /// Undo refuses an entry with any, since it cannot put them back.
     #[serde(default)]
     pub missed: Vec<String>,
     pub actions: Vec<Record>,
@@ -315,15 +314,8 @@ pub fn repo_store_dir(repo_root: &Path) -> Result<PathBuf> {
 }
 
 /// The entry `jjpr undo` acts on: the newest one not wholly undone.
-///
-/// An entry left with its PRs open counts as undone, unless `force` asks to
-/// close them now.
-pub fn undo_target(entries: &[Entry], force: bool) -> Option<&Entry> {
-    entries.iter().rev().find(|e| match e.state {
-        State::Undone => false,
-        State::KeptOpen => force,
-        _ => true,
-    })
+pub fn undo_target(entries: &[Entry]) -> Option<&Entry> {
+    entries.iter().rev().find(|e| e.state != State::Undone)
 }
 
 /// The entry `jjpr redo` acts on: the oldest of the undone entries that end
@@ -520,19 +512,11 @@ mod tests {
             entry("2", State::Done),
             entry("3", State::Undone),
         ];
-        assert_eq!(undo_target(&es, false).unwrap().id, "2");
+        assert_eq!(undo_target(&es).unwrap().id, "2");
         let es = vec![entry("1", State::Done), entry("2", State::PartlyUndone)];
-        assert_eq!(undo_target(&es, false).unwrap().id, "2", "finish it first");
-        assert!(undo_target(&[entry("1", State::Undone)], true).is_none());
-        assert!(undo_target(&[], false).is_none());
-    }
-
-    #[test]
-    fn an_entry_left_with_open_prs_is_passed_over_unless_forced() {
-        let es = vec![entry("1", State::Done), entry("2", State::KeptOpen)];
-        assert_eq!(undo_target(&es, false).unwrap().id, "1");
-        assert_eq!(undo_target(&es, true).unwrap().id, "2");
-        assert_eq!(redo_target(&es).unwrap().id, "2");
+        assert_eq!(undo_target(&es).unwrap().id, "2", "finish it first");
+        assert!(undo_target(&[entry("1", State::Undone)]).is_none());
+        assert!(undo_target(&[]).is_none());
     }
 
     #[test]

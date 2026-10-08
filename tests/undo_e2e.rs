@@ -54,7 +54,9 @@ fn branch_until(ctx: &ForgeE2eContext, bookmark: &str, want: Option<&str>) -> Op
     let name = ctx.prefixed(bookmark);
     let mut last = None;
     for _ in 0..10 {
-        last = forge.get_branch_head(OWNER, REPO, &name).unwrap();
+        last = forge
+            .get_branch_head(OWNER, REPO, &name)
+            .expect("test fixture");
         if last.as_deref() == want {
             break;
         }

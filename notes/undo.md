@@ -18,8 +18,8 @@ forge, and refuses when someone else has acted since.
    before it.
 2. Undo relies on `jj op restore --what repo`, marked experimental in jj, and
    the `jj-versions` CI matrix guards it.
-3. A PR the command opened stays open, with its branch, unless `--force`. The
-   output says how to close it.
+3. Closing a PR the command opened (and deleting its branch) needs
+   `--force`. Without it, undo changes nothing and says to rerun with it.
 4. History is kept back to the newest thing that cannot be undone, and pruned
    behind it when one is detected: a merge, a jj operation that no longer
    exists, or a change to the repo between two recorded commands (an amend,
@@ -32,6 +32,15 @@ forge, and refuses when someone else has acted since.
    with or without `--force`.
 6. No confirmation prompt; `--dry-run` shows the plan.
 7. `jjpr redo` replays what undo took back, from the same journal.
+8. **No partial undo or redo** (2026-10-08). A real run checks the repo and
+   the forge first and starts only when it can take back the whole command;
+   otherwise it lists every blocker and changes nothing. A dry run lists the
+   steps that would go through and every blocker. Blockers are either
+   cleared by `--force` (someone changed what jjpr wrote, closing a PR it
+   opened, a base branch the forge no longer has) or not (a merge, a branch
+   someone pushed to, a PR GitHub will not reopen, a write jjpr could not
+   read first, the repo changed since). The design analysis for redo after a
+   forced undo and for the `jj describe` recovery is `notes/undo-redo-design.md`.
 
 ## jj behaviour it rests on
 
@@ -78,13 +87,20 @@ all three; the `tests/undo.rs` suite also passes on 0.37.0 and 0.38.0.
   a PR the push closed (submit reads each PR's state right after pushing,
   and the recorder notes a PR it had read open that is now closed), reverse
   the forge writes newest first, then close created PRs (`--force`) before
-  deleting their branches. Every step updates the journal, so a run that
-  stops partway can be picked up again. A comment posted again under a new
+  deleting their branches. Each step carries the value it replaces, and
+  each step taken yields its inverse (`rollback.rs`). When a step fails,
+  the executor runs the inverses newest first and then restores the local
+  repo to the operation it started from, so the run ends where it began; it
+  then reads the forge again and names anything still not as it was (the
+  failed write may have landed after all). A push that reached the remote
+  but whose local clean-up failed counts as taken. Every step updates the
+  journal, so a run that cannot even put itself back leaves the entry
+  `PartlyUndone` with exactly the steps that stand marked; `jjpr undo` then
+  finishes it and `jjpr redo` takes it back, each planning from the forge
+  as it is. A comment posted again under a new
   id is renamed in every entry that names it, and within one run the plan
   follows each comment through the entry's records (one record can post a
   comment back that the next one edits or deletes).
-- An entry undone except for its open PRs is `KeptOpen`: a plain undo moves
-  past it, `--force` finishes it.
 - An entry left `Running` by a process that died (Ctrl-C) is completed at
   undo time from what it saved, including its last own operation.
 - Redo is the same plan run forwards, from the end operation.
@@ -126,7 +142,7 @@ Two findings outside undo, both fixed here because redo needs them:
   trailing whitespace and line endings.
 
 Because of the GitHub reopen rule, undoing a push that GitHub auto-closed a
-PR over cannot reopen it: undo warns and carries on.
+PR over cannot reopen it, so on GitHub undo refuses such an entry whole.
 
 ## Not covered
 
@@ -142,8 +158,11 @@ PR over cannot reopen it: undo warns and carries on.
   need the fingerprint to ignore bookmarks that only followed their remote.
 - If jjpr dies after the forge took a write but before the journal recorded
   it (posting a comment again, say), a resumed undo can repeat that write.
-- A resumed undo does not retry reopening a PR whose push it already put
-  back.
+  The same gap applies to a write that timed out but landed: put-back does
+  not reverse it, and the check afterwards names it.
+- A Ctrl-C or crash mid-run gets no put-back: the entry is left
+  `PartlyUndone` as the journal last saw it, and the next undo or redo plans
+  from there.
 - Only undo and redo take the journal lock, so the guard against a
   concurrent command is best-effort: undo sees a running submit or watch
   only once it has written its entry (at its first push or forge write). A

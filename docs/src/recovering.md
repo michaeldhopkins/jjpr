@@ -8,12 +8,14 @@ jjpr undo --dry-run            # what it would take back
 jjpr undo                      # take it back
 ```
 
-## jjpr undo refuses
+## jjpr undo limits
 
-The message says why. Where it offers `--force`, that is the fix.
-Otherwise, change the stack with jj until it is what you want, then run
-`jjpr submit`, and the forge follows. Close a PR you no longer want on
-the forge.
+When jjpr can't undo, either:
+
+- It'll tell you that you must rerun with `--force`, such as when undo
+  would close a PR but it's received a comment.
+- It can't undo at all. In this case, you'll need to use Jujutsu to get
+  in the state you want. Then, run regular `jjpr submit`.
 
 ## A merged PR's commits are still in the PR above it
 

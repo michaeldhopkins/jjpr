@@ -66,7 +66,7 @@ pub(super) fn observe(forge: &dyn Forge, entry: &Entry, opts: Options) -> Result
             .collect();
         observed.comments.insert(pr, bodies);
     }
-    if opts.force && opts.direction == Direction::Undo {
+    if opts.direction == Direction::Undo {
         for record in &entry.actions {
             if let Action::CreatePr { number, .. } = record.action {
                 let others = forge
