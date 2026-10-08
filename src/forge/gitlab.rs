@@ -957,4 +957,95 @@ mod tests {
         let sent: serde_json::Value = serde_json::from_str(&put.body).expect("JSON body");
         assert_eq!(sent, serde_json::json!({ "body": "new text" }));
     }
+
+    #[test]
+    fn get_authenticated_emails_returns_the_confirmed_addresses() {
+        let server = StubServer::start(vec![route(
+            "GET",
+            "/user/emails",
+            200,
+            r#"[{"email":"a@x.com","confirmed_at":"2021-01-01T00:00:00Z"},
+                {"email":"pending@x.com","confirmed_at":null},
+                {"email":"b@x.com","confirmed_at":"2022-02-02T00:00:00Z"}]"#,
+        )]);
+
+        let emails = stub_forge(&server)
+            .get_authenticated_emails()
+            .expect("emails");
+        assert_eq!(emails, vec!["a@x.com", "b@x.com"]);
+        assert_eq!(server.request_lines(), vec!["GET /user/emails"]);
+    }
+
+    const MR_7: &str = "/projects/o%2Fr/merge_requests/7";
+
+    /// Serves `get_pr_reviews`' three endpoints. `reviewers: None` leaves
+    /// the reviewers endpoint unrouted (404), as on GitLab before 16.3.
+    fn reviews_server(merge_status: &str, reviewers: Option<&str>) -> StubServer {
+        let mut routes = vec![
+            route(
+                "GET",
+                &format!("{MR_7}/approvals"),
+                200,
+                r#"{"approved_by":[{"user":{"username":"a"}},{"user":{"username":"b"}}]}"#,
+            ),
+            route(
+                "GET",
+                MR_7,
+                200,
+                &format!(r#"{{"iid":7,"detailed_merge_status":"{merge_status}"}}"#),
+            ),
+        ];
+        if let Some(body) = reviewers {
+            routes.push(route("GET", &format!("{MR_7}/reviewers"), 200, body));
+        }
+        StubServer::start(routes)
+    }
+
+    fn reviews(server: &StubServer) -> ReviewSummary {
+        stub_forge(server)
+            .get_pr_reviews("o", "r", 7)
+            .expect("reviews")
+    }
+
+    #[test]
+    fn get_pr_reviews_mergeable_with_approving_reviewers_requests_no_changes() {
+        let server = reviews_server("mergeable", Some(r#"[{"state":"approved"}]"#));
+        let summary = reviews(&server);
+        assert_eq!(summary.approved_count, 2);
+        assert!(!summary.changes_requested);
+    }
+
+    /// Before GitLab 16.3 there is no reviewers endpoint; the merge status
+    /// alone must still report requested changes.
+    #[test]
+    fn get_pr_reviews_merge_status_alone_reports_requested_changes() {
+        let server = reviews_server("requested_changes", None);
+        assert!(reviews(&server).changes_requested);
+    }
+
+    #[test]
+    fn get_pr_reviews_one_reviewer_requesting_changes_is_enough() {
+        let server = reviews_server(
+            "mergeable",
+            Some(r#"[{"state":"approved"},{"state":"requested_changes"}]"#),
+        );
+        assert!(reviews(&server).changes_requested);
+    }
+
+    #[test]
+    fn get_pr_state_reports_merged_only_for_a_merged_mr() {
+        for (state, merged) in [("merged", true), ("opened", false), ("closed", false)] {
+            let server = StubServer::start(vec![route(
+                "GET",
+                MR_7,
+                200,
+                &format!(r#"{{"iid":7,"state":"{state}"}}"#),
+            )]);
+            let got = stub_forge(&server)
+                .get_pr_state("o", "r", 7)
+                .expect("state");
+            assert_eq!(got.merged, merged, "state {state}");
+            assert_eq!(got.state, state);
+        }
+    }
 }
