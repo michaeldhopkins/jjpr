@@ -1,0 +1,6 @@
+{"name":"conflicted","remote":null,"commitId":<Error: No value set to Option<Commit>>,"changeId":<Error: No value set to Option<Commit>>,"remoteRefs":[<Error: No value set to Option<Commit>>]}
+{"name":"conflicted","remote":"git","commitId":"452f3a85c3a7","changeId":"prynmvktmutr","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"feature","remote":null,"commitId":"50126016399c","changeId":"mlkxzsykzlol","remoteRefs":[["feature","git"]]}
+{"name":"feature","remote":"origin","commitId":"452f3a85c3a7","changeId":"prynmvktmutr","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"local-only","remote":null,"commitId":"452f3a85c3a7","changeId":"prynmvktmutr","remoteRefs":[["conflicted","git"],["feature","origin"],["local-only","git"]]}
+{"name":"synced","remote":null,"commitId":"262d8d891f5d","changeId":"qlzvtolqqxst","remoteRefs":[["feat@v2","origin"],["synced","git"],["synced","origin"]]}

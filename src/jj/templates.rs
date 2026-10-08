@@ -15,7 +15,7 @@ use super::types::{Bookmark, GitRemote, LogEntry};
 /// a local bookmark and the remote's name otherwise. `remoteRefs` lists the remote
 /// bookmarks on the target as raw `[name, remote]` pairs; a `name@remote` string
 /// would carry jj's revset quoting (`"feat@v2"@origin`). Verified against jj 0.33
-/// through 0.45 (`tests/jj_compat.rs`).
+/// through 0.46 (`tests/jj_compat.rs`).
 ///
 /// jj's escape_json() includes surrounding quotes, so values use it directly.
 pub const BOOKMARK_TEMPLATE: &str = concat!(
@@ -398,7 +398,7 @@ mod tests {
     // elsewhere. That line used to become a second, synced `feature` at the old
     // commit whenever that commit carried any local bookmark, and the local
     // `feature`, whose target has no `feature@origin`, read as never pushed.
-    // Captured from jj 0.33 through 0.45 in tests/fixtures/jj/.
+    // Captured from jj 0.33 through 0.46 in tests/fixtures/jj/.
     #[test]
     fn a_remote_that_points_elsewhere_is_not_a_bookmark_and_unsyncs_the_local_one() {
         let output = [
@@ -620,7 +620,7 @@ mod tests {
         );
         assert_eq!(parse_default_branch(""), None);
         assert_eq!(parse_default_branch(",main"), Some("main".to_string()));
-        // Captured on jj 0.33 through 0.45: a second branch on trunk's commit sorts
+        // Captured on jj 0.33 through 0.46: a second branch on trunk's commit sorts
         // first, and used to be taken for the default branch.
         assert_eq!(
             parse_default_branch("landed,landed,main,main"),

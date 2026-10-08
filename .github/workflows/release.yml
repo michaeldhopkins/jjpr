@@ -121,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        jj: ["0.36.0", "0.37.0", "0.38.0", "0.40.0", "0.45.1"]
+        jj: ["0.36.0", "0.37.0", "0.38.0", "0.40.0", "0.45.1", "0.46.0"]
     steps:
       - uses: actions/checkout@v7
 
