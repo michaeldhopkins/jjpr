@@ -374,6 +374,11 @@ jobs:
           SITE_DIR: ${{ github.workspace }}/site/public/docs/jjpr
         run: ./generate-docs.sh
 
+      - name: Add Markdown twins and llms.txt
+        # Fails if any HTML page lacks its .md twin. The script lives in the site
+        # checkout so every book is built the same way.
+        run: php site/scripts/docs-markdown.php jjpr docs/src
+
       - name: Verify the book was produced
         # docs/book/ exists only if mdbook ran against this fresh checkout;
         # the site path alone would pass on the docs already committed there.
@@ -388,7 +393,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add public/docs/jjpr
+          git add public/docs/jjpr docs-md/jjpr
           if git diff --cached --quiet; then
             echo "No docs changes"
             exit 0
