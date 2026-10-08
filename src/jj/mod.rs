@@ -1,3 +1,4 @@
+mod fetch;
 pub mod runner;
 pub mod stale;
 pub mod templates;

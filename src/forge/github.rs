@@ -182,7 +182,7 @@ fragment PrStatus on PullRequest {
 /// batch (which would serialize the very round trips the batch exists to
 /// collapse), an over-100 connection is recorded here and refilled from REST,
 /// which paginates without limit.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Truncation {
     reviews: bool,
     checks: bool,
@@ -558,7 +558,10 @@ impl Forge for GitHubForge {
         for result in results {
             match result {
                 Ok(bundles) => collected.extend(bundles),
-                Err(_) => return None,
+                Err(e) => {
+                    crate::verbose::graphql_fallback(&e);
+                    return None;
+                }
             }
         }
 
@@ -567,17 +570,9 @@ impl Forge for GitHubForge {
         let needs_refill: Vec<(u64, String, Truncation)> = collected
             .iter()
             .filter(|(_, _, _, t)| t.reviews || t.checks)
-            .map(|(n, head, _, t)| {
-                (
-                    *n,
-                    head.clone(),
-                    Truncation {
-                        reviews: t.reviews,
-                        checks: t.checks,
-                    },
-                )
-            })
+            .map(|(n, head, _, t)| (*n, head.clone(), *t))
             .collect();
+        crate::verbose::graphql_refill(needs_refill.len());
 
         let refilled: HashMap<u64, (Option<ReviewSummary>, Option<ChecksStatus>)> =
             if needs_refill.is_empty() {

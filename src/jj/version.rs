@@ -50,7 +50,10 @@ pub fn parse_jj_version(out: &str) -> Option<JjVersion> {
 /// missing or prints something unrecognisable.
 pub fn installed_jj_version() -> Option<JjVersion> {
     static VERSION: OnceLock<Option<JjVersion>> = OnceLock::new();
-    *VERSION.get_or_init(|| vcs_runner::jj_version().and_then(|v| parse_jj_version(&v)))
+    *VERSION.get_or_init(|| {
+        let version = crate::verbose::jj(&["--version"], || vcs_runner::jj_version().ok_or(()));
+        version.ok().and_then(|v| parse_jj_version(&v))
+    })
 }
 
 /// Global arguments that let `jj git push --bookmark <name>` publish a bookmark

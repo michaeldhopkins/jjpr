@@ -5,14 +5,13 @@
     clippy::excessive_nesting
 )]
 
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-
-use std::collections::{HashMap, HashSet};
 
 use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
 use jjpr::config;
@@ -34,6 +33,7 @@ use jjpr::submit::{analyze, execute, plan, resolve, restack};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    jjpr::verbose::set_enabled(cli.diagnostics.verbose);
 
     match cli.command {
         Some(Commands::Submit {

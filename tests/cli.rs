@@ -406,3 +406,73 @@ fn auth_test_honours_the_remote_flag_its_error_recommends() {
                 .and(predicate::str::contains("multiple forge remotes").not()),
         );
 }
+
+/// A jj repository with no remote and no bookmarks: enough for the status overview to run its jj
+/// calls and stop at "No stacks found", with nothing reaching the network.
+fn empty_jj_repo() -> TempDir {
+    let dir = TempDir::new().expect("create temp dir");
+    run_cmd("jj", &["git", "init"], dir.path());
+    dir
+}
+
+#[test]
+fn test_verbose_prints_each_jj_call_with_its_time() {
+    if !jj_available() {
+        return;
+    }
+    let repo = empty_jj_repo();
+    let out = jjpr()
+        .args(["--verbose", "--no-fetch"])
+        .current_dir(repo.path())
+        .output()
+        .expect("run jjpr");
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let timed = timed_lines(&stderr);
+    assert!(
+        timed
+            .iter()
+            .any(|l| l.ends_with("jj --ignore-working-copy git remote list")),
+        "{stderr}"
+    );
+    assert!(
+        timed
+            .iter()
+            .any(|l| l.contains(" bookmark list ") && l.ends_with("--template <template>")),
+        "the template is elided, not printed: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("No stacks found"), "{stdout}");
+    assert!(
+        !stdout.contains("ms]"),
+        "verbose goes to stderr only: {stdout}"
+    );
+}
+
+#[test]
+fn test_without_verbose_no_call_is_printed() {
+    if !jj_available() {
+        return;
+    }
+    let repo = empty_jj_repo();
+    let out = jjpr()
+        .arg("--no-fetch")
+        .current_dir(repo.path())
+        .output()
+        .expect("run jjpr");
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(timed_lines(&stderr).is_empty(), "{stderr}");
+}
+
+/// The lines shaped like a timed call, `[    12ms] what`, with the bracket stripped.
+fn timed_lines(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix('[')?;
+            let (ms, what) = rest.split_once("ms] ")?;
+            ms.trim().parse::<u64>().ok().map(|_| what)
+        })
+        .collect()
+}

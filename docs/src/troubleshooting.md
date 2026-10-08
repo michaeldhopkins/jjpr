@@ -59,3 +59,13 @@ continues. If not, it reports the failure and exits. Re-run to retry.
 
 You only see the polling output when the network round-trip takes a
 while. Otherwise it's silent.
+
+## jjpr is slow
+
+Run the command again with `--verbose`. It prints each jj call and
+forge request to stderr with how long it took, so the slow one stands
+out.
+
+On GitHub, jjpr reads the status of every PR in a stack with one
+GraphQL query. When that query fails, `--verbose` says why, and jjpr
+reads each PR's status over REST instead, several requests per PR.

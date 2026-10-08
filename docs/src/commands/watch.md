@@ -72,6 +72,7 @@ line.
 | `--base <branch>` | Override the auto-detected stack base |
 | `--remote <name>` | Override the git remote name |
 | `--no-fetch` | Skip `git fetch` before starting |
+| `--verbose` | Print each jj call and forge request to stderr, with how long it took |
 
 ## Sample session
 

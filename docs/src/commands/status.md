@@ -25,6 +25,7 @@ stack, or `--all` to see every local stack at once.
 |---|---|
 | `--all` | Show every local stack instead of only the current one. Mutually exclusive with a positional bookmark. |
 | `--no-fetch` | Skip `git fetch` before reporting |
+| `--verbose` | Print each jj call and forge request to stderr, with how long it took |
 
 ## Output
 

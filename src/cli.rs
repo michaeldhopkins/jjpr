@@ -37,6 +37,18 @@ pub struct Cli {
     /// Skip fetching remotes before operating
     #[arg(long, global = true)]
     pub no_fetch: bool,
+
+    #[command(flatten)]
+    pub diagnostics: Diagnostics,
+}
+
+/// Flags that change what jjpr reports about itself, not what it does. A struct of their own
+/// keeps `Cli` within clippy's limit on bools.
+#[derive(clap::Args)]
+pub struct Diagnostics {
+    /// Print each jj call and forge request to stderr, with how long it took
+    #[arg(long, global = true)]
+    pub verbose: bool,
 }
 
 #[derive(Subcommand)]

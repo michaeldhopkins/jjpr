@@ -2,14 +2,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use vcs_runner::{
-    is_transient_error, jj_available, jj_current_operation_id, jj_divergent_change_ids,
-    jj_op_restore, run_jj_utf8, run_jj_utf8_ignore_wc, run_jj_utf8_with_retry,
+    jj_available, jj_current_operation_id, jj_divergent_change_ids, jj_op_restore, run_jj_utf8,
+    run_jj_utf8_ignore_wc,
 };
 
 use super::Jj;
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
 use super::version;
+use crate::verbose;
 
 /// Real jj implementation that shells out to the jj binary.
 pub struct JjRunner {
@@ -52,15 +53,6 @@ impl JjRunner {
         self.fetch_remote = remote;
     }
 
-    fn fetch(&self, args: &[&str]) -> Result<()> {
-        // Fetch is pure-read into the git backend, so retrying on a transient
-        // error (".lock", or "stale", which can follow a partial commit) is
-        // safe here, unlike the mutating ops, which use plain `run_jj`.
-        let args = [&["--ignore-working-copy", "git", "fetch"], args].concat();
-        run_jj_utf8_with_retry(&self.repo_path, &args, is_transient_error)?;
-        Ok(())
-    }
-
     /// Widen ownership discovery to every identity in `identity` (multiple
     /// commit emails across machines). Call once, after resolving the forge, and
     /// before discovery. Left unset, discovery uses `mine()` — the prior
@@ -74,14 +66,16 @@ impl JjRunner {
     /// on committed, bookmarked state, so it must not perturb a live working
     /// copy. Returns lossy-decoded stdout, trimmed.
     fn run_jj(&self, args: &[&str]) -> Result<String> {
-        Ok(run_jj_utf8_ignore_wc(&self.repo_path, args)?)
+        Ok(verbose::jj_ignoring_wc(args, || {
+            run_jj_utf8_ignore_wc(&self.repo_path, args)
+        })?)
     }
 
     /// Run jj **allowing** it to snapshot/update the working copy. Reserved for
     /// the few operations that intentionally touch `@`: an explicit snapshot, and
     /// the reconcile rebase/merge when the user is sitting on the affected commit.
     fn run_jj_touching_wc(&self, args: &[&str]) -> Result<String> {
-        Ok(run_jj_utf8(&self.repo_path, args)?)
+        Ok(verbose::jj(args, || run_jj_utf8(&self.repo_path, args))?)
     }
 
     /// Run a stack-rewriting op (rebase/merge) working-copy-aware: touch the
@@ -114,21 +108,8 @@ impl JjRunner {
 
 impl Jj for JjRunner {
     fn git_fetch(&self) -> Result<()> {
-        let Some(required) = self.fetch_remote.as_deref() else {
-            return self.fetch(&["--all-remotes"]);
-        };
-        self.fetch(&["--remote", required])?;
-        for remote in self.get_git_remotes()? {
-            if remote.name != required
-                && let Err(e) = self.fetch(&["--remote", &remote.name])
-            {
-                eprintln!(
-                    "  Warning: could not fetch remote '{}'; continuing without it.\n    {e}",
-                    remote.name
-                );
-            }
-        }
-        Ok(())
+        let required = self.fetch_remote.as_deref();
+        super::fetch::fetch_remotes(&self.repo_path, required, || self.get_git_remotes())
     }
 
     fn snapshot(&self) -> Result<()> {
@@ -373,7 +354,9 @@ impl Jj for JjRunner {
     // divergence, restore only the mangling rebase) stays in jjpr (src/merge).
 
     fn current_operation_id(&self) -> Result<String> {
-        Ok(jj_current_operation_id(&self.repo_path)?)
+        Ok(verbose::jj_ignoring_wc(verbose::CURRENT_OP, || {
+            jj_current_operation_id(&self.repo_path)
+        })?)
     }
 
     fn divergent_change_ids(&self) -> Result<Vec<String>> {
@@ -382,11 +365,15 @@ impl Jj for JjRunner {
         // exact situation this signal detects) and dedups to distinct changes.
         // From 0.18 it also works on jj 0.36/0.37, which have no `divergent()`
         // revset: 0.15 spelled the query with it, so every call failed there.
-        Ok(jj_divergent_change_ids(&self.repo_path)?)
+        Ok(verbose::jj_ignoring_wc(verbose::DIVERGENT, || {
+            jj_divergent_change_ids(&self.repo_path)
+        })?)
     }
 
     fn restore_operation(&self, op_id: &str) -> Result<()> {
-        Ok(jj_op_restore(&self.repo_path, op_id)?)
+        Ok(verbose::jj(&["op", "restore", op_id], || {
+            jj_op_restore(&self.repo_path, op_id)
+        })?)
     }
 }
 

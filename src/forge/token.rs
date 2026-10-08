@@ -3,6 +3,7 @@ use std::process::Command;
 use anyhow::Result;
 
 use super::ForgeKind;
+use crate::verbose;
 
 /// Resolve an API token for the given forge.
 ///
@@ -91,7 +92,8 @@ fn cli_fallback(kind: ForgeKind, host: Option<&str>) -> Option<String> {
 
 /// Run `gh auth token` to get the GitHub token from gh's credential store.
 fn gh_auth_token() -> Option<String> {
-    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
+    let args = ["auth", "token"];
+    let output = verbose::program("gh", &args, || Command::new("gh").args(args).output()).ok()?;
 
     if !output.status.success() {
         return None;
@@ -115,11 +117,12 @@ fn glab_auth_token_with(glab: impl Fn() -> Command, host: Option<&str>) -> Optio
     // token GitLab rejects with 401 (seen with glab 1.117). The first run
     // does the refresh; its output is ignored, and so is its exit status,
     // since the read below reports whatever state it left behind.
-    let _ = glab().args(glab_status_args(host)).output();
+    let args = glab_status_args(host);
+    let _ = verbose::program("glab", &args, || glab().args(&args).output());
 
     let mut args = glab_status_args(host);
     args.push("--show-token");
-    let output = glab().args(args).output().ok()?;
+    let output = verbose::program("glab", &args, || glab().args(&args).output()).ok()?;
     parse_glab_status_token(&String::from_utf8_lossy(&output.stderr))
 }
 

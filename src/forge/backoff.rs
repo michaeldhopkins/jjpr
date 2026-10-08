@@ -85,7 +85,8 @@ pub fn send(
 ) -> anyhow::Result<Response<ureq::Body>> {
     let mut retries = 0;
     let mut resp = loop {
-        let resp = attempt().with_context(|| format!("{method} {url}"))?;
+        let resp = crate::verbose::http(method, path, url, &mut attempt)
+            .with_context(|| format!("{method} {url}"))?;
         match wait(resp.status().as_u16(), resp.headers(), now()) {
             Some(delay) if retries < MAX_RETRIES && delay <= MAX_WAIT => {
                 eprintln!(

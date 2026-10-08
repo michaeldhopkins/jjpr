@@ -68,6 +68,7 @@ the approvals the push dropped so the loss isn't silent:
 | `--base <branch>` | Override auto-detected base branch |
 | `--remote <name>` | Override the git remote name |
 | `--no-fetch` | Skip `git fetch` before starting |
+| `--verbose` | Print each jj call and forge request to stderr, with how long it took |
 | `--dry-run` | Print what would happen without doing it |
 
 ## PR titles and bodies
