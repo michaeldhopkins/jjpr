@@ -374,6 +374,15 @@ jobs:
           SITE_DIR: ${{ github.workspace }}/site/public/docs/jjpr
         run: ./generate-docs.sh
 
+      - name: Read the site's PHP pin
+        id: php
+        run: echo "version=$(sed -n 's/^php *= *"\(.*\)"/\1/p' site/mise.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ steps.php.outputs.version }}
+          coverage: none
+
       - name: Add Markdown twins and llms.txt
         # Fails if any HTML page lacks its .md twin. The script lives in the site
         # checkout so every book is built the same way.
