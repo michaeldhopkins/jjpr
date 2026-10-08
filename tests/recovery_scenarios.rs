@@ -96,10 +96,10 @@ impl Repo {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
     fn write(&self, name: &str, content: &str) {
-        std::fs::write(self.path().join(name), content).unwrap();
+        std::fs::write(self.path().join(name), content).expect("write a file in the test repo");
     }
     fn runner(&self) -> JjRunner {
-        JjRunner::new(self.path().to_path_buf()).unwrap()
+        JjRunner::new(self.path().to_path_buf()).expect("open the test repo")
     }
     fn current_op(&self) -> String {
         self.out(&["op", "log", "-n1", "--no-graph", "-T", "id"])
@@ -124,7 +124,9 @@ impl Repo {
         self.descriptions().iter().any(|d| d == description)
     }
     fn divergent(&self) -> Vec<String> {
-        self.runner().divergent_change_ids().unwrap()
+        self.runner()
+            .divergent_change_ids()
+            .expect("read divergent change ids")
     }
     fn file_count(&self, revset: &str) -> usize {
         self.out(&["file", "list", "-r", revset])

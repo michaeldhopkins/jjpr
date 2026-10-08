@@ -30,7 +30,7 @@ impl Repo {
                 .args(["git", "init"])
                 .current_dir(dir.path())
                 .output()
-                .unwrap()
+                .expect("run jj git init")
                 .status
                 .success(),
             "jj git init failed"
@@ -43,7 +43,7 @@ impl Repo {
                 .args(["config", "set", "--repo", k, v])
                 .current_dir(dir.path())
                 .output()
-                .unwrap();
+                .expect("run jj config set");
         }
         Self { dir }
     }
@@ -64,10 +64,10 @@ impl Repo {
             .to_string()
     }
     fn write(&self, name: &str, content: &str) {
-        std::fs::write(self.path().join(name), content).unwrap();
+        std::fs::write(self.path().join(name), content).expect("write a file in the test repo");
     }
     fn runner(&self) -> JjRunner {
-        JjRunner::new(self.path().to_path_buf()).unwrap()
+        JjRunner::new(self.path().to_path_buf()).expect("open the test repo")
     }
     fn at_commit(&self) -> String {
         self.out(&[

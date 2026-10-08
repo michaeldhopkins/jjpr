@@ -139,7 +139,7 @@ fn test_push_after_squash() {
 fn assert_pushed_and_synced(jj: &impl Jj, name: &str) {
     let bookmark = jj
         .get_my_bookmarks()
-        .unwrap()
+        .expect("list my bookmarks")
         .into_iter()
         .find(|b| b.name == name)
         .unwrap_or_else(|| panic!("{name} listed"));

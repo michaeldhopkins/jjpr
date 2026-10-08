@@ -282,13 +282,11 @@ fn derive_pr_title_body(segment: &NarrowedSegment) -> (String, String) {
 
 fn generate_merge_note(source_names: &[String]) -> String {
     let formatted: Vec<String> = source_names.iter().map(|n| format!("`{n}`")).collect();
-    let sources_text = match formatted.len() {
-        1 => formatted[0].clone(),
-        2 => format!("{} and {}", formatted[0], formatted[1]),
-        _ => {
-            let (last, rest) = formatted.split_last().unwrap();
-            format!("{}, and {last}", rest.join(", "))
-        }
+    let sources_text = match formatted.as_slice() {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
     };
     let plural = if source_names.len() == 1 {
         "that PR is"
@@ -3507,6 +3505,14 @@ mod tests {
         let note = generate_merge_note(&["feat-a".to_string(), "feat-b".to_string()]);
         assert!(note.contains("`feat-a` and `feat-b`"));
         assert!(note.contains("those PRs are"));
+    }
+
+    #[test]
+    fn test_generate_merge_note_three_and_none() {
+        let three = ["a", "b", "c"].map(String::from);
+        assert!(generate_merge_note(&three).contains("`a`, `b`, and `c`"));
+        // No sources used to panic on an unwrap; it now names none.
+        assert!(generate_merge_note(&[]).contains("those PRs are"));
     }
 
     #[test]

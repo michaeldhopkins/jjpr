@@ -226,6 +226,7 @@ mod tests {
 
         // Restore
         if let Some(val) = saved {
+            // SAFETY: as for the removal above; this puts the saved value back.
             unsafe { std::env::set_var("FORGEJO_TOKEN", val) };
         }
 

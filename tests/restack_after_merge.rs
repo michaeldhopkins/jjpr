@@ -71,7 +71,10 @@ impl Forge for MergedForge {
         }
     }
     fn find_merged_pr(&self, _: &str, _: &str, head: &str) -> Result<Option<PullRequest>> {
-        self.lookups.lock().unwrap().push(head.to_string());
+        self.lookups
+            .lock()
+            .expect("lookups lock")
+            .push(head.to_string());
         if self.recent.is_none() {
             anyhow::bail!("HTTP 502 from the forge");
         }
@@ -149,7 +152,7 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> String {
         .args(args)
         .current_dir(dir)
         .output()
-        .unwrap();
+        .expect("run the program");
     assert!(out.status.success(), "{program} {args:?}: {out:?}");
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -158,8 +161,12 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> String {
 /// a local `main` tracking the origin's. CI has no global jj identity, and its
 /// bare origin's HEAD names `master`, so a clone makes no local `main`.
 fn forge_clone(repo: &common::JjTestRepo) -> (tempfile::TempDir, std::path::PathBuf) {
-    let forge_side = tempfile::TempDir::new().unwrap();
-    let origin = repo.origin_path().to_str().unwrap().to_string();
+    let forge_side = tempfile::TempDir::new().expect("make the forge's clone directory");
+    let origin = repo
+        .origin_path()
+        .to_str()
+        .expect("origin path is UTF-8")
+        .to_string();
     run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
     let clone = forge_side.path().join("clone");
     for (key, value) in [("user.name", "Forge"), ("user.email", "forge@jjpr.dev")] {
@@ -192,7 +199,7 @@ fn squash_merged_stack(delete_branch: bool, squashed: &str) -> common::JjTestRep
 
     let (_forge_side, clone) = forge_clone(&repo);
     run(&clone, "jj", &["new", "main"]);
-    std::fs::write(clone.join("bottom.rs"), squashed).unwrap();
+    std::fs::write(clone.join("bottom.rs"), squashed).expect("write the squashed file");
     run(&clone, "jj", &["commit", "-m", "Add bottom (#1)"]);
     run(&clone, "jj", &["bookmark", "set", "main", "-r", "@-"]);
     run(&clone, "jj", &["git", "push", "--bookmark", "main"]);
@@ -203,9 +210,10 @@ fn squash_merged_stack(delete_branch: bool, squashed: &str) -> common::JjTestRep
 }
 
 fn segments_for(jj: &dyn Jj, target: &str) -> Vec<NarrowedSegment> {
-    let graph = change_graph::build_change_graph(jj).unwrap();
-    let analysis = analyze::analyze_submission_graph(&graph, target).unwrap();
-    resolve::resolve_bookmark_selections(&analysis.relevant_segments, false).unwrap()
+    let graph = change_graph::build_change_graph(jj).expect("build the change graph");
+    let analysis = analyze::analyze_submission_graph(&graph, target).expect("analyze the stack");
+    resolve::resolve_bookmark_selections(&analysis.relevant_segments, false)
+        .expect("resolve the bookmark selections")
 }
 
 fn plan_for(
@@ -232,7 +240,7 @@ fn plan_for(
             dry_run,
         },
     )
-    .unwrap()
+    .expect("create the submission plan")
 }
 
 /// Descriptions of the commits `top`'s PR would carry, newest first.

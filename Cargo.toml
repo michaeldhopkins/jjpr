@@ -42,26 +42,35 @@ libc = "0.2.183"
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 
+[lints.rust]
+# `cargo fuzz` builds with `--cfg fuzzing`; a misspelt cfg would otherwise never apply.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [lints.clippy]
 # Enforce enums over boolean state flags
-struct-excessive-bools = "deny"
-fn-params-excessive-bools = "deny"
+struct_excessive_bools = "deny"
+fn_params_excessive_bools = "deny"
 
 # Catch boolean patterns that could benefit from enums
 match_bool = "warn"
 bool_to_int_with_if = "warn"
 
 # Complexity limits to catch functions that need refactoring
-cognitive-complexity = "warn"
-too-many-lines = "warn"
+cognitive_complexity = "warn"
+too_many_lines = "warn"
 
 # Tightened to deny
-collapsible-if = "deny"
-too-many-arguments = "deny"
+collapsible_if = "deny"
+too_many_arguments = "deny"
 
 # Encourage idiomatic patterns
-needless-range-loop = "deny"
+needless_range_loop = "deny"
 extend_with_drain = "deny"
+
+# Baseline lints: tests/lint_suppressions.rs fails when one goes missing or is weakened
+unwrap_used = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/jjpr-{ target }.tar.gz"

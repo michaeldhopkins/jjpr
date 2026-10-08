@@ -417,7 +417,8 @@ fn check_version(version: &str) {
 /// as is. The deleted `feat@v2` has no local target, so `--revisions` never lists
 /// it, and the conflicted bookmark is skipped with a warning.
 fn check_bookmarks(version: &str, name: &str) {
-    let (bookmarks, warnings) = parse_bookmark_output(&fixture(version, name)).unwrap();
+    let (bookmarks, warnings) =
+        parse_bookmark_output(&fixture(version, name)).expect("parse the captured bookmark list");
     let mut got: Vec<(&str, bool, bool)> = bookmarks
         .iter()
         .map(|b| (b.name.as_str(), b.has_remote, b.is_synced))
@@ -446,7 +447,7 @@ fn check_bookmarks(version: &str, name: &str) {
 }
 
 fn check_log(version: &str) {
-    let entries = parse_log_output(&fixture(version, "log.txt")).unwrap();
+    let entries = parse_log_output(&fixture(version, "log.txt")).expect("parse the captured log");
     let firsts: Vec<&str> = entries
         .iter()
         .map(|e| e.description_first_line.as_str())

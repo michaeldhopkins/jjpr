@@ -45,6 +45,8 @@ fn init_bare_jj_repo() -> TempDir {
 }
 
 fn set_nonblocking(fd: RawFd) {
+    // SAFETY: fcntl with F_GETFL/F_SETFL only reads and sets flags on `fd`, an open descriptor the
+    // caller owns; it touches no Rust memory.
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
         libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
@@ -91,6 +93,8 @@ fn spinner_shows_on_a_tty() {
     // is_terminal() is true and the live spinner renders.
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
+    // SAFETY: `master` and `slave` are live locals openpty writes a descriptor into; the name,
+    // termios and winsize pointers may be null, which openpty accepts.
     let rc = unsafe {
         libc::openpty(
             &mut master,
@@ -104,18 +108,23 @@ fn spinner_shows_on_a_tty() {
 
     // Give the child its own dups of the slave for stdout+stderr, then drop the
     // parent's original slave so `master` sees EOF once the child exits.
+    // SAFETY: dup only reads `slave`, an open descriptor from openpty above.
     let (child_out, child_err) = unsafe { (libc::dup(slave), libc::dup(slave)) };
+    // SAFETY: `slave` is open and nothing else owns it; it is never used again.
     unsafe { libc::close(slave) };
 
     let mut child = Command::new(jjpr_bin())
         .args(["watch", "--timeout", "1"])
         .current_dir(repo.path())
         .stdin(Stdio::null())
+        // SAFETY: each dup above is open and handed over exactly once, to this Stdio.
         .stdout(unsafe { Stdio::from_raw_fd(child_out) })
+        // SAFETY: as for stdout.
         .stderr(unsafe { Stdio::from_raw_fd(child_err) })
         .spawn()
         .expect("spawn jjpr under pty");
 
+    // SAFETY: `master` is open, and this File becomes its only owner.
     let mut master_file = unsafe { std::fs::File::from_raw_fd(master) };
     set_nonblocking(master);
 

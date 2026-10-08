@@ -23,12 +23,15 @@ fn anchor(heading: &str) -> String {
 }
 
 fn sources(dir: &Path, found: &mut Vec<String>) {
-    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+    for entry in std::fs::read_dir(dir)
+        .expect("read the docs directory")
+        .flatten()
+    {
         let path = entry.path();
         if path.is_dir() {
             sources(&path, found);
         } else if path.extension().is_some_and(|e| e == "rs") {
-            found.push(std::fs::read_to_string(&path).unwrap());
+            found.push(std::fs::read_to_string(&path).expect("read a docs page"));
         }
     }
 }
