@@ -154,6 +154,23 @@ fn run(dir: &Path, program: &str, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// The forge's own clone of `repo`'s origin, with an identity of its own and
+/// a local `main` tracking the origin's. CI has no global jj identity, and its
+/// bare origin's HEAD names `master`, so a clone makes no local `main`.
+fn forge_clone(repo: &common::JjTestRepo) -> (tempfile::TempDir, std::path::PathBuf) {
+    let forge_side = tempfile::TempDir::new().unwrap();
+    let origin = repo.origin_path().to_str().unwrap().to_string();
+    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
+    let clone = forge_side.path().join("clone");
+    for (key, value) in [("user.name", "Forge"), ("user.email", "forge@jjpr.dev")] {
+        run(&clone, "jj", &["config", "set", "--repo", key, value]);
+    }
+    if !run(&clone, "jj", &["bookmark", "list", "main"]).starts_with("main:") {
+        run(&clone, "jj", &["bookmark", "track", "main@origin"]);
+    }
+    (forge_side, clone)
+}
+
 /// `bottom` and `top` stacked, both pushed; then the forge squash-merges
 /// `bottom` into `main`, deleting its branch when `delete_branch` is set.
 fn stack_with_squash_merged_bottom(delete_branch: bool) -> common::JjTestRepo {
@@ -173,15 +190,7 @@ fn squash_merged_stack(delete_branch: bool, squashed: &str) -> common::JjTestRep
     push.extend(["--bookmark", "bottom", "--bookmark", "top"]);
     repo.run_jj(&push);
 
-    let forge_side = tempfile::TempDir::new().unwrap();
-    let origin = repo.origin_path().to_str().unwrap().to_string();
-    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
-    let clone = forge_side.path().join("clone");
-    run(
-        &clone,
-        "jj",
-        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
-    );
+    let (_forge_side, clone) = forge_clone(&repo);
     run(&clone, "jj", &["new", "main"]);
     std::fs::write(clone.join("bottom.rs"), squashed).unwrap();
     run(&clone, "jj", &["commit", "-m", "Add bottom (#1)"]);
@@ -663,15 +672,7 @@ fn a_deleted_merged_middle_above_a_kept_merged_bottom_is_dropped() {
     repo.run_jj(&push);
     let b_sha = repo.run_jj(&["log", "--no-graph", "-r", "b", "-T", "commit_id"]);
 
-    let forge_side = tempfile::TempDir::new().unwrap();
-    let origin = repo.origin_path().to_str().unwrap().to_string();
-    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
-    let clone = forge_side.path().join("clone");
-    run(
-        &clone,
-        "jj",
-        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
-    );
+    let (_forge_side, clone) = forge_clone(&repo);
     run(&clone, "jj", &["new", "main"]);
     std::fs::write(clone.join("a.rs"), "// a\n").unwrap();
     run(&clone, "jj", &["commit", "-m", "Add a (#1)"]);
@@ -730,15 +731,7 @@ fn a_merge_commit_survivor_keeps_its_other_parent_and_drops_the_merged_one() {
     repo.run_jj(&push);
     let sha = repo.run_jj(&["log", "--no-graph", "-r", "bottom", "-T", "commit_id"]);
 
-    let forge_side = tempfile::TempDir::new().unwrap();
-    let origin = repo.origin_path().to_str().unwrap().to_string();
-    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
-    let clone = forge_side.path().join("clone");
-    run(
-        &clone,
-        "jj",
-        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
-    );
+    let (_forge_side, clone) = forge_clone(&repo);
     run(&clone, "jj", &["new", "main"]);
     std::fs::write(clone.join("bottom.rs"), "// bottom, as reviewed\n").unwrap();
     run(&clone, "jj", &["commit", "-m", "Add bottom (#1)"]);
@@ -782,15 +775,7 @@ fn a_stale_bookmark_is_forgotten_only_once_its_pr_merged() {
             .to_vec();
     push.extend(["git", "push", "--remote", "origin", "--bookmark", "feat"]);
     repo.run_jj(&push);
-    let forge_side = tempfile::TempDir::new().unwrap();
-    let origin = repo.origin_path().to_str().unwrap().to_string();
-    run(forge_side.path(), "jj", &["git", "clone", &origin, "clone"]);
-    let clone = forge_side.path().join("clone");
-    run(
-        &clone,
-        "jj",
-        &["config", "set", "--repo", "user.email", "forge@jjpr.dev"],
-    );
+    let (_forge_side, clone) = forge_clone(&repo);
     run(&clone, "jj", &["bookmark", "track", "feat@origin"]);
     run(&clone, "jj", &["new", "feat"]);
     std::fs::write(clone.join("feat.rs"), "// feat, remote\n").unwrap();
