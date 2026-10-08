@@ -274,7 +274,8 @@ rewrites the whole comment on every submit.
 When a bookmark from the previous comment is gone from the local
 graph, jjpr asks the forge whether its PR merged. A PR that did not
 merge (rebased out of the stack, or closed) drops off the list. When
-that leaves a single live PR with no history, jjpr deletes the comment (or strips the section from the description in
+that leaves a single live PR with no history, jjpr deletes the
+comment (or strips the section from the description in
 `stack_nav = "description"` mode), so an unstacked PR looks like any
 other PR again. Submit only touches the PRs in the stack it was given,
 so after splitting a stack into independent PRs, submit each one to

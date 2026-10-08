@@ -48,9 +48,6 @@ pub trait Jj: Send + Sync {
         let _ = (source, destination);
         anyhow::bail!("rebase_onto_skipping_emptied is not implemented here")
     }
-    /// Abandon every commit in `revset` (`jj abandon`). Restacking drops the
-    /// merged commits a survivor no longer sits on this way. Stubs that never
-    /// restack need not implement it.
     /// `jj rebase -s <source> -d <each destination>`: a merge commit keeps its
     /// other parents while one is swapped for trunk. Stubs that never restack
     /// need not implement it.
@@ -69,6 +66,9 @@ pub trait Jj: Send + Sync {
         let _ = name;
         anyhow::bail!("forget_bookmark is not implemented here")
     }
+    /// Abandon every commit in `revset` (`jj abandon`). Restacking drops the
+    /// merged commits a survivor no longer sits on this way. Stubs that never
+    /// restack need not implement it.
     fn abandon(&self, revset: &str) -> Result<()> {
         let _ = revset;
         anyhow::bail!("abandon is not implemented here")

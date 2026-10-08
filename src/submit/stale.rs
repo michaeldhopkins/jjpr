@@ -6,6 +6,11 @@
 //! the merge, the bookmark has nothing left to do, and `jj bookmark forget`
 //! removes it locally without pushing a deletion. A bookmark whose PR is
 //! open, closed unmerged or unknown is left for the user to judge.
+//!
+//! A merged PR is found by branch name, and a name can be reused: an old PR
+//! from `fix` merged, a new one from `fix` still open. So a bookmark with an
+//! open PR is never forgotten, and when the open PRs cannot be listed,
+//! nothing is.
 
 use crate::forge::{Forge, ForgeKind};
 use crate::jj::Jj;
@@ -19,8 +24,18 @@ pub fn forget_merged(
     repo: &str,
     kind: ForgeKind,
 ) -> Vec<String> {
+    let stale = jj.stale_bookmarks();
+    if stale.is_empty() {
+        return Vec::new();
+    }
+    let Ok(open) = forge.list_open_prs(owner, repo) else {
+        return Vec::new();
+    };
     let mut forgotten = Vec::new();
-    for name in jj.stale_bookmarks() {
+    for name in stale {
+        if open.iter().any(|pr| pr.head.ref_name == name) {
+            continue;
+        }
         let Ok(Some(pr)) = forge.find_merged_pr(owner, repo, &name) else {
             continue;
         };

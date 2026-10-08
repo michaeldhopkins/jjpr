@@ -22,11 +22,13 @@ use jjpr::jj::Jj;
 use jjpr::jj::types::{Bookmark, NarrowedSegment};
 use jjpr::submit::{analyze, plan, resolve, restack};
 
-/// Reports the named branches as merged; every other branch has no PR.
-/// `recent` is what it lists as recently merged, and `None` makes that
-/// listing fail.
+/// Reports the `merged` branches as merged and the `open` ones as open PRs;
+/// every other branch has no PR. `recent` is what it lists as recently
+/// merged; `None` there makes that listing and every merged-PR lookup fail,
+/// and `None` for `open` makes the open listing fail.
 struct MergedForge {
     merged: Vec<&'static str>,
+    open: Option<Vec<&'static str>>,
     lookups: Mutex<Vec<String>>,
     recent: Option<Vec<PullRequest>>,
 }
@@ -63,10 +65,16 @@ fn pr(number: u64, head: &str) -> PullRequest {
 
 impl Forge for MergedForge {
     fn list_open_prs(&self, _: &str, _: &str) -> Result<Vec<PullRequest>> {
-        Ok(vec![])
+        match &self.open {
+            Some(open) => Ok(open.iter().map(|head| pr(2, head)).collect()),
+            None => anyhow::bail!("HTTP 502 from the forge"),
+        }
     }
     fn find_merged_pr(&self, _: &str, _: &str, head: &str) -> Result<Option<PullRequest>> {
         self.lookups.lock().unwrap().push(head.to_string());
+        if self.recent.is_none() {
+            anyhow::bail!("HTTP 502 from the forge");
+        }
         let known = self
             .recent
             .iter()
@@ -256,6 +264,7 @@ fn deleted_merged_bottom_is_dropped_from_the_survivor() {
 
     let forge = MergedForge {
         merged: vec!["bottom"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
@@ -300,6 +309,7 @@ fn kept_merged_bottom_rebases_the_survivor_onto_trunk() {
     assert_eq!(segments.len(), 2);
     let forge = MergedForge {
         merged: vec!["bottom"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
@@ -333,11 +343,13 @@ fn restack_leaves_the_stack_alone_when_it_should() {
     let segments = segments_for(&jj, "top");
     let merged = MergedForge {
         merged: vec!["bottom"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
     let unmerged = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
@@ -382,6 +394,7 @@ fn merge_commit_landing_needs_no_restack() {
     let segments = segments_for(&jj, "top");
     let forge = MergedForge {
         merged: vec!["bottom"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
@@ -408,6 +421,7 @@ fn a_restack_that_conflicts_is_refused_before_pushing() {
     let segments = segments_for(&jj, "top");
     let forge = MergedForge {
         merged: vec!["bottom"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
@@ -460,6 +474,7 @@ fn a_bookmark_deleted_by_an_earlier_fetch_is_found_by_its_head_commit() {
     );
     let forge = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
     };
@@ -494,6 +509,7 @@ fn a_merge_that_changed_the_content_still_restacks_cleanly_by_head_commit() {
     let segments = segments_for(&jj, "top");
     let forge = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
     };
@@ -525,6 +541,7 @@ fn an_unconfirmed_head_commit_leaves_the_stack_alone() {
     ] {
         let forge = MergedForge {
             merged: vec![],
+            open: Some(vec![]),
             lookups: Mutex::new(vec![]),
             recent,
         };
@@ -546,6 +563,7 @@ fn a_dry_run_reports_a_merged_head_commit_without_rebasing() {
     let segments = segments_for(&jj, "top");
     let forge = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
     };
@@ -571,6 +589,7 @@ fn a_bookmark_submit_deleted_with_a_matching_head_restacks_without_conflict() {
     let segments = segments_for(&jj, "top");
     let forge = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
     };
@@ -634,6 +653,7 @@ fn a_deleted_merged_middle_above_a_kept_merged_bottom_is_dropped() {
     let segments = segments_for(&jj, "c");
     let forge = MergedForge {
         merged: vec!["a"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![merged_at("b", b_sha.trim(), "main")]),
     };
@@ -698,6 +718,7 @@ fn a_merge_commit_survivor_keeps_its_other_parent_and_drops_the_merged_one() {
     let segments = segments_for(&jj, "top");
     let forge = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![merged_at("bottom", sha.trim(), "main")]),
     };
@@ -714,7 +735,8 @@ fn a_merge_commit_survivor_keeps_its_other_parent_and_drops_the_merged_one() {
 
 /// `feat` moved on the forge and locally, so after a fetch it is conflicted:
 /// jj cannot say where it points, and jjpr skips it with a warning. Once the
-/// forge says its PR merged, submit forgets it. Unmerged, it stays.
+/// forge says its PR merged, submit forgets it. Unmerged, it stays, and so it
+/// does while a PR from the same name is open or the open PRs can't be listed.
 #[test]
 fn a_stale_bookmark_is_forgotten_only_once_its_pr_merged() {
     if !common::jj_available() {
@@ -755,6 +777,7 @@ fn a_stale_bookmark_is_forgotten_only_once_its_pr_merged() {
 
     let open = MergedForge {
         merged: vec![],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
@@ -765,8 +788,33 @@ fn a_stale_bookmark_is_forgotten_only_once_its_pr_merged() {
         "an unmerged PR keeps its bookmark"
     );
 
+    // The name was reused: an old PR from `feat` merged, a new one is open.
+    let reused = MergedForge {
+        merged: vec!["feat"],
+        open: Some(vec!["feat"]),
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
+    };
+    let forgotten = jjpr::submit::stale::forget_merged(&jj, &reused, "o", "r", ForgeKind::GitHub);
+    assert!(forgotten.is_empty());
+    assert!(listed().contains("feat"), "an open PR keeps its bookmark");
+
+    let unlisted = MergedForge {
+        merged: vec!["feat"],
+        open: None,
+        lookups: Mutex::new(vec![]),
+        recent: Some(vec![]),
+    };
+    let forgotten = jjpr::submit::stale::forget_merged(&jj, &unlisted, "o", "r", ForgeKind::GitHub);
+    assert!(forgotten.is_empty());
+    assert!(
+        listed().contains("feat"),
+        "unlisted open PRs keep the bookmark"
+    );
+
     let merged = MergedForge {
         merged: vec!["feat"],
+        open: Some(vec![]),
         lookups: Mutex::new(vec![]),
         recent: Some(vec![]),
     };
