@@ -9,9 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
 use anyhow::Result;
-use clap::Parser;
 
-use jjpr::cli::{AuthCommands, Cli, Commands, ConfigCommands};
+use jjpr::cli::{AuthCommands, Commands, ConfigCommands};
 use jjpr::config;
 use jjpr::connect::{ResolvedForge, build_forge, find_remote_host, find_repo_root, resolve_forge};
 use jjpr::forge::remote;
@@ -28,7 +27,7 @@ use jjpr::submit::{analyze, execute, plan, resolve, restack};
 use jjpr::undo::{Direction, Options, RecordingForge, RecordingJj};
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = jjpr::cli_parse::parse();
     jjpr::verbose::set_enabled(cli.diagnostics.verbose);
 
     match cli.command {

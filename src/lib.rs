@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cli;
+pub mod cli_parse;
 pub mod clock;
 pub mod config;
 pub mod connect;
