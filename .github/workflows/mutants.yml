@@ -315,7 +315,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      SLICES: 48
+      SLICES: 256
     steps:
       - uses: actions/checkout@v7
 
@@ -348,13 +348,7 @@ jobs:
           k=$(( ${{ github.run_number }} % SLICES ))
           echo "$k" > mutants-slice.txt
           echo "Slice $k of $SLICES"
-          rc=0
-          cargo mutants --no-shuffle -vV --shard "$k/$SLICES" || rc=$?
-          if [ "$rc" -eq 3 ]; then
-            echo "::notice::timeouts counted as caught; see mutants.out/timeout.txt"
-            rc=0
-          fi
-          exit "$rc"
+          MUTANTS_BUDGET_PASSES=1 scripts/mutants-run.sh --no-shuffle -vV --shard "$k/$SLICES"
 
       - name: Summarise
         if: always()
@@ -368,6 +362,10 @@ jobs:
               echo 'No results directory: the run failed before reporting.'
               echo '**Treat this as no coverage, not as a pass.**'
               exit 0
+            fi
+            if [ "$(cat mutants-run-status.txt 2>/dev/null)" = budget ]; then
+              echo '**Stopped at the time budget: part of this slice went untested.**'
+              echo
             fi
             for kind in missed caught unviable timeout; do
               f="mutants.out/$kind.txt"

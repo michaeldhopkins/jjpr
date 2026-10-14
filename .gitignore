@@ -28,3 +28,4 @@
 /fuzz/coverage/
 /fuzz/corpus/*/*
 !/fuzz/corpus/*/seed-*
+/mutants-run-status.txt
