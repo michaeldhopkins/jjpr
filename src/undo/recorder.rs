@@ -469,6 +469,13 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_recorder_names_its_command_so_only_submit_prints_the_undo_hint() {
+        let (_dir, _repo, rec) = setup();
+        assert_eq!(rec.command(), "submit");
+        assert!(super::super::report::after_command(rec.command()).is_some());
+    }
+
+    #[test]
     fn a_command_that_changed_nothing_leaves_no_entry() {
         let (dir, _repo, rec) = setup();
         assert!(!rec.finish(), "nothing to take back, so no hint");

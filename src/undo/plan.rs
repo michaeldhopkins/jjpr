@@ -1136,6 +1136,41 @@ mod tests {
     }
 
     #[test]
+    fn redo_leaves_a_created_pr_that_is_still_open_alone() {
+        let p = plan(
+            &undone(created_pr_entry()),
+            Direction::Redo,
+            &created_pr_observed(2),
+        );
+        assert!(!p.steps.iter().any(|s| matches!(s, Step::Reopen { .. })));
+        assert!(p.kept.is_empty(), "{:?}", p.kept);
+    }
+
+    #[test]
+    fn reopening_a_pr_nobody_touched_names_no_activity() {
+        let e = undone(created_pr_entry());
+        let observed = Observed {
+            branches: branches(&[("b", None), ("main", Some("c0"))]),
+            prs: HashMap::from([(
+                7,
+                SeenPr {
+                    base: "main".into(),
+                    status: Status::Closed,
+                    ..SeenPr::default()
+                },
+            )]),
+            activity: HashMap::from([(7, 0)]),
+            ..Observed::default()
+        };
+        let p = plan(&e, Direction::Redo, &observed);
+        assert!(matches!(
+            p.steps.last(),
+            Some(Step::Reopen { number: 7, .. })
+        ));
+        assert!(p.kept.is_empty(), "{:?}", p.kept);
+    }
+
+    #[test]
     fn redo_names_review_requests_it_sends_again() {
         let e = undone(entry(vec![Action::Reviewers {
             number: 3,
