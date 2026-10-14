@@ -262,8 +262,11 @@ impl Recorder {
 
     /// The attempt failed: the forge refused it, so there is nothing to undo.
     pub fn retract(&self, index: Option<usize>) {
+        let Some(index) = index else {
+            return;
+        };
         let mut inner = self.lock();
-        let (Some(index), Some(mut entry)) = (index, inner.entry.take()) else {
+        let Some(mut entry) = inner.entry.take() else {
             return;
         };
         if index < entry.actions.len() {
@@ -365,9 +368,15 @@ impl Recorder {
 }
 
 fn warn(warned: &AtomicBool, e: &anyhow::Error) {
-    if !warned.swap(true, Ordering::Relaxed) {
-        eprintln!("  Warning: could not write the undo journal; jjpr undo may not work: {e}");
+    if let Some(message) = first_warning(warned, e) {
+        eprintln!("{message}");
     }
+}
+
+fn first_warning(warned: &AtomicBool, e: &anyhow::Error) -> Option<String> {
+    (!warned.swap(true, Ordering::Relaxed)).then(|| {
+        format!("  Warning: could not write the undo journal; jjpr undo may not work: {e}")
+    })
 }
 
 #[cfg(test)]
@@ -709,6 +718,70 @@ pub(crate) mod tests {
         let es = entries(&dir);
         assert_eq!(es.len(), 1, "{es:?}");
         assert_eq!(es[0].merged(), Some(5));
+    }
+
+    #[test]
+    fn the_first_recorded_write_ends_redo() {
+        let (dir, repo, _rec) = setup();
+        let journal = Journal::at(dir.path().to_path_buf());
+        journal
+            .save(&Entry {
+                id: "0".into(),
+                state: State::Undone,
+                ..entry_like()
+            })
+            .unwrap();
+        let rec = Recorder::start(
+            Journal::at(dir.path().to_path_buf()),
+            Box::new(repo.clone()),
+            meta(),
+        );
+        rec.intent(Action::Ready { number: 1 });
+        let es = entries(&dir);
+        assert!(es.iter().all(|e| !e.state.undone()), "{es:?}");
+        assert_eq!(es.len(), 1);
+    }
+
+    #[test]
+    fn a_write_jjpr_could_not_record_is_kept_on_the_entry() {
+        let (dir, _repo, rec) = setup();
+        rec.intent(Action::Ready { number: 1 });
+        rec.missed("a title".into());
+        assert_eq!(entries(&dir)[0].missed, vec!["a title".to_string()]);
+    }
+
+    #[test]
+    fn retracting_past_the_last_action_removes_nothing() {
+        let (dir, _repo, rec) = setup();
+        let i = rec.intent(Action::Ready { number: 1 });
+        rec.retract(Some(1));
+        rec.retract(None);
+        assert_eq!(i, Some(0));
+        assert_eq!(entries(&dir)[0].actions.len(), 1);
+        rec.retract(i);
+        assert!(rec.current().unwrap().actions.is_empty());
+    }
+
+    #[test]
+    fn a_pr_is_ours_only_when_it_is_open_and_on_that_branch() {
+        let (_dir, _repo, rec) = setup();
+        rec.note_prs([&pr(3, "a", "")], false);
+        assert_eq!(rec.open_pr_for("a"), None);
+        rec.note_prs([&pr(4, "b", "")], true);
+        assert_eq!(rec.open_pr_for("a"), None);
+        assert_eq!(rec.open_pr_for("b"), Some(4));
+    }
+
+    #[test]
+    fn the_journal_warning_is_given_once() {
+        let warned = AtomicBool::new(false);
+        let e = anyhow::anyhow!("disk full");
+        let first = first_warning(&warned, &e).unwrap();
+        assert!(first.contains("disk full"), "{first}");
+        assert!(first_warning(&warned, &e).is_none());
+        let again = AtomicBool::new(false);
+        warn(&again, &e);
+        assert!(again.load(Ordering::Relaxed));
     }
 
     fn entry_like() -> Entry {

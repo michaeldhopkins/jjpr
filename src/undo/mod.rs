@@ -363,3 +363,25 @@ pub fn record(repo_root: &Path, meta: Meta) -> std::sync::Arc<Recorder> {
         meta,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::now_secs;
+
+    #[test]
+    fn now_secs_reads_the_wall_clock() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let got = now_secs();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            before <= got && got <= after,
+            "{before} <= {got} <= {after}"
+        );
+    }
+}
