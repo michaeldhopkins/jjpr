@@ -114,6 +114,14 @@ pub trait Jj: Send + Sync {
         Ok(())
     }
 
+    /// Snapshot the working copy only when `@` is in `descendants(source)`, the
+    /// subtree a rebase rooted at `source` moves (and so would snapshot anyway).
+    /// Lets a caller record the user's edits in an operation it can restore to.
+    /// Returns whether it snapshotted.
+    fn snapshot_if_moved_by(&self, _source: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     // --- Operation-log awareness (concurrent-modification recovery) ---
     //
     // A second jj process mutating the same repo (e.g. `jjpr watch` racing a
@@ -140,6 +148,14 @@ pub trait Jj: Send + Sync {
     /// Roll the repo back to `op_id` (`jj op restore`). The recovery primitive:
     /// undo only our own mangling rebase, back to the clean post-fetch op.
     fn restore_operation(&self, _op_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// `restore_operation` without snapshotting or updating the working copy, for
+    /// an `@` that is the same commit at both operations: its unsnapshotted
+    /// edits stay on disk. Fails, restoring nothing, when `@` differs between
+    /// the two operations.
+    fn restore_operation_keeping_working_copy(&self, _op_id: &str) -> Result<()> {
         Ok(())
     }
 

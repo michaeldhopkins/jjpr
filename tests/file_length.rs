@@ -33,7 +33,7 @@ fn pinned() -> HashMap<&'static str, usize> {
         ("src/forge/http.rs", 446),
         ("src/forge/types.rs", 409),
         ("src/main.rs", 1734),
-        ("src/merge/execute.rs", 1071),
+        ("src/merge/execute.rs", 1068),
         ("src/submit/execute.rs", 708),
         ("src/submit/plan.rs", 733),
         ("src/watch.rs", 1197),

@@ -83,12 +83,13 @@ fn reconcile_local_state(
         return warnings;
     }
 
-    // The operation right after fetch — the clean, work-preserving point to roll
-    // a bad rebase back to. We NEVER roll back past this: rolling back to before
-    // the fetch would discard the concurrent process's work, and jj already
-    // preserves both sides' commits in the reconciled state.
-    let post_fetch_op = jj.current_operation_id().ok().filter(|s| !s.is_empty());
-
+    // Merge-commit / rebase-merge landings leave the merged commit in trunk, so
+    // the remaining stack needs only the PR base retarget (reconcile_forge_state).
+    // Skip the rebase+force-push: rewriting descendant SHAs would dismiss
+    // standing approvals for nothing. A squash landing orphans the descendant's
+    // parent, so this is false and the rebase runs.
+    let moved_root = segments.get(seg_idx + 1).map(rebase_root);
+    let moved_root = moved_root.filter(|r| !jj.is_rooted_in(r, effective_base).unwrap_or(false));
     // A concurrent reconcile during the fetch that left the stack divergent: our
     // work and the other process's work are both present but divergent. Do NOT
     // rebase on top of that — that is the mangle. Gate, preserving both, retry.
@@ -96,20 +97,16 @@ fn reconcile_local_state(
         return vec![concurrent_gate_warning(false, &ids)];
     }
 
-    // Merge-commit / rebase-merge landings leave the merged commit in trunk, so
-    // the remaining stack is already based on `effective_base` and needs no
-    // rebase — only the PR base retarget, which reconcile_forge_state does
-    // separately. Skip the rebase+force-push: rewriting descendant SHAs here
-    // would dismiss standing approvals under branch protection for nothing.
-    // (A squash landing drops the merged commit from trunk, so the descendant's
-    // parent is orphaned and this is false — the rebase genuinely runs.)
-    if seg_idx + 1 < segments.len() {
-        let root = rebase_root(&segments[seg_idx + 1]);
-        if jj.is_rooted_in(root, effective_base).unwrap_or(false) {
-            println!("  Remaining stack already based on {effective_base}; skipping rebase");
-            return warnings;
-        }
+    if moved_root.is_none() && seg_idx + 1 < segments.len() {
+        println!("  Remaining stack already based on {effective_base}; skipping rebase");
+        return warnings;
     }
+    let scope =
+        super::restore_point::snapshot_scope(strategy, &segments[seg_idx + 1..], moved_root);
+    let restore_point = match super::restore_point::capture(jj, scope.as_deref()) {
+        Ok(point) => point,
+        Err(e) => return vec![mk(e)],
+    };
 
     // Track which bookmarks to push. With merge strategy, only push bookmarks
     // whose merge_into succeeded and are conflict-free.
@@ -266,9 +263,9 @@ fn reconcile_local_state(
     // clean post-fetch op (which preserves both our work and the fetched changes)
     // and retry. Never publish a mangled tree, and never roll back past the fetch.
     if let Divergence::Present(ids) = divergence(jj) {
-        return match post_fetch_op.as_deref() {
+        return match restore_point.as_ref() {
             // Restore succeeded — the tree is clean again.
-            Some(op) if jj.restore_operation(op).is_ok() => {
+            Some(point) if point.restore(jj).is_ok() => {
                 vec![concurrent_gate_warning(true, &[])]
             }
             // Restore failed (likely the same lock contention) or we never
@@ -3879,6 +3876,13 @@ mod tests {
         assert!(BlockReason::ConcurrentModification.is_transient());
     }
 
+    /// Where `@` sits relative to the subtree the reconcile rebases.
+    #[derive(PartialEq)]
+    enum Checkout {
+        InMovedSubtree,
+        Elsewhere,
+    }
+
     /// Scriptable reconcile stub. `current_operation_id` returns the post-fetch op
     /// "pf" (the restore target); `divergent` is the standing divergent-change set
     /// and `divergent_after_rebase` the divergence a mangling rebase introduces.
@@ -3892,6 +3896,9 @@ mod tests {
         rebased: Mutex<bool>,
         restored: Mutex<Vec<String>>,
         pushed: Mutex<Vec<String>>,
+        order: Mutex<Vec<String>>,
+        snapshot_error: Option<&'static str>,
+        checkout: Checkout,
     }
     impl FakeReconcileJj {
         fn new() -> Self {
@@ -3904,6 +3911,9 @@ mod tests {
                 rebased: Mutex::new(false),
                 restored: Mutex::new(vec![]),
                 pushed: Mutex::new(vec![]),
+                order: Mutex::new(vec![]),
+                snapshot_error: None,
+                checkout: Checkout::InMovedSubtree,
             }
         }
         fn divergent(mut self, v: &[&str]) -> Self {
@@ -3930,7 +3940,18 @@ mod tests {
         }
     }
     impl Jj for FakeReconcileJj {
+        fn snapshot_if_moved_by(&self, source: &str) -> Result<bool> {
+            if let Some(e) = self.snapshot_error {
+                anyhow::bail!("{e}");
+            }
+            self.order
+                .lock()
+                .expect("poisoned")
+                .push(format!("snapshot {source}"));
+            Ok(self.checkout == Checkout::InMovedSubtree)
+        }
         fn current_operation_id(&self) -> Result<String> {
+            self.order.lock().expect("poisoned").push("op".to_string());
             Ok("pf".to_string())
         }
         fn divergent_change_ids(&self) -> Result<Vec<String>> {
@@ -3949,10 +3970,21 @@ mod tests {
         }
         fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
             *self.rebased.lock().expect("poisoned") = true;
+            self.order
+                .lock()
+                .expect("poisoned")
+                .push("rebase".to_string());
             Ok(())
         }
         fn restore_operation(&self, op: &str) -> Result<()> {
             self.restored.lock().expect("poisoned").push(op.to_string());
+            Ok(())
+        }
+        fn restore_operation_keeping_working_copy(&self, op: &str) -> Result<()> {
+            self.restored
+                .lock()
+                .expect("poisoned")
+                .push(format!("keep {op}"));
             Ok(())
         }
         fn is_rooted_in(&self, _root: &str, _base: &str) -> Result<bool> {
@@ -3981,6 +4013,7 @@ mod tests {
             Ok(vec!["c".into()])
         }
         fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+            self.order.lock().expect("poisoned").push("merge".into());
             Ok(())
         }
         fn is_conflicted(&self, _: &str) -> Result<bool> {
@@ -4041,6 +4074,13 @@ mod tests {
     }
 
     fn reconcile_two(jj: &dyn Jj) -> Vec<LocalDivergenceWarning> {
+        reconcile_two_with(jj, crate::config::ReconcileStrategy::Rebase)
+    }
+
+    fn reconcile_two_with(
+        jj: &dyn Jj,
+        strategy: crate::config::ReconcileStrategy,
+    ) -> Vec<LocalDivergenceWarning> {
         let segments = vec![make_segment("bottom"), make_segment("top")];
         let gh = RecordingGitHub::new();
         reconcile_local_state(
@@ -4053,7 +4093,7 @@ mod tests {
             0,
             "main",
             "origin",
-            crate::config::ReconcileStrategy::Rebase,
+            strategy,
             ForgeKind::GitHub,
         )
     }
@@ -4101,6 +4141,96 @@ mod tests {
         assert!(
             jj.pushed.lock().unwrap().is_empty(),
             "must not push a mangled tree"
+        );
+    }
+
+    #[test]
+    fn reconcile_snapshots_the_moved_subtree_before_capturing_the_restore_point() {
+        let jj = FakeReconcileJj::new().divergent_after_rebase(&["ch_top"]);
+        reconcile_two(&jj);
+
+        assert_eq!(
+            *jj.order.lock().unwrap(),
+            vec!["snapshot ch_top", "op", "rebase"],
+            "the user's edits must be in the operation a restore returns to"
+        );
+        assert_eq!(*jj.restored.lock().unwrap(), vec!["pf".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_does_not_snapshot_when_the_rebase_is_skipped() {
+        let jj = FakeReconcileJj::new().rooted_in_base();
+        reconcile_two(&jj);
+
+        assert!(jj.order.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_does_not_snapshot_a_divergent_stack() {
+        let jj = FakeReconcileJj::new().divergent(&["ch_x"]);
+        reconcile_two(&jj);
+
+        assert!(jj.order.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_restores_without_touching_a_checkout_the_rebase_left_alone() {
+        let mut jj = FakeReconcileJj::new().divergent_after_rebase(&["ch_top"]);
+        jj.checkout = Checkout::Elsewhere;
+        reconcile_two(&jj);
+
+        assert_eq!(*jj.restored.lock().unwrap(), vec!["keep pf".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_merge_strategy_snapshots_before_capturing_the_restore_point() {
+        let jj = FakeReconcileJj::new().divergent_after_rebase(&["ch_top"]);
+        reconcile_two_with(&jj, crate::config::ReconcileStrategy::Merge);
+
+        assert_eq!(
+            *jj.order.lock().unwrap(),
+            vec!["snapshot top", "op", "merge"]
+        );
+    }
+
+    #[test]
+    fn reconcile_stops_before_rebasing_when_the_snapshot_fails() {
+        let mut jj = FakeReconcileJj::new();
+        jj.snapshot_error = Some("working copy is locked");
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(warnings[0].message.contains("snapshot"), "got {warnings:?}");
+        assert!(!*jj.rebased.lock().unwrap());
+        assert!(jj.pushed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_does_not_snapshot_when_nothing_follows_the_merged_segment() {
+        let jj = FakeReconcileJj::new();
+        let segments = vec![make_segment("only")];
+        let gh = RecordingGitHub::new();
+        reconcile_local_state(
+            &jj,
+            &gh,
+            "o",
+            "r",
+            None,
+            &segments,
+            0,
+            "main",
+            "origin",
+            crate::config::ReconcileStrategy::Merge,
+            ForgeKind::GitHub,
+        );
+        assert!(
+            !jj.order
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("snapshot")),
+            "got {:?}",
+            jj.order.lock().unwrap()
         );
     }
 

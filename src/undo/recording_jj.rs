@@ -134,6 +134,9 @@ impl<J: Jj> Jj for RecordingJj<J> {
     fn snapshot(&self) -> Result<()> {
         self.recorder.around(|| self.inner.snapshot())
     }
+    fn snapshot_if_moved_by(&self, source: &str) -> Result<bool> {
+        self.inner.snapshot_if_moved_by(source)
+    }
     fn current_operation_id(&self) -> Result<String> {
         self.inner.current_operation_id()
     }
@@ -142,5 +145,34 @@ impl<J: Jj> Jj for RecordingJj<J> {
     }
     fn restore_operation(&self, op_id: &str) -> Result<()> {
         self.recorder.around(|| self.inner.restore_operation(op_id))
+    }
+    fn restore_operation_keeping_working_copy(&self, op_id: &str) -> Result<()> {
+        self.recorder
+            .around(|| self.inner.restore_operation_keeping_working_copy(op_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    fn fn_names(source: &str) -> BTreeSet<&str> {
+        source
+            .split("fn ")
+            .skip(1)
+            .filter_map(|rest| rest.split(['(', '<']).next())
+            .filter(|name| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .collect()
+    }
+
+    /// A trait method left to its default here bypasses `inner`, so a recorded
+    /// command would silently call the stub default instead of jj.
+    #[test]
+    fn every_jj_method_is_forwarded() {
+        let trait_methods = fn_names(include_str!("../jj/mod.rs"));
+        let forwarded = fn_names(include_str!("recording_jj.rs"));
+        assert!(trait_methods.len() > 20, "found {trait_methods:?}");
+        let missing: Vec<_> = trait_methods.difference(&forwarded).collect();
+        assert!(missing.is_empty(), "not forwarded: {missing:?}");
     }
 }

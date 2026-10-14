@@ -12,6 +12,8 @@ use super::types::{Bookmark, GitRemote, LogEntry};
 use super::version;
 use crate::verbose;
 
+mod restore;
+
 /// Real jj implementation that shells out to the jj binary.
 pub struct JjRunner {
     repo_path: PathBuf,
@@ -119,6 +121,14 @@ impl Jj for JjRunner {
         // current edits, exactly as any interactive jj command would.
         self.run_jj_touching_wc(&["status"])?;
         Ok(())
+    }
+
+    fn snapshot_if_moved_by(&self, source: &str) -> Result<bool> {
+        let moves = self.working_copy_in_subtree(source).unwrap_or(true);
+        if moves {
+            self.snapshot()?;
+        }
+        Ok(moves)
     }
 
     fn get_status_bookmarks(&self, all_owned_stacks: bool) -> Result<Vec<Bookmark>> {
@@ -374,6 +384,10 @@ impl Jj for JjRunner {
         Ok(verbose::jj(&["op", "restore", op_id], || {
             jj_op_restore(&self.repo_path, op_id)
         })?)
+    }
+
+    fn restore_operation_keeping_working_copy(&self, op_id: &str) -> Result<()> {
+        self.restore_keeping_working_copy(op_id)
     }
 }
 

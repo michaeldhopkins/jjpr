@@ -563,3 +563,201 @@ fn proceeding_through_a_nondivergent_reconcile_stays_clean() {
         r.descriptions()
     );
 }
+
+/// A stack with `@` on its top segment, the bottom squash-merged into master,
+/// and an edit on disk that no jj command has snapshotted yet. Returns the
+/// top segment's root change id.
+fn stack_with_unsnapshotted_edit(r: &Repo) -> String {
+    r.write("base.txt", "b\n");
+    r.jj(&["describe", "-m", "BASE"]);
+    r.jj(&["bookmark", "create", "master", "-r", "@"]);
+    r.jj(&["new", "-m", "A"]);
+    r.write("a.txt", "a\n");
+    r.jj(&["bookmark", "create", "botA", "-r", "@"]);
+    r.jj(&["new", "-m", "B"]);
+    r.write("b.txt", "b\n");
+    r.jj(&["bookmark", "create", "topB", "-r", "@"]);
+    let b_change = r.out(&[
+        "log",
+        "-r",
+        "topB",
+        "--no-graph",
+        "-T",
+        "change_id.short(8)",
+    ]);
+    r.jj(&["new", "master", "-m", "squash A"]);
+    r.write("a.txt", "a\n");
+    r.jj(&["bookmark", "set", "master", "-r", "@"]);
+    r.jj(&["edit", "topB"]);
+    r.write("wip.txt", "unsaved\n");
+    b_change
+}
+
+fn wip_on_disk(r: &Repo) -> Option<String> {
+    std::fs::read_to_string(r.path().join("wip.txt")).ok()
+}
+
+/// The premise of snapshotting before the restore point: a rebase that moves
+/// `@` snapshots the edit into its own operation, so restoring to an operation
+/// captured before that snapshot takes the edit off the disk.
+#[test]
+fn restoring_past_the_rebase_snapshot_loses_an_unsnapshotted_edit() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    let b_change = stack_with_unsnapshotted_edit(&r);
+    let runner = r.runner();
+    let post_fetch = r.current_op();
+    runner.rebase_onto(&b_change, "master").unwrap();
+    runner.restore_operation(&post_fetch).unwrap();
+    assert_eq!(
+        wip_on_disk(&r),
+        None,
+        "jj changed: the edit survived the restore"
+    );
+}
+
+/// With the subtree snapshotted before the restore point is captured, rolling
+/// the rebase back keeps the user's edit.
+#[test]
+fn snapshotting_the_moved_subtree_first_keeps_the_edit_through_a_restore() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    let b_change = stack_with_unsnapshotted_edit(&r);
+    let runner = r.runner();
+    assert!(runner.snapshot_if_moved_by(&b_change).unwrap());
+    let post_fetch = r.current_op();
+    runner.rebase_onto(&b_change, "master").unwrap();
+    runner.restore_operation(&post_fetch).unwrap();
+    assert_eq!(wip_on_disk(&r).as_deref(), Some("unsaved\n"));
+}
+
+/// `@` outside the rebased subtree: nothing is snapshotted, so the operation
+/// log does not move.
+#[test]
+fn snapshot_if_moved_by_leaves_an_unrelated_checkout_alone() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    let b_change = stack_with_unsnapshotted_edit(&r);
+    r.jj(&["new", "master"]);
+    r.write("other.txt", "elsewhere\n");
+    let before = r.current_op();
+    assert!(!r.runner().snapshot_if_moved_by(&b_change).unwrap());
+    assert_eq!(r.current_op(), before);
+}
+
+/// A scope jj cannot evaluate counts as reaching `@`: snapshotting needlessly
+/// costs an operation, while skipping a needed one loses the edit.
+#[test]
+fn an_unreadable_scope_snapshots_anyway() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    stack_with_unsnapshotted_edit(&r);
+    let before = r.current_op();
+    assert!(
+        r.runner()
+            .snapshot_if_moved_by("no_such_bookmark_zz")
+            .unwrap()
+    );
+    assert_ne!(r.current_op(), before);
+}
+
+/// `@` outside the rebased subtree, with an unsnapshotted edit. A plain restore
+/// snapshots the edit into a new operation and then checks out the restored
+/// `@`, which never had it.
+#[test]
+fn a_plain_restore_loses_an_edit_outside_the_rebased_subtree() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    let b_change = stack_with_unsnapshotted_edit(&r);
+    r.jj(&["new", "master"]);
+    r.write("other.txt", "elsewhere\n");
+    let runner = r.runner();
+    assert!(!runner.snapshot_if_moved_by(&b_change).unwrap());
+    let post_fetch = r.current_op();
+    runner.rebase_onto(&b_change, "master").unwrap();
+    runner.restore_operation(&post_fetch).unwrap();
+    assert!(
+        !r.path().join("other.txt").exists(),
+        "jj changed: the edit survived a plain restore"
+    );
+}
+
+/// The same restore leaving the working copy alone keeps the edit, and the
+/// next jj command snapshots it into `@` as usual.
+#[test]
+fn restoring_without_touching_the_working_copy_keeps_an_edit_outside_the_subtree() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    let b_change = stack_with_unsnapshotted_edit(&r);
+    r.jj(&["new", "master"]);
+    r.write("other.txt", "elsewhere\n");
+    let runner = r.runner();
+    assert!(!runner.snapshot_if_moved_by(&b_change).unwrap());
+    let post_fetch = r.current_op();
+    runner.rebase_onto(&b_change, "master").unwrap();
+    runner
+        .restore_operation_keeping_working_copy(&post_fetch)
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(r.path().join("other.txt"))
+            .ok()
+            .as_deref(),
+        Some("elsewhere\n")
+    );
+    let status = r.jj(&["status"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let files = r.out(&["diff", "--name-only", "-r", "@"]);
+    assert_eq!(files.trim(), "other.txt");
+}
+
+/// The rewrite decides for itself whether to touch the working copy. When it
+/// does after the restore point said it would not (a failed check falls back to
+/// touching it), the edit is recorded only in a later `@`; restoring around the
+/// working copy would leave it stale, and updating it would take the edit off
+/// the disk. The restore refuses instead, and the edit stays where it is.
+#[test]
+fn a_restore_around_the_working_copy_refuses_once_the_checkout_has_moved() {
+    if !jj_available() {
+        return;
+    }
+    let r = Repo::new();
+    let b_change = stack_with_unsnapshotted_edit(&r);
+    r.jj(&["new", "master"]);
+    r.write("other.txt", "elsewhere\n");
+    let runner = r.runner();
+    assert!(!runner.snapshot_if_moved_by(&b_change).unwrap());
+    let post_fetch = r.current_op();
+    r.jj(&["rebase", "-s", &b_change, "-d", "master"]);
+    let err = runner
+        .restore_operation_keeping_working_copy(&post_fetch)
+        .unwrap_err();
+    assert!(err.to_string().contains("working copy"), "got {err}");
+    assert_eq!(
+        std::fs::read_to_string(r.path().join("other.txt"))
+            .ok()
+            .as_deref(),
+        Some("elsewhere\n")
+    );
+    let status = r.jj(&["status"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
