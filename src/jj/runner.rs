@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use vcs_runner::{
@@ -7,12 +8,14 @@ use vcs_runner::{
 };
 
 use super::Jj;
+use super::fetch::{Checkout, fetch_remotes};
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
 use super::{revset, version};
 use crate::verbose;
 
 mod restore;
+mod trunk;
 
 /// Real jj implementation that shells out to the jj binary.
 pub struct JjRunner {
@@ -28,6 +31,9 @@ pub struct JjRunner {
     /// The forge's remote, when known: the one remote a fetch must reach.
     /// Unset, a fetch takes every remote in one call and any failure is fatal.
     fetch_remote: Option<String>,
+    /// Set once the command snapshots the checkout on purpose (submit, merge),
+    /// after which its fetch updates the checkout too (see `fetch::Checkout`).
+    owns_working_copy: AtomicBool,
 }
 
 impl JjRunner {
@@ -45,6 +51,7 @@ impl JjRunner {
             owned_revset: "mine()".to_string(),
             warned_stale: Default::default(),
             fetch_remote: None,
+            owns_working_copy: Default::default(),
         })
     }
 
@@ -111,7 +118,14 @@ impl JjRunner {
 impl Jj for JjRunner {
     fn git_fetch(&self) -> Result<()> {
         let required = self.fetch_remote.as_deref();
-        super::fetch::fetch_remotes(&self.repo_path, required, || self.get_git_remotes())
+        let checkout = if self.owns_working_copy.load(Ordering::Relaxed) {
+            Checkout::Update
+        } else {
+            Checkout::Ignore
+        };
+        fetch_remotes(&self.repo_path, required, checkout, || {
+            self.get_git_remotes()
+        })
     }
 
     fn snapshot(&self) -> Result<()> {
@@ -120,13 +134,14 @@ impl Jj for JjRunner {
         // jjpr snapshots on purpose — so a user-invoked command captures their
         // current edits, exactly as any interactive jj command would.
         self.run_jj_touching_wc(&["status"])?;
+        self.owns_working_copy.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     fn snapshot_if_moved_by(&self, source: &str) -> Result<bool> {
         let moves = self.working_copy_in_subtree(source).unwrap_or(true);
         if moves {
-            self.snapshot()?;
+            self.run_jj_touching_wc(&["status"])?;
         }
         Ok(moves)
     }
@@ -199,29 +214,7 @@ impl Jj for JjRunner {
     }
 
     fn get_default_branch(&self) -> Result<String> {
-        if let Ok(alias) = self.run_jj(&["config", "get", r#"revset-aliases."trunk()""#]) {
-            let alias = alias.trim();
-            if let Some((name, _remote)) = alias.split_once('@')
-                && !name.is_empty()
-                && !name.contains(|c: char| c.is_whitespace() || c == '(' || c == '|')
-            {
-                return Ok(name.to_string());
-            }
-        }
-
-        let output = self.run_jj(&[
-            "log",
-            "--revisions",
-            "trunk()",
-            "--no-graph",
-            "--limit",
-            "1",
-            "--template",
-            templates::TRUNK_BOOKMARKS_TEMPLATE,
-        ])?;
-
-        templates::parse_default_branch(&output)
-            .ok_or_else(|| anyhow::anyhow!("could not determine default branch"))
+        self.default_branch()
     }
 
     fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
@@ -407,6 +400,22 @@ mod tests {
             .current_dir(path)
             .output()
             .expect("failed to init jj repo");
+    }
+
+    /// Only a deliberate snapshot hands the checkout to the fetch: the one a
+    /// rebase takes on the way (watch's) leaves later fetches ignoring it.
+    #[test]
+    fn only_a_deliberate_snapshot_lets_the_fetch_update_the_checkout() {
+        if !jj_available() {
+            return;
+        }
+        let temp = tempfile::TempDir::new().unwrap();
+        init_jj_repo(temp.path());
+        let runner = JjRunner::new(temp.path().to_path_buf()).unwrap();
+        assert!(runner.snapshot_if_moved_by("@").unwrap());
+        assert!(!runner.owns_working_copy.load(Ordering::Relaxed));
+        runner.snapshot().unwrap();
+        assert!(runner.owns_working_copy.load(Ordering::Relaxed));
     }
 
     #[test]
