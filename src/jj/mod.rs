@@ -1,4 +1,5 @@
 mod fetch;
+pub mod revset;
 pub mod runner;
 pub mod stale;
 pub mod templates;
@@ -11,6 +12,11 @@ pub use types::*;
 use anyhow::Result;
 
 /// Trait abstracting jj operations for testability.
+///
+/// A parameter named for a revset (`source`, `destination`, `root`, `base`,
+/// `revset`) is a revset, built with [`revset`]: a bookmark name passed there
+/// must go through [`revset::symbol`]. A parameter named for a bookmark is a
+/// name, which the implementation quotes.
 pub trait Jj: Send + Sync {
     fn git_fetch(&self) -> Result<()>;
     /// The configured local `user.email`, or empty if unset. Seeds the set of
@@ -74,8 +80,9 @@ pub trait Jj: Send + Sync {
         let _ = revset;
         anyhow::bail!("abandon is not implemented here")
     }
-    /// Create a merge commit combining `bookmark` and `dest`, then move the
-    /// bookmark to it. Used for merge-based reconciliation (avoids force pushes).
+    /// Create a merge commit combining the bookmarks named `bookmark` and
+    /// `dest` (names, not revsets), then move the bookmark to it. Used for
+    /// merge-based reconciliation (avoids force pushes).
     fn merge_into(&self, bookmark: &str, dest: &str) -> Result<()>;
 
     /// True if every parent of `root` is already an ancestor of `base` — i.e.

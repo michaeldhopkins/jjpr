@@ -9,8 +9,8 @@ use crate::forge::http::HttpError;
 use crate::forge::types::{MergeMethod, PullRequest};
 use crate::forge::{Forge, ForgeKind};
 use crate::hints;
-use crate::jj::Jj;
 use crate::jj::types::NarrowedSegment;
+use crate::jj::{Jj, revset};
 
 use super::plan::{BlockReason, MergePlan, PrMergeStatus, evaluate_segment};
 
@@ -89,7 +89,8 @@ fn reconcile_local_state(
     // standing approvals for nothing. A squash landing orphans the descendant's
     // parent, so this is false and the rebase runs.
     let moved_root = segments.get(seg_idx + 1).map(rebase_root);
-    let moved_root = moved_root.filter(|r| !jj.is_rooted_in(r, effective_base).unwrap_or(false));
+    let base = revset::symbol(effective_base);
+    let moved_root = moved_root.filter(|r| !jj.is_rooted_in(r, &base).unwrap_or(false));
     // A concurrent reconcile during the fetch that left the stack divergent: our
     // work and the other process's work are both present but divergent. Do NOT
     // rebase on top of that — that is the mangle. Gate, preserving both, retry.
@@ -206,7 +207,7 @@ fn reconcile_local_state(
             let root = rebase_root(next_segment);
 
             println!("  Rebasing remaining stack onto {effective_base}...");
-            if let Err(e) = jj.rebase_onto(root, effective_base) {
+            if let Err(e) = jj.rebase_onto(root, &base) {
                 warnings.push(mk(format!("Failed to rebase remaining stack: {e}")));
                 return warnings;
             }
@@ -583,10 +584,9 @@ pub fn rebase_root(segment: &NarrowedSegment) -> &str {
 ///
 /// `change_id()` requires jj 0.31; jjpr already requires 0.36.
 fn segment_range(segment: &NarrowedSegment) -> String {
-    format!(
-        "change_id({})::{}",
-        rebase_root(segment),
-        segment.bookmark.name
+    revset::dag_range(
+        &revset::change_id(rebase_root(segment)),
+        &revset::symbol(&segment.bookmark.name),
     )
 }
 
@@ -1389,10 +1389,9 @@ mod tests {
             Ok(())
         }
         fn first_conflict(&self, revset: &str) -> Result<Option<String>> {
-            let hit = self
-                .conflicted
-                .iter()
-                .find(|n| revset == n.as_str() || revset.ends_with(&format!("::{n}")));
+            let hit = self.conflicted.iter().find(|n| {
+                revset == n.as_str() || revset.ends_with(&format!("::({})", revset::symbol(n)))
+            });
             Ok(hit.map(|n| format!("ch_{n}")))
         }
         fn is_conflicted(&self, revset: &str) -> Result<bool> {
@@ -1406,7 +1405,7 @@ mod tests {
             Ok(self
                 .conflicted
                 .iter()
-                .any(|n| revset == n || revset.ends_with(&format!("::{n}"))))
+                .any(|n| revset == n || revset.ends_with(&format!("::({})", revset::symbol(n)))))
         }
     }
 
@@ -1599,7 +1598,7 @@ mod tests {
         assert!(
             jj_calls
                 .iter()
-                .any(|c| c.starts_with("rebase:ch_profile:main"))
+                .any(|c| c.starts_with(r#"rebase:ch_profile:"main""#))
         );
         assert!(jj_calls.iter().any(|c| c == "push:profile:origin"));
 
@@ -1790,7 +1789,7 @@ mod tests {
         assert!(
             jj.calls().iter().any(|c| {
                 c.starts_with("is_conflicted:")
-                    && c.contains("::profile")
+                    && c.contains(r#"::("profile")"#)
                     && c.contains("change_id(")
             }),
             "should screen the segment range divergence-safely, not the bare bookmark: {:?}",
@@ -2052,11 +2051,11 @@ mod tests {
         // Rebasing from the tip would orphan c_middle and c_oldest.
         let jj_calls = jj.calls();
         assert!(
-            jj_calls.iter().any(|c| c == "rebase:ch_oldest:main"),
+            jj_calls.iter().any(|c| c == r#"rebase:ch_oldest:"main""#),
             "should rebase from oldest commit in segment, got: {jj_calls:?}"
         );
         assert!(
-            !jj_calls.iter().any(|c| c == "rebase:ch_profile:main"),
+            !jj_calls.iter().any(|c| c == r#"rebase:ch_profile:"main""#),
             "should NOT rebase from bookmark tip: {jj_calls:?}"
         );
     }
@@ -2403,7 +2402,7 @@ mod tests {
                 // First bookmark in the remaining stack has conflicts. The
                 // reconcile screens the segment's `<root>::<bookmark>` range
                 // rather than the bare bookmark, so match either form.
-                Ok(revset == "profile" || revset.ends_with("::profile"))
+                Ok(revset == "profile" || revset.ends_with(r#"::("profile")"#))
             }
             fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
                 Ok(vec![])
@@ -3050,7 +3049,7 @@ mod tests {
         assert!(
             jj.calls()
                 .iter()
-                .any(|c| c == "rebase:ch_profile:coworker-feat"),
+                .any(|c| c == r#"rebase:ch_profile:"coworker-feat""#),
             "should rebase onto stack_base: {:?}",
             jj.calls()
         );
@@ -4218,7 +4217,7 @@ mod tests {
 
         assert_eq!(
             *jj.order.lock().unwrap(),
-            vec!["snapshot top", "op", "merge"]
+            vec![r#"snapshot ("top")"#, "op", "merge"]
         );
     }
 

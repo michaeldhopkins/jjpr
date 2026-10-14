@@ -9,7 +9,7 @@ use vcs_runner::{
 use super::Jj;
 use super::templates::{self, BOOKMARK_TEMPLATE, LOG_TEMPLATE};
 use super::types::{Bookmark, GitRemote, LogEntry};
-use super::version;
+use super::{revset, version};
 use crate::verbose;
 
 mod restore;
@@ -102,7 +102,7 @@ impl JjRunner {
     /// working copy. Checked working-copy-agnostically (via `run_jj`) so the
     /// check itself never snapshots the user's uncommitted edits.
     fn working_copy_in_subtree(&self, source: &str) -> Result<bool> {
-        let revset = format!("@ & descendants({source})");
+        let revset = revset::working_copy_under(source);
         let out = self.run_jj(&["log", "-r", &revset, "--no-graph", "-T", r#""x""#])?;
         Ok(!out.trim().is_empty())
     }
@@ -137,11 +137,12 @@ impl Jj for JjRunner {
         // needs only `@`'s ancestry; `::mine()` (ancestors of every commit you
         // authored) is a large, wasted closure there, so add it only when we
         // must also find your other stacks by name (positional / --all).
-        let revset = if all_owned_stacks {
-            format!("::(@ | ({})) ~ trunk()", self.owned_revset)
+        let heads = if all_owned_stacks {
+            revset::working_copy_or(&self.owned_revset)
         } else {
-            "::@ ~ trunk()".to_string()
+            "@".to_string()
         };
+        let revset = revset::ancestors_off_trunk(&heads);
         let output = self.run_jj(&[
             "bookmark",
             "list",
@@ -164,7 +165,7 @@ impl Jj for JjRunner {
     }
 
     fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
-        let revset = format!("({}) ~ trunk()", self.owned_revset);
+        let revset = revset::off_trunk(&self.owned_revset);
         let output = self.run_jj(&[
             "bookmark",
             "list",
@@ -179,7 +180,7 @@ impl Jj for JjRunner {
     }
 
     fn get_changes_to_commit(&self, to_commit_id: &str) -> Result<Vec<LogEntry>> {
-        let revset = format!(r#"trunk().."{to_commit_id}""#);
+        let revset = revset::range(revset::TRUNK, &revset::symbol(to_commit_id));
 
         let output = self.run_jj(&[
             "log",
@@ -226,7 +227,8 @@ impl Jj for JjRunner {
     fn push_bookmark(&self, name: &str, remote: &str) -> Result<()> {
         // A never-pushed bookmark needs a setting on jj 0.36/0.37 (see version.rs).
         let mut args = version::push_new_bookmark_args(version::installed_jj_version()).to_vec();
-        args.extend(["git", "push", "--remote", remote, "--bookmark", name]);
+        let pattern = revset::exact_name(name);
+        args.extend(["git", "push", "--remote", remote, "--bookmark", &pattern]);
         self.run_jj(&args)?;
         Ok(())
     }
@@ -270,7 +272,7 @@ impl Jj for JjRunner {
     }
 
     fn forget_bookmark(&self, name: &str) -> Result<()> {
-        self.run_jj(&["bookmark", "forget", name])?;
+        self.run_jj(&["bookmark", "forget", &revset::exact_name(name)])?;
         self.warned_stale.remove(name);
         Ok(())
     }
@@ -290,7 +292,7 @@ impl Jj for JjRunner {
         // Parents of `root` that are NOT ancestors of `base`. Empty ⇒ every
         // parent is already under `base`, so the subtree sits cleanly on it.
         // Working-copy-agnostic (via run_jj) so the check never snapshots edits.
-        let revset = format!("parents({root}) ~ ::{base}");
+        let revset = revset::parents_outside(root, base);
         let out = self.run_jj(&["log", "-r", &revset, "--no-graph", "-T", r#""x""#])?;
         Ok(out.trim().is_empty())
     }
@@ -301,9 +303,11 @@ impl Jj for JjRunner {
         // user's `@` is on the bookmark being advanced. `--no-edit` never moves
         // `@`, so this never strands; it just controls whether their WIP is
         // folded into the merge. The bookmark move never touches the WC.
-        self.run_stack_op(bookmark, &["new", "--no-edit", "-m", &msg, bookmark, dest])?;
-        let revset = format!("children({bookmark}) & children({dest})");
-        self.run_jj(&["bookmark", "set", bookmark, "-r", &revset])?;
+        let tip = revset::symbol(bookmark);
+        let base = revset::symbol(dest);
+        self.run_stack_op(&tip, &["new", "--no-edit", "-m", &msg, &tip, &base])?;
+        let merge = revset::common_children(&tip, &base);
+        self.run_jj(&["bookmark", "set", &tip, "-r", &merge])?;
         Ok(())
     }
 
@@ -312,7 +316,7 @@ impl Jj for JjRunner {
         // to resolve a divergent symbol ("Change ID <x> is divergent"), which is
         // exactly the case this exists to count. The `all:` prefix jjpr used before
         // did not help (it only lifted the one-revision limit) and jj 0.38 removed it.
-        let revset = format!("change_id({change_id})");
+        let revset = revset::change_id(change_id);
         let output = self.run_jj(&[
             "log",
             "-r",
@@ -329,7 +333,7 @@ impl Jj for JjRunner {
     }
 
     fn first_conflict(&self, revset: &str) -> Result<Option<String>> {
-        let roots = format!("roots(conflicts() & ({revset}))");
+        let roots = revset::first_conflicts_in(revset);
         let out = self.run_jj(&[
             "log",
             "-r",
@@ -351,7 +355,7 @@ impl Jj for JjRunner {
         let output = self.run_jj(&[
             "log",
             "-r",
-            &format!("conflicts() & ({revset})"),
+            &revset::conflicts_in(revset),
             "--no-graph",
             "-T",
             r#""x""#,

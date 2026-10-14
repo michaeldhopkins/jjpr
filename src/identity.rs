@@ -26,11 +26,7 @@ impl Identity {
         if self.emails.is_empty() {
             return "mine()".to_string();
         }
-        self.emails
-            .iter()
-            .map(|email| format!(r#"author(exact:"{}")"#, escape_revset_string(email)))
-            .collect::<Vec<_>>()
-            .join(" | ")
+        crate::jj::revset::any_author(&self.emails)
     }
 
     /// The free, no-network seed: your local `user.email` plus any configured
@@ -77,13 +73,6 @@ impl Identity {
     }
 }
 
-/// Escape a string for embedding inside a jj revset double-quoted literal.
-/// Backslash first, then quote, so an already-present backslash isn't
-/// double-counted.
-fn escape_revset_string(s: &str) -> String {
-    s.replace('\\', r"\\").replace('"', "\\\"")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,11 +112,6 @@ mod tests {
             logins: vec![],
         };
         assert_eq!(id.owned_revset(), r#"author(exact:"a\"b\\c@x.com")"#);
-    }
-
-    #[test]
-    fn escape_handles_backslash_then_quote() {
-        assert_eq!(escape_revset_string(r#"a\b"c"#), r#"a\\b\"c"#);
     }
 
     #[test]

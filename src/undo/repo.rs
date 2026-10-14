@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use vcs_runner::{run_jj_utf8, run_jj_utf8_ignore_wc};
 
-use crate::jj::version;
+use crate::jj::{revset, version};
 
 /// One operation in jj's operation log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,9 +129,8 @@ impl UndoRepo for JjRepo {
     }
 
     fn targets(&self, bookmark: &str, remote: &str) -> Result<Targets> {
-        let quoted = quote(bookmark);
-        let local = format!("bookmarks(exact:{quoted})");
-        let tracked = format!("remote_bookmarks(exact:{quoted}, exact:{})", quote(remote));
+        let local = revset::local_bookmark_targets(bookmark);
+        let tracked = revset::remote_bookmark_target(bookmark, remote);
         Ok(Targets {
             local: self.one_commit(&local)?,
             remote: self.one_commit(&tracked)?,
@@ -139,28 +138,22 @@ impl UndoRepo for JjRepo {
     }
 
     fn set_bookmark(&self, bookmark: &str, commit: &str) -> Result<()> {
-        let args = [
-            "bookmark",
-            "set",
-            bookmark,
-            "-r",
-            commit,
-            "--allow-backwards",
-        ];
+        let name = revset::symbol(bookmark);
+        let target = revset::symbol(commit);
+        let args = ["bookmark", "set", &name, "-r", &target, "--allow-backwards"];
         self.read(&args)?;
         Ok(())
     }
 
     fn delete_bookmark(&self, bookmark: &str) -> Result<()> {
-        self.read(&["bookmark", "delete", &format!("exact:{bookmark}")])?;
+        self.read(&["bookmark", "delete", &revset::exact_name(bookmark)])?;
         Ok(())
     }
 
     fn push_bookmark(&self, bookmark: &str, remote: &str) -> Result<()> {
         let mut args = version::push_new_bookmark_args(version::installed_jj_version()).to_vec();
-        args.extend(["git", "push", "--remote", remote, "--bookmark"]);
-        let exact = format!("exact:{bookmark}");
-        args.push(&exact);
+        let exact = revset::exact_name(bookmark);
+        args.extend(["git", "push", "--remote", remote, "--bookmark", &exact]);
         self.read(&args)?;
         Ok(())
     }
@@ -250,11 +243,6 @@ impl JjRepo {
     }
 }
 
-/// A revset string literal.
-fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
-}
-
 /// Order-independent: the same repo always gives the same text.
 pub fn fingerprint(bookmarks: &str, heads: &str) -> String {
     let mut b: Vec<&str> = bookmarks.lines().filter(|l| !l.is_empty()).collect();
@@ -339,11 +327,5 @@ mod tests {
             ]
         );
         assert!(parse_working_copies("").is_empty());
-    }
-
-    #[test]
-    fn quote_escapes_what_ends_a_revset_string() {
-        assert_eq!(quote("a"), "\"a\"");
-        assert_eq!(quote("a\"b\\c"), "\"a\\\"b\\\\c\"");
     }
 }

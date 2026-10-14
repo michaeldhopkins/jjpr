@@ -33,8 +33,8 @@ pub use super::restack_messages::{
 };
 use crate::forge::Forge;
 use crate::forge::merged::{branch_name, merged_from};
-use crate::jj::Jj;
 use crate::jj::types::{Bookmark, LogEntry, NarrowedSegment};
+use crate::jj::{Jj, revset};
 use crate::merge::execute::rebase_root;
 
 /// The one rebase that restacks the survivor onto trunk.
@@ -205,8 +205,7 @@ fn ancestors_within<'a>(ancestry: &'a [LogEntry], head: &'a str) -> HashSet<&'a 
 /// off it: everything from trunk up to `head`, except what a bookmark, the
 /// working copy or another line of work still stands on.
 pub fn abandon_revset(head: &str) -> String {
-    let landed = format!(r#"(trunk().."{head}")"#);
-    format!("{landed} ~ ::((visible_heads() ~ {landed}) | bookmarks() | @)")
+    revset::landed_below(head)
 }
 
 /// Find what merged below the first live segment: bookmarks submit's fetch

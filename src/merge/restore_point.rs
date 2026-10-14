@@ -1,8 +1,8 @@
 //! The operation a reconcile rolls a mangling rebase back to.
 
 use crate::config::ReconcileStrategy;
-use crate::jj::Jj;
 use crate::jj::types::NarrowedSegment;
+use crate::jj::{Jj, revset};
 
 /// The revset whose descendants the reconcile's own jj commands snapshot when
 /// `@` is among them: the rebase's root, or for a merge sync each remaining
@@ -16,14 +16,9 @@ pub(super) fn snapshot_scope(
     let root = moved_root?;
     match strategy {
         ReconcileStrategy::Rebase => Some(root.to_string()),
-        ReconcileStrategy::Merge => Some(
-            remaining
-                .iter()
-                .map(|s| s.bookmark.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" | "),
-        )
-        .filter(|s| !s.is_empty()),
+        ReconcileStrategy::Merge => {
+            revset::union(remaining.iter().map(|s| revset::symbol(&s.bookmark.name)))
+        }
     }
 }
 
@@ -231,7 +226,7 @@ mod tests {
     fn a_merge_sync_scopes_the_snapshot_to_the_bookmarks_it_advances() {
         let remaining = [segment("a"), segment("b")];
         let scope = snapshot_scope(ReconcileStrategy::Merge, &remaining, Some("ch_low"));
-        assert_eq!(scope.as_deref(), Some("a | b"));
+        assert_eq!(scope.as_deref(), Some(r#"("a") | ("b")"#));
     }
 
     #[test]
