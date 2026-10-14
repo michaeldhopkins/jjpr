@@ -97,7 +97,7 @@ fn reconcile_local_state(
         return vec![concurrent_gate_warning(false, &ids)];
     }
 
-    if moved_root.is_none() && seg_idx + 1 < segments.len() {
+    if moved_root.is_none() {
         println!("  Remaining stack already based on {effective_base}; skipping rebase");
         return warnings;
     }
@@ -4096,6 +4096,35 @@ mod tests {
             strategy,
             ForgeKind::GitHub,
         )
+    }
+
+    #[test]
+    fn reconciling_after_the_last_segment_has_nothing_to_rewrite() {
+        for strategy in [
+            crate::config::ReconcileStrategy::Rebase,
+            crate::config::ReconcileStrategy::Merge,
+        ] {
+            let jj = FakeReconcileJj::new();
+            let segments = vec![make_segment("bottom"), make_segment("top")];
+            let gh = RecordingGitHub::new();
+            let warnings = reconcile_local_state(
+                &jj,
+                &gh,
+                "o",
+                "r",
+                None,
+                &segments,
+                1,
+                "main",
+                "origin",
+                strategy,
+                ForgeKind::GitHub,
+            );
+            assert!(warnings.is_empty(), "{strategy:?}: {warnings:?}");
+            assert!(!*jj.rebased.lock().unwrap(), "{strategy:?}");
+            assert!(jj.pushed.lock().unwrap().is_empty(), "{strategy:?}");
+            assert!(jj.restored.lock().unwrap().is_empty(), "{strategy:?}");
+        }
     }
 
     #[test]

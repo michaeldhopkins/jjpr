@@ -155,6 +155,139 @@ impl<J: Jj> Jj for RecordingJj<J> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+
+    use anyhow::Result;
+
+    use super::RecordingJj;
+    use crate::jj::Jj;
+    use crate::jj::types::{Bookmark, GitRemote, LogEntry};
+    use crate::undo::journal::Journal;
+    use crate::undo::recorder::Recorder;
+    use crate::undo::recorder::tests::{FakeRepo, meta};
+
+    /// Answers the snapshot question as told and records restores.
+    #[derive(Default)]
+    struct Plain {
+        moved: bool,
+        restored: Mutex<Vec<String>>,
+    }
+
+    impl Jj for Plain {
+        fn snapshot_if_moved_by(&self, _: &str) -> Result<bool> {
+            Ok(self.moved)
+        }
+        fn restore_operation_keeping_working_copy(&self, op_id: &str) -> Result<()> {
+            self.restored.lock().unwrap().push(op_id.to_string());
+            Ok(())
+        }
+        fn git_fetch(&self) -> Result<()> {
+            Ok(())
+        }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            Ok(vec![])
+        }
+        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> {
+            Ok(vec![])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".into())
+        }
+        fn push_bookmark(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc".into())
+        }
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn is_conflicted(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    /// Implements only what the trait requires.
+    struct Bare;
+
+    impl Jj for Bare {
+        fn git_fetch(&self) -> Result<()> {
+            Ok(())
+        }
+        fn get_my_bookmarks(&self) -> Result<Vec<Bookmark>> {
+            Ok(vec![])
+        }
+        fn get_changes_to_commit(&self, _: &str) -> Result<Vec<LogEntry>> {
+            Ok(vec![])
+        }
+        fn get_git_remotes(&self) -> Result<Vec<GitRemote>> {
+            Ok(vec![])
+        }
+        fn get_default_branch(&self) -> Result<String> {
+            Ok("main".into())
+        }
+        fn push_bookmark(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_working_copy_commit_id(&self) -> Result<String> {
+            Ok("wc".into())
+        }
+        fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn merge_into(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn resolve_change_id(&self, _: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn is_conflicted(&self, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn recording(inner: Plain) -> (tempfile::TempDir, RecordingJj<Plain>) {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Recorder::start(
+            Journal::at(dir.path().to_path_buf()),
+            Box::new(Arc::new(FakeRepo::at("op"))),
+            meta(),
+        );
+        (dir, RecordingJj::new(inner, rec))
+    }
+
+    #[test]
+    fn a_stub_claims_no_snapshot_by_default() {
+        assert!(!Bare.snapshot_if_moved_by("ch_next").unwrap());
+    }
+
+    #[test]
+    fn the_snapshot_answer_comes_from_the_wrapped_jj() {
+        for moved in [true, false] {
+            let (_dir, jj) = recording(Plain {
+                moved,
+                ..Default::default()
+            });
+            assert_eq!(jj.snapshot_if_moved_by("ch_next").unwrap(), moved);
+        }
+    }
+
+    #[test]
+    fn a_restore_keeping_the_working_copy_reaches_the_wrapped_jj() {
+        let (_dir, jj) = recording(Plain::default());
+        jj.restore_operation_keeping_working_copy("op_before")
+            .unwrap();
+        assert_eq!(*jj.inner.restored.lock().unwrap(), vec!["op_before"]);
+    }
 
     fn fn_names(source: &str) -> BTreeSet<&str> {
         source
