@@ -185,3 +185,77 @@ fn undo_reads_and_moves_the_bookmark_of_that_name() {
     assert_eq!(repo.targets(TRICKY, "origin").unwrap().local, None);
     assert_eq!(commit_of(&f.repo, "foo@origin"), f.remote_foo);
 }
+
+/// A repo whose trunk is the remote bookmark `rel@2`, named by `alias`.
+fn trunk_named_rel_at_2(alias: &str) -> Option<JjTestRepo> {
+    if !common::jj_available() {
+        return None;
+    }
+    let repo = JjTestRepo::new();
+    repo.commit_and_bookmark("rel.rs", "rel\n", "release", r#""rel@2""#);
+    let mut push =
+        jjpr::jj::version::push_new_bookmark_args(jjpr::jj::version::installed_jj_version())
+            .to_vec();
+    push.extend([
+        "git",
+        "push",
+        "--remote",
+        "origin",
+        "--bookmark",
+        r#"exact:"rel@2""#,
+    ]);
+    repo.run_jj(&push);
+    repo.run_jj(&[
+        "config",
+        "set",
+        "--repo",
+        r#"revset-aliases."trunk()""#,
+        alias,
+    ]);
+    Some(repo)
+}
+
+#[test]
+fn a_trunk_name_that_is_not_a_plain_symbol_comes_back_unquoted() {
+    for alias in [
+        r#"remote_bookmarks(exact:"rel@2", exact:"origin")"#,
+        // A TOML literal string: jj parses a config value as TOML first.
+        r#"'"rel@2"@origin'"#,
+        r#""'rel@2'@origin""#,
+    ] {
+        let Some(repo) = trunk_named_rel_at_2(alias) else {
+            return;
+        };
+        let jj = repo.runner();
+        let name = jj.get_default_branch().unwrap();
+        assert_eq!(name, "rel@2", "trunk() = {alias}");
+        assert_eq!(
+            commit_of(&repo, &revset::symbol(&name)),
+            commit_of(&repo, "trunk()"),
+            "the name resolves as a revset: trunk() = {alias}"
+        );
+    }
+}
+
+#[test]
+fn names_with_quotes_backslashes_and_control_characters_round_trip() {
+    let Some(f) = fixture() else { return };
+    let repo = JjRepo::new(f.repo.path().to_path_buf());
+    let feat = commit_of(&f.repo, "feat");
+    for name in ["say\"hi\"", "back\\slash", "tab\there"] {
+        repo.set_bookmark(name, &feat).unwrap();
+        let targets = repo.targets(name, "origin").unwrap();
+        assert_eq!(targets.local.as_deref(), Some(feat.as_str()), "{name:?}");
+        assert_eq!(
+            commit_of(&f.repo, &revset::symbol(name)),
+            feat,
+            "{name:?} as a revset"
+        );
+        f.repo.runner().forget_bookmark(name).unwrap();
+        assert_eq!(
+            repo.targets(name, "origin").unwrap().local,
+            None,
+            "{name:?}"
+        );
+    }
+}

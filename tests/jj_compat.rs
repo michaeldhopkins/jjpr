@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use jjpr::jj::templates::{
-    BOOKMARK_TEMPLATE, LOG_TEMPLATE, parse_bookmark_output, parse_default_branch, parse_log_output,
-    parse_remote_list,
+    BOOKMARK_TEMPLATE, LOG_TEMPLATE, TRUNK_BOOKMARKS_TEMPLATE, parse_bookmark_output,
+    parse_default_branch, parse_log_output, parse_remote_list,
 };
 use jjpr::jj::version::{parse_jj_version, push_new_bookmark_args};
 
@@ -324,7 +324,7 @@ fn capture_fixtures() {
                 "--limit",
                 "1",
                 "--template",
-                r#"remote_bookmarks.map(|b| b.name()).join(",")"#,
+                TRUNK_BOOKMARKS_TEMPLATE,
             ]),
         ),
         (

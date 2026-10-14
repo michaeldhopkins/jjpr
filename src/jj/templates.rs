@@ -178,8 +178,11 @@ pub fn parse_bookmark_output(output: &str) -> Result<(Vec<Bookmark>, Vec<String>
 }
 
 /// Template for `jj log -r trunk()`: the names of the remote bookmarks on trunk,
-/// comma-separated.
-pub const TRUNK_BOOKMARKS_TEMPLATE: &str = r#"remote_bookmarks.map(|b| b.name()).join(",")"#;
+/// as a JSON array. `b.name()` alone prints the name as a revset would need it,
+/// quoted when it is not a plain symbol (`"rel@2"`), and quoting it again for a
+/// revset would then look for a bookmark with the quotes in its name.
+pub const TRUNK_BOOKMARKS_TEMPLATE: &str =
+    r#"'[' ++ remote_bookmarks.map(|b| b.name().escape_json()).join(',') ++ ']'"#;
 
 /// The default branch's name from [`TRUNK_BOOKMARKS_TEMPLATE`] output, or `None`
 /// when trunk carries no remote bookmark.
@@ -188,10 +191,10 @@ pub const TRUNK_BOOKMARKS_TEMPLATE: &str = r#"remote_bookmarks.map(|b| b.name())
 /// fast-forwarded PR branch not yet deleted, `landed`) comes before `main`. The
 /// names jj's built-in `trunk()` looks for win, in its order; otherwise the first.
 pub fn parse_default_branch(output: &str) -> Option<String> {
-    let names: Vec<&str> = output
-        .trim()
-        .split(',')
-        .map(str::trim)
+    let names: Vec<String> = serde_json::from_str(output.trim()).ok()?;
+    let names: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
         .filter(|b| !b.is_empty())
         .collect();
     ["main", "master", "trunk"]
@@ -611,24 +614,36 @@ mod tests {
     #[test]
     fn default_branch_is_the_first_remote_bookmark_on_trunk() {
         assert_eq!(
-            parse_default_branch("main,main\n"),
+            parse_default_branch("[\"main\",\"main\"]\n"),
             Some("main".to_string())
         );
         assert_eq!(
-            parse_default_branch(" develop "),
+            parse_default_branch(" [\"develop\"] "),
             Some("develop".to_string())
         );
+        assert_eq!(parse_default_branch("[]"), None);
         assert_eq!(parse_default_branch(""), None);
-        assert_eq!(parse_default_branch(",main"), Some("main".to_string()));
+        assert_eq!(
+            parse_default_branch("[\"\",\"main\"]"),
+            Some("main".to_string())
+        );
         // Captured on jj 0.33 through 0.46: a second branch on trunk's commit sorts
         // first, and used to be taken for the default branch.
         assert_eq!(
-            parse_default_branch("landed,landed,main,main"),
+            parse_default_branch("[\"landed\",\"landed\",\"main\",\"main\"]"),
             Some("main".to_string())
         );
         assert_eq!(
-            parse_default_branch("a,master,trunk"),
+            parse_default_branch("[\"a\",\"master\",\"trunk\"]"),
             Some("master".to_string())
+        );
+    }
+
+    #[test]
+    fn a_default_branch_that_is_not_a_plain_symbol_comes_back_unquoted() {
+        assert_eq!(
+            parse_default_branch("[\"rel@2\",\"a,b\"]"),
+            Some("rel@2".to_string())
         );
     }
 
