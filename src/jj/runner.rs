@@ -226,8 +226,8 @@ impl Jj for JjRunner {
         Ok(())
     }
 
-    fn working_copy_parents(&self) -> Result<Vec<String>> {
-        self.parents_of_working_copy()
+    fn working_copy_view(&self) -> Result<super::types::WorkingCopyView> {
+        self.read_working_copy_view()
     }
 
     fn get_working_copy_commit_id(&self) -> Result<String> {

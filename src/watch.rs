@@ -497,7 +497,7 @@ fn run_merge_phase(
         }
 
         // Reconcile after advancing
-        if seg_idx > prev_seg_idx && seg_idx < segments.len() {
+        if seg_idx > prev_seg_idx {
             let fresh = reconcile_after_merge(
                 jj,
                 forge,

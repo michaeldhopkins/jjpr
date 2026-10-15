@@ -4,7 +4,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::forge::comment::{StackCommentItem, StackEntry, StackNav};
+use super::plan::MergePlan;
+use crate::forge::comment::{StackCommentItem, StackEntry, StackNav, create_stack_nav};
 use crate::forge::types::PullRequest;
 use crate::forge::{Forge, ForgeKind};
 use crate::jj::types::NarrowedSegment;
@@ -41,20 +42,28 @@ pub(super) fn merged_view(
 /// open before the merge. Every segment up to it has merged.
 pub(super) fn after_merge(
     forge: &dyn Forge,
-    nav: &dyn StackNav,
+    plan: &MergePlan,
     pr_map: Option<&HashMap<String, PullRequest>>,
     segments: &[NarrowedSegment],
     seg_idx: usize,
-    owner_repo: (&str, &str),
-    fk: ForgeKind,
 ) {
+    let nav = create_stack_nav(plan.stack_nav);
+    let owner_repo = (plan.repo_info.owner.as_str(), plan.repo_info.repo.as_str());
     let this = segments[seg_idx].bookmark.name.as_str();
     let merged_names: HashSet<&str> = segments[..=seg_idx]
         .iter()
         .map(|s| s.bookmark.name.as_str())
         .collect();
     let pr = pr_map.and_then(|m| m.get(this));
-    mark_merged(forge, nav, pr, &merged_names, this, owner_repo, fk);
+    mark_merged(
+        forge,
+        nav.as_ref(),
+        pr,
+        &merged_names,
+        this,
+        owner_repo,
+        plan.forge_kind,
+    );
 }
 
 /// Rewrite the comment on `pr`, which just merged as the bookmark `this`, to
@@ -353,15 +362,26 @@ mod tests {
         ]);
         let pr_map = HashMap::from([("b".to_string(), pr(2, None))]);
         let segments = [segment("a"), segment("b"), segment("c")];
-        after_merge(
-            &forge(&server),
-            &CommentNav,
-            Some(&pr_map),
-            &segments,
-            1,
-            ("o", "r"),
-            ForgeKind::GitHub,
-        );
+        let plan = MergePlan {
+            actions: vec![],
+            repo_info: crate::forge::types::RepoInfo {
+                owner: "o".to_string(),
+                repo: "r".to_string(),
+            },
+            forge_kind: ForgeKind::GitHub,
+            options: crate::merge::plan::MergeOptions {
+                merge_method: crate::forge::types::MergeMethod::Squash,
+                required_approvals: 1,
+                require_ci_pass: true,
+                reconcile_strategy: crate::config::ReconcileStrategy::Rebase,
+                ready: false,
+            },
+            default_branch: "main".to_string(),
+            remote_name: "origin".to_string(),
+            stack_base: None,
+            stack_nav: crate::config::StackNavMode::Comment,
+        };
+        after_merge(&forge(&server), &plan, Some(&pr_map), &segments, 1);
 
         let patch = server
             .requests()

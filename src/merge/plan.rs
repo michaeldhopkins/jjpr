@@ -39,6 +39,10 @@ pub enum BlockReason {
     /// the next poll retries. Persistent means another jj/jjpr process is still
     /// running on this repo and needs to be paused.
     ConcurrentModification,
+    /// A fetch after the merge rewrote commits under the working copy and the stack
+    /// came out divergent. The user runs `jj workspace update-stale` and checks
+    /// `jj log`; watch resumes on the next poll.
+    WorkingCopyRewritten,
     /// The PR belongs to a GitHub native pull-request stack, which GitHub
     /// refuses to merge over the ordinary merge endpoint (`403`). Users can
     /// create these independently with `gh-stack` or the web UI, so this

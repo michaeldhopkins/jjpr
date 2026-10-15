@@ -116,14 +116,14 @@ fn the_checkouts_parents_change_when_a_fetch_rewrites_them() {
     };
     let jj = repo.runner();
     jj.snapshot().unwrap();
-    let before = jj.working_copy_parents().unwrap();
+    let before = jj.working_copy_view().unwrap().parents;
     assert_eq!(before.len(), 1, "{before:?}");
     jj.git_fetch().unwrap();
-    let after = jj.working_copy_parents().unwrap();
+    let after = jj.working_copy_view().unwrap().parents;
     assert_eq!(after.len(), 1, "{after:?}");
     assert_ne!(before, after, "the fetch rewrote the commit @ sits on");
     assert_eq!(
-        jj.working_copy_parents().unwrap(),
+        jj.working_copy_view().unwrap().parents,
         after,
         "and a read is stable"
     );

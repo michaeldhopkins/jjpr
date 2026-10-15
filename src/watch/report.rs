@@ -101,9 +101,14 @@ pub(super) fn reconcile_failure(
         lines.push(String::new());
         lines.push("  Concurrent modification:".to_string());
         lines.extend(warnings_of(DivergenceKind::Concurrent));
-        // No manual-fix hint: the warning already states that both sides' work
-        // is preserved and watch retries next poll. Recovery never discards work,
-        // so there's nothing for the user to restore.
+        // No manual-fix hint: the warning already says both sides' work is kept and
+        // that watch retries next poll, and names jj op restore for anything missing.
+    }
+
+    if state.has_fetch_rewrite() {
+        lines.push(String::new());
+        lines.push("  Fetch rewrote the working copy:".to_string());
+        lines.extend(warnings_of(DivergenceKind::FetchRewrite));
     }
 
     if state.local_failed {
@@ -322,6 +327,37 @@ mod tests {
             lines.contains(&"    jj bookmark set c -r c@origin".to_string()),
             "the hint must be for 'c', got {lines:?}"
         );
+    }
+
+    /// A fetch that rewrote the working copy gets its own heading and none of the
+    /// rebase or bookmark-set commands, which would fail on a divergent change.
+    #[test]
+    fn reconcile_failure_reports_a_fetch_rewrite_without_local_sync_commands() {
+        let state = ReconcileState {
+            warnings: vec![warning(DivergenceKind::FetchRewrite, "rewrote-msg")],
+            ..Default::default()
+        };
+
+        let lines = printed(|out| {
+            reconcile_failure(
+                out,
+                &state,
+                &[segment("a")],
+                &[],
+                &[],
+                "main",
+                ForgeKind::GitHub,
+            )
+        });
+
+        let at = lines
+            .iter()
+            .position(|l| l == "  Fetch rewrote the working copy:")
+            .expect("its own heading");
+        assert_eq!(lines[at + 1], "    rewrote-msg");
+        assert!(!lines.iter().any(|l| l.contains("jj rebase")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("Concurrent")), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("Local sync")), "{lines:?}");
     }
 
     /// Each section lists only its own kind of warning, so a user reading

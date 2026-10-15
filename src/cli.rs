@@ -137,9 +137,11 @@ Bare `jjpr` is shorthand for `jjpr status` with no arguments.
 Example output:
     $ jjpr status
       auth (1 change, #42 open, synced)
-        ✓ mergeable  ✓ CI passing  ✓ 1 approval
+        ✓ mergeable  ✓ CI passing  ✓ 1/1 approvals
+        next: ready to merge (jjpr merge, or jjpr watch will merge it)
       profile (2 changes, #43 open, needs push)
-        ✗ CI pending  ✗ 0/1 approvals")]
+        ✗ CI pending  ✗ 0/1 approvals
+        next: one more review required")]
     Status {
         /// Bookmark to scope to (inferred from working copy if omitted)
         bookmark: Option<String>,

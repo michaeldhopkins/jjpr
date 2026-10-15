@@ -13,6 +13,9 @@ use crate::hints;
 use crate::jj::types::NarrowedSegment;
 use crate::jj::{Jj, revset};
 
+pub use super::divergence::{
+    DivergenceKind, LocalDivergenceWarning, ReconcileState, print_fetch_rewrites,
+};
 use super::merged_nav::{self, partition_after_merge};
 use super::plan::{BlockReason, MergePlan, PrMergeStatus, evaluate_segment};
 
@@ -55,12 +58,12 @@ fn reconcile_local_state(
         return vec![warning];
     }
 
-    let parents_before = jj.working_copy_parents().ok();
+    let view_before = jj.working_copy_view().ok();
     println!("  Fetching remotes...");
     if let Err(e) = jj.git_fetch() {
         // A failed fetch can still have reconciled a concurrent fork into a
         // divergent state; surface it.
-        if let Some(warning) = gate(jj, parents_before.as_deref()) {
+        if let Some(warning) = gate(jj, view_before.as_ref()) {
             return vec![warning];
         }
         warnings.push(mk(format!("Failed to fetch remotes: {e}")));
@@ -78,7 +81,7 @@ fn reconcile_local_state(
     // A concurrent reconcile during the fetch that left the stack divergent: our
     // work and the other process's work are both present but divergent. Do NOT
     // rebase on top of that — that is the mangle. Gate, preserving both, retry.
-    if let Some(warning) = gate(jj, parents_before.as_deref()) {
+    if let Some(warning) = gate(jj, view_before.as_ref()) {
         return vec![warning];
     }
 
@@ -441,6 +444,10 @@ pub(crate) fn reconcile_after_merge(
         "reconcile_after_merge re-entered with a degraded state; \
          caller forgot to gate or reset state"
     );
+    merged_nav::after_merge(forge, plan, pr_map, segments, seg_idx);
+    if seg_idx + 1 >= segments.len() {
+        return None;
+    }
     let warnings = reconcile_local_state(
         jj,
         forge,
@@ -471,15 +478,6 @@ pub(crate) fn reconcile_after_merge(
         owner,
         repo,
         effective_base,
-        fk,
-    );
-    merged_nav::after_merge(
-        forge,
-        nav.as_ref(),
-        pr_map,
-        segments,
-        seg_idx,
-        (owner, repo),
         fk,
     );
     if !outcome.warnings.is_empty() {
@@ -586,88 +584,6 @@ pub struct BlockedPr {
 pub struct SkippedMergedPr {
     pub bookmark_name: String,
     pub pr_number: u64,
-}
-
-/// Whether a reconcile warning came from local repo sync or from the
-/// forge-side reconcile pass. Drives recovery hints.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DivergenceKind {
-    /// `reconcile_local_state` failure: fetch, rebase, merge_into, push,
-    /// divergent change ID, missing change ID, or local conflict.
-    Local,
-    /// `reconcile_forge_state` failure: list_open_prs, update_pr_base,
-    /// or stack-comment update.
-    Forge,
-    /// A concurrent jj process reconciled the op log mid-reconcile; we paused
-    /// before the mangling rebase (preserving both sides' work) and retry.
-    /// Recovery is automatic and work-preserving, not a manual fix — so it
-    /// renders differently from `Local`.
-    Concurrent,
-}
-
-/// A warning recorded during reconcile_after_merge.
-#[derive(Debug, Clone)]
-pub struct LocalDivergenceWarning {
-    pub kind: DivergenceKind,
-    pub message: String,
-}
-
-/// Carrying state for reconcile_after_merge. Tracks whether each pass
-/// failed and accumulates warning text. The gate consults `degraded()`
-/// after each reconcile call to decide whether to stop merging.
-#[derive(Debug, Default)]
-pub struct ReconcileState {
-    pub local_failed: bool,
-    pub forge_failed: bool,
-    pub warnings: Vec<LocalDivergenceWarning>,
-    /// The next PR is in a GitHub native stack, so its base cannot be retargeted
-    /// and jjpr cannot advance. Deliberately not a `*_failed` flag: nothing
-    /// failed, and re-running changes nothing. It still stops the run.
-    pub native_stack_block: Option<BlockReason>,
-}
-
-impl ReconcileState {
-    pub fn degraded(&self) -> bool {
-        self.local_failed
-            || self.forge_failed
-            || self.has_concurrent()
-            || self.native_stack_block.is_some()
-    }
-
-    /// Whether this pass hit a concurrent op-log reconcile (and paused/rolled
-    /// only the rebase back to preserve work). Derived from the warnings so the
-    /// struct stays a plain flag/warning bag.
-    pub fn has_concurrent(&self) -> bool {
-        self.warnings
-            .iter()
-            .any(|w| w.kind == DivergenceKind::Concurrent)
-    }
-
-    /// Block reasons corresponding to the current failure flags. Returns
-    /// an empty vec when the state is clean.
-    pub fn block_reasons(&self) -> Vec<BlockReason> {
-        let mut reasons = Vec::new();
-        if self.has_concurrent() {
-            reasons.push(BlockReason::ConcurrentModification);
-        }
-        if self.local_failed {
-            reasons.push(BlockReason::LocalSyncFailed);
-        }
-        if self.forge_failed {
-            reasons.push(BlockReason::ForgeReconcileFailed);
-        }
-        if let Some(reason) = &self.native_stack_block {
-            reasons.push(reason.clone());
-        }
-        reasons
-    }
-
-    /// Wipe failure state so a follow-up reconcile gets a fresh chance.
-    /// Used by run_watch_loop between iterations so the user can fix
-    /// local state and have watch resume on the next poll.
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
 }
 
 /// Result of executing a merge plan.
@@ -799,7 +715,7 @@ pub fn execute_merge_plan(
         };
 
         // Reconcile after any resolved segment (merged or already-merged).
-        if needs_reconcile && seg_idx + 1 < segments.len() {
+        if needs_reconcile {
             let fresh_map = reconcile_after_merge(
                 jj,
                 github,
@@ -815,8 +731,8 @@ pub fn execute_merge_plan(
             // Stop here if reconcile produced any failures. Continuing
             // risks merging the next PR with a bloated diff (local stack
             // never rebased) or against stale forge state.
-            if let Some(blocked) =
-                gate_after_reconcile(&state, &segments[seg_idx + 1], pr_map.as_ref(), fk)
+            if let Some(next) = segments.get(seg_idx + 1)
+                && let Some(blocked) = gate_after_reconcile(&state, next, pr_map.as_ref(), fk)
             {
                 blocked_at = Some(blocked);
                 break;
@@ -987,6 +903,9 @@ pub(crate) fn format_block_reason(reason: &BlockReason, fk: ForgeKind) -> String
         BlockReason::ForgeReconcileFailed => "Forge reconcile failed".to_string(),
         BlockReason::ConcurrentModification => {
             "Concurrent modification (another jj process)".to_string()
+        }
+        BlockReason::WorkingCopyRewritten => {
+            "A fetch rewrote commits under your working copy".to_string()
         }
         BlockReason::NativeStack {
             pr_number,
@@ -3930,11 +3849,15 @@ mod tests {
             *self.fetched.lock().expect("poisoned") = true;
             Ok(())
         }
-        fn working_copy_parents(&self) -> Result<Vec<String>> {
+        fn working_copy_view(&self) -> Result<crate::jj::types::WorkingCopyView> {
             let fetched = *self.fetched.lock().expect("poisoned");
-            Ok(match (&self.parents_after_fetch, fetched) {
+            let parents = match (&self.parents_after_fetch, fetched) {
                 (Some(after), true) => after.clone(),
                 _ => vec!["p0".to_string()],
+            };
+            Ok(crate::jj::types::WorkingCopyView {
+                parents,
+                change_ids: vec!["ch_wc".to_string(), "ch_parent".to_string()],
             })
         }
         fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
@@ -4119,15 +4042,64 @@ mod tests {
     }
 
     #[test]
+    fn reconciling_after_the_last_segment_touches_no_local_state() {
+        let jj = FakeReconcileJj::new();
+        let gh = RecordingGitHub::new();
+        let plan = make_plan_single_mergeable("top", 2);
+        let segments = vec![make_segment("bottom"), make_segment("top")];
+        let mut state = ReconcileState::default();
+
+        let fresh = reconcile_after_merge(
+            &jj,
+            &gh,
+            &segments,
+            1,
+            &plan,
+            ForgeKind::GitHub,
+            None,
+            &mut state,
+        );
+
+        assert!(fresh.is_none());
+        assert!(!*jj.fetched.lock().unwrap(), "nothing above to sync");
+        assert!(!state.degraded());
+    }
+
+    #[test]
     fn a_fetch_that_rewrites_the_checkout_is_not_blamed_on_another_process() {
         let jj = FakeReconcileJj::new().fetch_rewrites_checkout_parents(&["ch_wc"]);
         let warnings = reconcile_two(&jj);
 
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
-        assert_eq!(warnings[0].kind, DivergenceKind::Local);
+        assert_eq!(warnings[0].kind, DivergenceKind::FetchRewrite);
         assert_eq!(warnings[0].message, hints::fetch_rewrote_working_copy());
         assert!(!*jj.rebased.lock().unwrap(), "gates before rebasing");
         assert!(jj.pushed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rewrite_under_the_checkout_with_an_unrelated_divergence_is_still_concurrent() {
+        // Another process restacking under `@` moves its parents too; the divergent
+        // change is not one `@` was built on, so the fetch does not take the blame.
+        let jj = FakeReconcileJj::new().fetch_rewrites_checkout_parents(&["ch_other"]);
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
+    }
+
+    #[test]
+    fn the_fetch_rewrite_gates_the_run_without_blaming_a_local_sync_failure() {
+        let jj = FakeReconcileJj::new().fetch_rewrites_checkout_parents(&["ch_parent"]);
+        let mut state = ReconcileState::default();
+        state.warnings.extend(reconcile_two(&jj));
+
+        assert!(state.has_fetch_rewrite());
+        assert!(state.degraded());
+        assert_eq!(
+            state.block_reasons(),
+            vec![BlockReason::WorkingCopyRewritten]
+        );
     }
 
     #[test]

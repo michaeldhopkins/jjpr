@@ -769,16 +769,6 @@ fn sync_status_label(bookmarks: &[Bookmark]) -> &'static str {
     }
 }
 
-/// The mergeability half of a status line only — what's relevant for a
-/// coworker's base (you want to know when it can/does land, not its CI/reviews).
-fn format_mergeability_line(status: &SegmentDisplayStatus) -> String {
-    match status.mergeability.as_ref().and_then(|m| m.mergeable) {
-        Some(true) => "    \u{2713} mergeable".to_string(),
-        Some(false) => "    \u{2717} conflicts".to_string(),
-        None => String::new(),
-    }
-}
-
 /// A segment's PR as it matters for display: an open/draft PR, a merged PR
 /// (found by branch after it left the open list), or none.
 enum SegmentPr<'a> {
@@ -1022,13 +1012,19 @@ impl StatusRender<'_> {
                     if !p.draft
                         && let Some(status) = self.status_map.get(&bookmark.name)
                     {
+                        let merge_blocked = Self::native_stack_note(p, mine).is_some()
+                            || segment
+                                .changes
+                                .iter()
+                                .any(|c| self.divergent_change_ids.contains(&c.change_id));
                         lines.extend(jjpr::status_line::status_lines(
                             status,
                             self.required_approvals,
+                            merge_blocked,
                         ));
                     }
                 } else if let Some(status) = self.status_map.get(&bookmark.name) {
-                    let detail = format_mergeability_line(status);
+                    let detail = jjpr::status_line::mergeability_line(status);
                     if !detail.is_empty() {
                         lines.push(detail);
                     }
@@ -1559,6 +1555,8 @@ fn print_local_warnings(
         .filter(|w| w.kind == DivergenceKind::Forge)
         .map(|w| w.message.as_str())
         .collect();
+
+    merge::execute::print_fetch_rewrites(&mut std::io::stdout(), &result.local_warnings);
 
     if !local_msgs.is_empty() {
         println!();
@@ -2258,27 +2256,6 @@ mod tests {
         );
         assert_eq!(merged_on_suffix(&pr_with("x", false, None)), "");
         assert_eq!(merged_on_suffix(&pr_with("x", false, Some("short"))), "");
-    }
-
-    #[test]
-    fn mergeability_line_variants() {
-        let with = |m| SegmentDisplayStatus {
-            mergeability: Some(PrMergeability {
-                mergeable: m,
-                mergeable_state: String::new(),
-            }),
-            checks: None,
-            reviews: None,
-        };
-        assert_eq!(
-            format_mergeability_line(&with(Some(true))),
-            "    \u{2713} mergeable"
-        );
-        assert_eq!(
-            format_mergeability_line(&with(Some(false))),
-            "    \u{2717} conflicts"
-        );
-        assert_eq!(format_mergeability_line(&with(None)), "");
     }
 
     fn render_with<'a>(

@@ -4,19 +4,20 @@ use anyhow::Result;
 
 use super::JjRunner;
 use crate::jj::Jj;
+use crate::jj::types::{WorkingCopyView, parse_working_copy_view};
 
 impl JjRunner {
-    /// The commit ids `@` is built on, read without touching the working copy.
-    pub(super) fn parents_of_working_copy(&self) -> Result<Vec<String>> {
+    /// `@` and its parents, read without touching the working copy.
+    pub(super) fn read_working_copy_view(&self) -> Result<WorkingCopyView> {
         let output = self.run_jj(&[
             "log",
             "-r",
-            "parents(@)",
+            "@ | parents(@)",
             "--no-graph",
             "--template",
-            r#"commit_id ++ "\n""#,
+            r#"commit_id ++ " " ++ change_id ++ " " ++ if(current_working_copy, "wc", "parent") ++ "\n""#,
         ])?;
-        Ok(output.lines().map(str::to_string).collect())
+        Ok(parse_working_copy_view(&output))
     }
 
     /// `jj op restore` that leaves the working copy alone, for an `@` that is
