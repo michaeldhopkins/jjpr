@@ -50,6 +50,8 @@ The detail lives in topic files; read the one that matches what you are about to
 - `docs/agents/mutation-runs.md`: the `--in-diff` traps and the measured runs behind the job's limits. Read before running `--in-diff` locally or changing `mutants.yml`.
 - `docs/agents/mutation-cost.md`: what each mutation tool costs and how to verify a single mutant by hand. Read before starting any local `cargo mutants` run.
 
+Also: `docs/upstream-watch.md` lists the jj-vcs/jj issues whose outcome would change jjpr's recovery messages (read only; nothing is ever posted there). Check it when you touch a recovery message, and add the date you looked.
+
 ## After every code change
 
 Three things, every time — not at the end of a branch, not before pushing:
