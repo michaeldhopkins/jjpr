@@ -93,11 +93,28 @@ pub fn generate_comment_body(live: &[StackEntry], fossils: &[StackEntry]) -> Str
     body.push('\n');
     body.push_str(&format!("<!--- JJPR_DATA: {encoded} --->"));
     body.push('\n');
-    body.push_str("This PR is part of a stack:\n\n");
+    let this_merged = live.iter().any(|e| e.is_current && e.is_merged);
+    body.push_str(if this_merged {
+        "This PR was part of a stack:\n\n"
+    } else {
+        "This PR is part of a stack:\n\n"
+    });
 
     for entry in live {
-        if entry.is_current {
+        if entry.is_current && entry.is_merged {
+            body.push_str(&format!(
+                "1. **`{}` <-- this PR, merged**\n",
+                entry.bookmark_name
+            ));
+        } else if entry.is_current {
             body.push_str(&format!("1. **`{}` <-- this PR**\n", entry.bookmark_name));
+        } else if entry.is_merged {
+            // Merged in the same run as the PR this comment is on.
+            let name = &entry.bookmark_name;
+            match &entry.pr_url {
+                Some(url) => body.push_str(&format!("1. ~~[`{name}`]({url})~~\n")),
+                None => body.push_str(&format!("1. ~~`{name}`~~\n")),
+            }
         } else if let Some(url) = &entry.pr_url {
             body.push_str(&format!("1. [`{}`]({url})\n", entry.bookmark_name));
         } else {

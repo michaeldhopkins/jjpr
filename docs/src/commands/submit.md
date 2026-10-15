@@ -282,4 +282,19 @@ other PR again. Submit only touches the PRs in the stack it was given,
 so after splitting a stack into independent PRs, submit each one to
 clean up its comment.
 
+When `jjpr merge` or `jjpr watch` merges a PR, it also rewrites that PR's own
+comment (or description section) so it no longer reads as part of a live stack.
+The heading changes, the merged PR is marked, and PRs merged earlier in the
+run are struck through:
+
+```
+This PR was part of a stack:
+
+1. ~~[`feat/auth`](https://github.com/o/r/pull/41)~~
+1. **`feat/profile` <-- this PR, merged**
+1. [`feat/settings`](https://github.com/o/r/pull/43)
+```
+
+If rewriting it fails, jjpr prints a warning and carries on.
+
 Single-PR stacks don't get a comment.

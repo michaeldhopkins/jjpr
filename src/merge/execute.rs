@@ -13,6 +13,7 @@ use crate::hints;
 use crate::jj::types::NarrowedSegment;
 use crate::jj::{Jj, revset};
 
+use super::merged_nav::{self, partition_after_merge};
 use super::plan::{BlockReason, MergePlan, PrMergeStatus, evaluate_segment};
 
 /// Attempt to synchronize local state after a forge merge.
@@ -408,43 +409,6 @@ fn reconcile_forge_state(
     }
 }
 
-/// Split a stack-info comment's previous payload into `(live, fossils)`
-/// after a forge merge. Items in `merged_names` move to fossils;
-/// previously-merged items stay as fossils; live items keep their stored
-/// metadata. Newly-merged items inherit `closed_at: None` until the next
-/// `jjpr submit` queries the forge to populate the real merge timestamp.
-///
-/// Order matches the input: live entries follow stack position; fossils
-/// preserve the original comment's order, which under jjpr's existing
-/// rendering means just-merged entries (formerly live, listed first in
-/// `data.stack`) naturally appear above older fossils — matching the
-/// "most recent first" sort that the next submit will produce.
-fn partition_after_merge(
-    items: &[comment::StackCommentItem],
-    merged_names: &std::collections::HashSet<&str>,
-    current_seg_name: &str,
-) -> (Vec<comment::StackEntry>, Vec<comment::StackEntry>) {
-    let mut live = Vec::new();
-    let mut fossils = Vec::new();
-    for item in items {
-        let is_merged = item.is_merged || merged_names.contains(item.bookmark_name.as_str());
-        let entry = comment::StackEntry {
-            bookmark_name: item.bookmark_name.clone(),
-            pr_url: Some(item.pr_url.clone()),
-            pr_number: Some(item.pr_number),
-            is_current: item.bookmark_name == current_seg_name && !is_merged,
-            is_merged,
-            closed_at: item.closed_at.clone(),
-        };
-        if is_merged {
-            fossils.push(entry);
-        } else {
-            live.push(entry);
-        }
-    }
-    (live, fossils)
-}
-
 /// Run both local and forge reconciliation after a successful merge.
 ///
 /// Best-effort: the forge merge already happened, so failures here are
@@ -507,6 +471,15 @@ pub(crate) fn reconcile_after_merge(
         owner,
         repo,
         effective_base,
+        fk,
+    );
+    merged_nav::after_merge(
+        forge,
+        nav.as_ref(),
+        pr_map,
+        segments,
+        seg_idx,
+        (owner, repo),
         fk,
     );
     if !outcome.warnings.is_empty() {
