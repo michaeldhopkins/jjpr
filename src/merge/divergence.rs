@@ -170,6 +170,28 @@ fn fetch_rewrote_working_copy(
         && ids.iter().any(|id| before.change_ids.contains(id))
 }
 
+/// The warning for a rebase that came out divergent, after the restore to the post-fetch
+/// operation (`restored`) was tried. The fetch takes the blame under the same test as
+/// [`gate`]; otherwise another process raced the rebase.
+pub(super) fn rebase_gate(
+    jj: &dyn Jj,
+    before: Option<&WorkingCopyView>,
+    ids: &[String],
+    restored: bool,
+) -> LocalDivergenceWarning {
+    if fetch_rewrote_working_copy(jj, before, ids) {
+        return fetch_rewrite_warning();
+    }
+    concurrent_gate_warning(restored, if restored { &[] } else { ids })
+}
+
+fn fetch_rewrite_warning() -> LocalDivergenceWarning {
+    LocalDivergenceWarning {
+        kind: DivergenceKind::FetchRewrite,
+        message: hints::fetch_rewrote_working_copy(),
+    }
+}
+
 /// The gate when the stack is divergent, `None` when it is clean. `before` is `@` and its
 /// parents read before the fetch (`None` before there was one).
 pub(super) fn gate(
@@ -180,10 +202,7 @@ pub(super) fn gate(
         return None;
     };
     if fetch_rewrote_working_copy(jj, before, &ids) {
-        return Some(LocalDivergenceWarning {
-            kind: DivergenceKind::FetchRewrite,
-            message: hints::fetch_rewrote_working_copy(),
-        });
+        return Some(fetch_rewrite_warning());
     }
     Some(concurrent_gate_warning(false, &ids))
 }

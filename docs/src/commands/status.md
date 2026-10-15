@@ -216,7 +216,7 @@ Nothing of yours to submit here.
 | `✓ mergeable` / `✗ conflicts` | Whether the forge reports the PR can merge without conflicts |
 | `✓ CI passing` / `✗ CI pending` / `✗ CI failing` | Aggregate check status for the head commit |
 | `✓ 1/1 approvals` / `✗ 0/1 approvals` | Approving reviews against the number required (`required_approvals` in config) |
-| `next: …` | The one thing left to do: how many more reviews, to address requested changes, or that the PR is ready to merge. Omitted when approvals are met but CI or conflicts still block |
+| `next: …` | The one thing left to do: how many more reviews, to address requested changes, or that the PR is ready to merge. Omitted when approvals are met but something `jjpr merge` would refuse on remains: conflicts, unknown mergeability, CI that the config requires and is not passing, a native stack or a divergent change |
 | `⚠ changes requested` | At least one reviewer has requested changes |
 | `⚠ a squash-landing of #N would dismiss …` | A lower PR's squash landing would force-push this approved PR and drop its approvals |
 | `⚠ in native stack #N …` | This PR belongs to a GitHub native stack, which jjpr cannot merge; the note names the command that can and what it would land |

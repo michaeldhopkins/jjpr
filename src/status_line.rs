@@ -14,14 +14,41 @@ pub fn count_word(n: u32) -> String {
     }
 }
 
+/// What `jjpr merge` requires before it lands a PR, as far as status can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    pub required_approvals: u32,
+    pub require_ci_pass: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            required_approvals: 1,
+            require_ci_pass: true,
+        }
+    }
+}
+
+impl Policy {
+    pub fn of(config: &crate::config::Config) -> Self {
+        Self {
+            required_approvals: config.required_approvals,
+            require_ci_pass: config.require_ci_pass,
+        }
+    }
+}
+
 /// What the reviews leave to do, `None` when approvals are met and something
 /// other than a review (CI, conflicts) still stands in the way of "ready".
-pub fn next_step(status: &PrStatusBundle, required: u32, merge_blocked: bool) -> Option<String> {
+pub fn next_step(status: &PrStatusBundle, policy: Policy, merge_blocked: bool) -> Option<String> {
     let reviews = status.reviews.as_ref()?;
     if reviews.changes_requested {
         return Some("address the requested changes, push, and ask for re-review".to_string());
     }
-    let missing = required.saturating_sub(reviews.approved_count);
+    let missing = policy
+        .required_approvals
+        .saturating_sub(reviews.approved_count);
     if missing > 0 {
         let s = if missing == 1 { "" } else { "s" };
         return Some(format!("{} more review{s} required", count_word(missing)));
@@ -31,10 +58,7 @@ pub fn next_step(status: &PrStatusBundle, required: u32, merge_blocked: bool) ->
             .mergeability
             .as_ref()
             .is_some_and(|m| m.mergeable == Some(true))
-        || matches!(
-            status.checks,
-            Some(ChecksStatus::Fail | ChecksStatus::Pending)
-        );
+        || (policy.require_ci_pass && status.checks != Some(ChecksStatus::Pass));
     (!blocked).then(|| "ready to merge (jjpr merge, or jjpr watch will merge it)".to_string())
 }
 
@@ -67,7 +91,7 @@ pub fn mergeability_line(status: &PrStatusBundle) -> String {
 /// `merge_blocked` is set when something other than the forge's own signals stops
 /// `jjpr merge` (a native stack, a divergent change), so "ready" is not claimed.
 /// Empty when the forge reported nothing.
-pub fn status_lines(status: &PrStatusBundle, required: u32, merge_blocked: bool) -> Vec<String> {
+pub fn status_lines(status: &PrStatusBundle, policy: Policy, merge_blocked: bool) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(m) = &status.mergeability {
         match m.mergeable {
@@ -88,13 +112,13 @@ pub fn status_lines(status: &PrStatusBundle, required: u32, merge_blocked: bool)
         if r.changes_requested {
             parts.push("\u{26a0} changes requested".to_string());
         }
-        parts.push(approvals_part(r, required));
+        parts.push(approvals_part(r, policy.required_approvals));
     }
     if parts.is_empty() {
         return Vec::new();
     }
     let mut lines = vec![format!("    {}", parts.join("  "))];
-    if let Some(next) = next_step(status, required, merge_blocked) {
+    if let Some(next) = next_step(status, policy, merge_blocked) {
         lines.push(format!("    next: {next}"));
     }
     lines
@@ -120,6 +144,13 @@ mod tests {
         }
     }
 
+    fn pol(required: u32) -> Policy {
+        Policy {
+            required_approvals: required,
+            require_ci_pass: true,
+        }
+    }
+
     const READY: &str = "    next: ready to merge (jjpr merge, or jjpr watch will merge it)";
 
     #[test]
@@ -132,25 +163,25 @@ mod tests {
     #[test]
     fn unapproved_pr_shows_the_count_against_the_requirement() {
         assert_eq!(
-            status_lines(&bundle(0, false, ChecksStatus::Pass), 1, false),
+            status_lines(&bundle(0, false, ChecksStatus::Pass), pol(1), false),
             vec![
                 "    \u{2713} mergeable  \u{2713} CI passing  \u{2717} 0/1 approvals",
                 "    next: one more review required",
             ]
         );
         assert_eq!(
-            status_lines(&bundle(1, false, ChecksStatus::Pass), 3, false)[1],
+            status_lines(&bundle(1, false, ChecksStatus::Pass), pol(3), false)[1],
             "    next: two more reviews required"
         );
         assert_eq!(
-            status_lines(&bundle(0, false, ChecksStatus::Pass), 10, false)[1],
+            status_lines(&bundle(0, false, ChecksStatus::Pass), pol(10), false)[1],
             "    next: 10 more reviews required"
         );
     }
 
     #[test]
     fn changes_requested_outranks_the_count() {
-        let lines = status_lines(&bundle(1, true, ChecksStatus::Pass), 1, false);
+        let lines = status_lines(&bundle(1, true, ChecksStatus::Pass), pol(1), false);
         assert_eq!(
             lines[0],
             "    \u{2713} mergeable  \u{2713} CI passing  \u{26a0} changes requested  \u{2713} 1/1 approvals"
@@ -164,7 +195,7 @@ mod tests {
     #[test]
     fn approved_pr_is_ready_to_merge() {
         assert_eq!(
-            status_lines(&bundle(1, false, ChecksStatus::Pass), 1, false),
+            status_lines(&bundle(1, false, ChecksStatus::Pass), pol(1), false),
             vec![
                 "    \u{2713} mergeable  \u{2713} CI passing  \u{2713} 1/1 approvals",
                 READY
@@ -174,7 +205,7 @@ mod tests {
 
     #[test]
     fn ready_is_withheld_when_merge_would_refuse() {
-        let lines = |s: &PrStatusBundle, blocked| status_lines(s, 1, blocked).len();
+        let lines = |s: &PrStatusBundle, blocked| status_lines(s, pol(1), blocked).len();
         assert_eq!(lines(&bundle(1, false, ChecksStatus::Fail), false), 1);
         assert_eq!(lines(&bundle(1, false, ChecksStatus::Pending), false), 1);
         assert_eq!(lines(&bundle(1, false, ChecksStatus::Pass), true), 1);
@@ -192,11 +223,27 @@ mod tests {
     }
 
     #[test]
+    fn ci_only_gates_ready_when_the_config_requires_it() {
+        let ready = |checks: ChecksStatus, require_ci_pass| {
+            let policy = Policy {
+                required_approvals: 1,
+                require_ci_pass,
+            };
+            status_lines(&bundle(1, false, checks), policy, false).len() == 2
+        };
+        assert!(ready(ChecksStatus::Pass, true));
+        assert!(!ready(ChecksStatus::Fail, true));
+        assert!(!ready(ChecksStatus::None, true));
+        assert!(ready(ChecksStatus::Fail, false));
+        assert!(ready(ChecksStatus::None, false));
+    }
+
+    #[test]
     fn no_requirement_keeps_the_bare_count() {
-        let lines = status_lines(&bundle(0, false, ChecksStatus::Pass), 0, false);
+        let lines = status_lines(&bundle(0, false, ChecksStatus::Pass), pol(0), false);
         assert!(lines[0].ends_with("\u{2717} 0 approvals"), "{lines:?}");
         assert_eq!(lines[1], READY);
-        let one = status_lines(&bundle(1, false, ChecksStatus::Pass), 0, false);
+        let one = status_lines(&bundle(1, false, ChecksStatus::Pass), pol(0), false);
         assert!(one[0].ends_with("\u{2713} 1 approval"), "{one:?}");
     }
 
@@ -215,14 +262,14 @@ mod tests {
 
     #[test]
     fn nothing_reported_prints_nothing() {
-        assert!(status_lines(&PrStatusBundle::default(), 1, false).is_empty());
+        assert!(status_lines(&PrStatusBundle::default(), pol(1), false).is_empty());
     }
 
     proptest! {
         // The missing count is required - approved, and the sentence agrees in number.
         #[test]
         fn next_step_counts_what_is_missing(approved in 0u32..40, required in 1u32..40) {
-            let step = next_step(&bundle(approved, false, ChecksStatus::Pass), required, false)
+            let step = next_step(&bundle(approved, false, ChecksStatus::Pass), pol(required), false)
                 .expect("a step");
             if approved >= required {
                 prop_assert!(step.starts_with("ready to merge"));

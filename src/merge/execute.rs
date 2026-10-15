@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use super::divergence::{Divergence, concurrent_gate_warning, divergence, gate};
+use super::divergence::{Divergence, divergence, gate, rebase_gate};
 use crate::forge::comment;
 use crate::forge::http::HttpError;
 use crate::forge::types::{MergeMethod, PullRequest};
@@ -251,16 +251,13 @@ fn reconcile_local_state(
     // clean post-fetch op (which preserves both our work and the fetched changes)
     // and retry. Never publish a mangled tree, and never roll back past the fetch.
     if let Divergence::Present(ids) = divergence(jj) {
-        return match restore_point.as_ref() {
-            // Restore succeeded — the tree is clean again.
-            Some(point) if point.restore(jj).is_ok() => {
-                vec![concurrent_gate_warning(true, &[])]
-            }
-            // Restore failed (likely the same lock contention) or we never
-            // captured a post-fetch op: the divergent tree is still checked out,
-            // so tell the truth. It is not pushed, and the next poll re-gates.
-            _ => vec![concurrent_gate_warning(false, &ids)],
-        };
+        // Restore failed (likely the same lock contention) or we never captured a
+        // post-fetch op: the divergent tree is still checked out, so tell the truth.
+        // It is not pushed, and the next poll re-gates.
+        let restored = restore_point
+            .as_ref()
+            .is_some_and(|p| p.restore(jj).is_ok());
+        return vec![rebase_gate(jj, view_before.as_ref(), &ids, restored)];
     }
 
     let mut dismiss_cache: HashMap<String, Option<bool>> = HashMap::new();
@@ -4110,6 +4107,18 @@ mod tests {
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
         assert!(warnings[0].message.contains("ch_x"));
+    }
+
+    #[test]
+    fn a_rebase_made_divergent_by_the_fetch_rewrite_is_restored_and_blamed_on_the_fetch() {
+        let mut jj = FakeReconcileJj::new().divergent_after_rebase(&["ch_wc"]);
+        jj.parents_after_fetch = Some(vec!["p1".to_string()]);
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].kind, DivergenceKind::FetchRewrite);
+        assert_eq!(*jj.restored.lock().unwrap(), vec!["pf".to_string()]);
+        assert!(jj.pushed.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -646,7 +646,7 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         below_pr,
         forge_kind: info.forge_kind,
         divergent_change_ids: divergent_change_ids_in(&stacks_to_show),
-        required_approvals: cfg.required_approvals,
+        policy: jjpr::status_line::Policy::of(&cfg),
     };
 
     let multi = stacks_to_show.len() > 1;
@@ -805,8 +805,8 @@ struct StatusRender<'a> {
     /// now refuse on it, and status is where a user looks to find out why. Status
     /// itself never refuses: a degraded view is what makes the state diagnosable.
     divergent_change_ids: HashSet<String>,
-    /// Approvals the config requires, for the `n/required` count and the next step.
-    required_approvals: u32,
+    /// What the config requires, for the `n/required` count and the next step.
+    policy: jjpr::status_line::Policy,
 }
 
 /// Change ids appearing on more than one distinct commit across `stacks`.
@@ -1019,7 +1019,7 @@ impl StatusRender<'_> {
                                 .any(|c| self.divergent_change_ids.contains(&c.change_id));
                         lines.extend(jjpr::status_line::status_lines(
                             status,
-                            self.required_approvals,
+                            self.policy,
                             merge_blocked,
                         ));
                     }
@@ -2275,7 +2275,7 @@ mod tests {
             below_pr: HashMap::new(),
             forge_kind: None,
             divergent_change_ids: HashSet::new(),
-            required_approvals: 1,
+            policy: Default::default(),
         }
     }
 
@@ -2425,7 +2425,7 @@ mod tests {
             below_pr: below_pr.clone(),
             forge_kind: kind,
             divergent_change_ids: HashSet::new(),
-            required_approvals: 1,
+            policy: Default::default(),
         };
         let note = |r: StatusRender, name: &str, mine: bool| r.dismiss_stale_note(name, mine);
 
@@ -2488,7 +2488,7 @@ mod tests {
             below_pr,
             forge_kind: Some(ForgeKind::GitHub),
             divergent_change_ids: HashSet::new(),
-            required_approvals: 1,
+            policy: Default::default(),
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
@@ -2625,7 +2625,7 @@ mod tests {
             below_pr,
             forge_kind: Some(ForgeKind::GitHub),
             divergent_change_ids: HashSet::new(),
-            required_approvals: 1,
+            policy: Default::default(),
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
@@ -2822,7 +2822,7 @@ mod tests {
             below_pr: HashMap::new(),
             forge_kind: None,
             divergent_change_ids: HashSet::new(),
-            required_approvals: 1,
+            policy: Default::default(),
         };
         let seg = segment_of(vec![bm("feat", false)]);
         assert!(
