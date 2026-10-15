@@ -35,27 +35,44 @@ pub fn rebase_conflict(bookmark: &str, base: &str, first: Option<&str>) -> Strin
     )
 }
 
+/// The revset naming `changes`, for `jj log -r` and `jj converge -r`.
+fn change_revset<S: AsRef<str>>(changes: &[S]) -> String {
+    changes
+        .iter()
+        .map(|c| format!("change_id({})", c.as_ref()))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// The `jj converge` alternative to abandoning. The version is stated in the
+/// text, not checked: converge arrived in jj 0.45.
+fn converge_advice<S: AsRef<str>>(changes: &[S]) -> String {
+    format!(
+        "On jj 0.45 or later, jj converge -r '{}' --no-interactive resolves it automatically, \
+         or exits without changes if it cannot decide.",
+        change_revset(changes)
+    )
+}
+
 /// The next change to restack is divergent, so jjpr stops before touching it.
 pub fn divergent_change(change: &str, count: usize) -> String {
     format!(
         "Change '{change}' is divergent: {count} commits share it, so jjpr stopped. \
          List them with jj log -r 'change_id({change})', then drop the one you do not \
-         want with jj abandon <commit>. See {}",
+         want with jj abandon <commit>. {} See {}",
+        converge_advice(&[change]),
         recovering("submit-or-merge-stops-on-a-divergent-change")
     )
 }
 
 /// Appended when a concurrent jj process left divergent changes behind.
 pub fn concurrent_divergence(changes: &[String]) -> String {
-    let revset = changes
-        .iter()
-        .map(|c| format!("change_id({c})"))
-        .collect::<Vec<_>>()
-        .join(" | ");
     format!(
-        " The stack has a divergent change ({}). List the copies with jj log -r '{revset}', \
-         then drop the stale one with jj abandon <commit>.",
-        changes.join(", ")
+        " The stack has a divergent change ({}). List the copies with jj log -r '{}', \
+         then drop the stale one with jj abandon <commit>. {}",
+        changes.join(", "),
+        change_revset(changes),
+        converge_advice(changes)
     )
 }
 
@@ -101,9 +118,11 @@ pub fn divergent_refusal(changes: &[crate::submit::plan::DivergentChange]) -> St
             .join(", or ");
         out.push_str(&format!("\n    Keep one: {keep}"));
     }
+    let ids: Vec<&str> = changes.iter().map(|d| d.change_id.as_str()).collect();
     out.push_str(&format!(
         "\n\nTo keep both as separate changes instead: jj duplicate <commit>, then \
-         jj abandon <commit>.\nSee {}",
+         jj abandon <commit>.\n{}\nSee {}",
+        converge_advice(&ids),
         recovering("submit-or-merge-stops-on-a-divergent-change")
     ));
     out
@@ -157,14 +176,18 @@ mod tests {
             format!(
                 "Change 'xkqv' is divergent: 2 commits share it, so jjpr stopped. List them \
                  with jj log -r 'change_id(xkqv)', then drop the one you do not want with \
-                 jj abandon <commit>. See {PAGE}#submit-or-merge-stops-on-a-divergent-change"
+                 jj abandon <commit>. On jj 0.45 or later, jj converge -r 'change_id(xkqv)' \
+                 --no-interactive resolves it automatically, or exits without changes if it \
+                 cannot decide. See {PAGE}#submit-or-merge-stops-on-a-divergent-change"
             )
         );
         assert_eq!(
             concurrent_divergence(&["a".to_string(), "b".to_string()]),
             " The stack has a divergent change (a, b). List the copies with \
              jj log -r 'change_id(a) | change_id(b)', then drop the stale one with \
-             jj abandon <commit>."
+             jj abandon <commit>. On jj 0.45 or later, jj converge -r \
+             'change_id(a) | change_id(b)' --no-interactive resolves it automatically, or \
+             exits without changes if it cannot decide."
         );
         let change = crate::submit::plan::DivergentChange {
             change_id: "xkqvwmopzzzzzz".to_string(),
@@ -177,8 +200,9 @@ mod tests {
                 "Refusing to submit: a change in this stack is divergent. Nothing has been \
                  pushed.\n\n  change xkqvwmopzzzz is on 2 commits: aa, bb (bookmarks: top)\
                  \n    Keep one: jj abandon aa, or jj abandon bb\n\nTo keep both as separate \
-                 changes instead: jj duplicate <commit>, then jj abandon <commit>.\nSee \
-                 {PAGE}#submit-or-merge-stops-on-a-divergent-change"
+                 changes instead: jj duplicate <commit>, then jj abandon <commit>.\nOn jj 0.45 or later, jj converge -r \
+                 'change_id(xkqvwmopzzzzzz)' --no-interactive resolves it automatically, or exits \
+                 without changes if it cannot decide.\nSee {PAGE}#submit-or-merge-stops-on-a-divergent-change"
             )
         );
         assert_eq!(

@@ -89,6 +89,9 @@ jjpr submit
 To keep both as separate changes, run `jj duplicate <commit-id>`, then
 `jj abandon <commit-id>`.
 
+On jj 0.45 or later, `jj converge -r 'change_id(<change-id>)' --no-interactive`
+resolves it automatically, or exits without changes if it cannot decide.
+
 ## A push failed
 
 Someone may have pushed to the branch, or the forge may protect it.
