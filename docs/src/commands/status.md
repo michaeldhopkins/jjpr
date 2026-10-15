@@ -35,10 +35,12 @@ mergeability, CI status, and review state:
 ```
   auth (1 change, PR open, push up to date)
     https://github.com/o/r/pull/42
-    ✓ mergeable  ✓ CI passing  ✓ 1 approval
+    ✓ mergeable  ✓ CI passing  ✓ 1/1 approvals
+    next: ready to merge (jjpr merge, or jjpr watch will merge it)
   profile (2 changes, PR open, push needs updating)
     https://github.com/o/r/pull/43
-    ✗ conflicts  ✗ CI failing  ⚠ changes requested  ✗ 0 approvals
+    ✗ conflicts  ✗ CI failing  ⚠ changes requested  ✗ 0/1 approvals
+    next: address the requested changes, push, and ask for re-review
 ```
 
 Draft PRs show just the link. Their CI and review detail stays hidden
@@ -62,17 +64,20 @@ With `--all`, multiple independent stacks are labeled:
 Stack 1:
   auth (1 change, PR open, push up to date)
     https://github.com/o/r/pull/42
-    ✓ mergeable  ✓ CI passing  ✓ 1 approval
+    ✓ mergeable  ✓ CI passing  ✓ 1/1 approvals
+    next: ready to merge (jjpr merge, or jjpr watch will merge it)
   profile (2 changes, PR open, push up to date)
     https://github.com/o/r/pull/43
-    ✓ mergeable  ✓ CI passing  ✓ 1 approval
+    ✓ mergeable  ✓ CI passing  ✓ 1/1 approvals
+    next: ready to merge (jjpr merge, or jjpr watch will merge it)
 
 Stack 2:
   payments (1 change, PR draft, push up to date)
     https://github.com/o/r/pull/44
   checkout (3 changes, PR open, push needs updating)
     https://github.com/o/r/pull/45
-    ✗ CI pending  ✗ 0 approvals
+    ✗ CI pending  ✗ 0/1 approvals
+    next: one more review required
 ```
 
 ## Approvals at risk from a squash landing
@@ -86,7 +91,8 @@ onto yours and drops its approvals. `status` warns ahead of time:
 ```
   api (2 changes, PR open, push up to date)
     https://github.com/o/r/pull/124
-    ✓ mergeable  ✓ CI passing  ✓ 2 approvals
+    ✓ mergeable  ✓ CI passing  ✓ 2/2 approvals
+    next: ready to merge (jjpr merge, or jjpr watch will merge it)
     ⚠ a squash-landing of #123 would dismiss 2 approvals
 ```
 
@@ -104,7 +110,8 @@ so the mergeability line above it is not read as an invitation to run
 ```
   auth (1 change, PR open, push up to date)
     https://github.com/owner/repo/pull/345
-    ✓ mergeable  ✗ 0 approvals
+    ✓ mergeable  ✗ 0/1 approvals
+    next: one more review required
     ⚠ in native stack #348 (1 of 3), so jjpr cannot merge it; `gh stack merge 345` lands it
 ```
 
@@ -150,7 +157,8 @@ them; the mutating commands act only on your own bookmarks):
     https://github.com/o/r/pull/205
   auth-api (2 changes, PR open, push needs updating)
     https://github.com/o/r/pull/204
-    ✓ mergeable  ✓ CI passing  ✓ 1 approval
+    ✓ mergeable  ✓ CI passing  ✓ 1/1 approvals
+    next: ready to merge (jjpr merge, or jjpr watch will merge it)
   platform-refactor (3 changes, PR open by @dana, jjpr won't submit or merge it)
     https://github.com/o/r/pull/198
     ✓ mergeable
@@ -207,7 +215,8 @@ Nothing of yours to submit here.
 | `✓ merged … local bookmark is stale` | The PR merged and its remote branch is gone, but a local bookmark remains; the line below shows how to remove it |
 | `✓ mergeable` / `✗ conflicts` | Whether the forge reports the PR can merge without conflicts |
 | `✓ CI passing` / `✗ CI pending` / `✗ CI failing` | Aggregate check status for the head commit |
-| `✓ N approvals` / `✗ 0 approvals` | Count of approving reviews (the required threshold comes from config) |
+| `✓ 1/1 approvals` / `✗ 0/1 approvals` | Approving reviews against the number required (`required_approvals` in config) |
+| `next: …` | The one thing left to do: how many more reviews, to address requested changes, or that the PR is ready to merge. Omitted when approvals are met but CI or conflicts still block |
 | `⚠ changes requested` | At least one reviewer has requested changes |
 | `⚠ a squash-landing of #N would dismiss …` | A lower PR's squash landing would force-push this approved PR and drop its approvals |
 | `⚠ in native stack #N …` | This PR belongs to a GitHub native stack, which jjpr cannot merge; the note names the command that can and what it would land |

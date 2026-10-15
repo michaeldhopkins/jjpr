@@ -15,7 +15,7 @@ use jjpr::config;
 use jjpr::connect::{ResolvedForge, build_forge, find_remote_host, find_repo_root, resolve_forge};
 use jjpr::forge::remote;
 use jjpr::forge::status as forge_status;
-use jjpr::forge::types::{ChecksStatus, MergeMethod, PullRequest, RepoInfo};
+use jjpr::forge::types::{MergeMethod, PullRequest, RepoInfo};
 use jjpr::forge::{Forge, ForgeKind};
 use jjpr::graph::change_graph;
 use jjpr::identity::Identity;
@@ -646,6 +646,7 @@ fn cmd_stack_overview(bookmark: Option<&str>, all: bool, no_fetch: bool) -> Resu
         below_pr,
         forge_kind: info.forge_kind,
         divergent_change_ids: divergent_change_ids_in(&stacks_to_show),
+        required_approvals: cfg.required_approvals,
     };
 
     let multi = stacks_to_show.len() > 1;
@@ -768,48 +769,6 @@ fn sync_status_label(bookmarks: &[Bookmark]) -> &'static str {
     }
 }
 
-fn format_status_line(status: &SegmentDisplayStatus) -> String {
-    let mut parts = Vec::new();
-
-    if let Some(m) = &status.mergeability {
-        match m.mergeable {
-            Some(true) => parts.push("\u{2713} mergeable".to_string()),
-            Some(false) => parts.push("\u{2717} conflicts".to_string()),
-            None => parts.push("? mergeability computing".to_string()),
-        }
-    }
-
-    if let Some(checks) = &status.checks {
-        match checks {
-            ChecksStatus::Pass => parts.push("\u{2713} CI passing".to_string()),
-            ChecksStatus::Fail => parts.push("\u{2717} CI failing".to_string()),
-            ChecksStatus::Pending => parts.push("\u{2717} CI pending".to_string()),
-            ChecksStatus::None => {}
-        }
-    }
-
-    if let Some(r) = &status.reviews {
-        if r.changes_requested {
-            parts.push("\u{26a0} changes requested".to_string());
-        }
-        parts.push(format!(
-            "{} {} approval{}",
-            if r.approved_count > 0 {
-                "\u{2713}"
-            } else {
-                "\u{2717}"
-            },
-            r.approved_count,
-            if r.approved_count == 1 { "" } else { "s" },
-        ));
-    }
-
-    if parts.is_empty() {
-        return String::new();
-    }
-    format!("    {}", parts.join("  "))
-}
-
 /// The mergeability half of a status line only — what's relevant for a
 /// coworker's base (you want to know when it can/does land, not its CI/reviews).
 fn format_mergeability_line(status: &SegmentDisplayStatus) -> String {
@@ -856,6 +815,8 @@ struct StatusRender<'a> {
     /// now refuse on it, and status is where a user looks to find out why. Status
     /// itself never refuses: a degraded view is what makes the state diagnosable.
     divergent_change_ids: HashSet<String>,
+    /// Approvals the config requires, for the `n/required` count and the next step.
+    required_approvals: u32,
 }
 
 /// Change ids appearing on more than one distinct commit across `stacks`.
@@ -1057,23 +1018,20 @@ impl StatusRender<'_> {
         match pr {
             SegmentPr::Open(p) => {
                 let mut lines = vec![format!("    {}", p.html_url)];
-                let detail = if mine {
-                    if p.draft {
-                        String::new()
-                    } else {
-                        self.status_map
-                            .get(&bookmark.name)
-                            .map(format_status_line)
-                            .unwrap_or_default()
+                if mine {
+                    if !p.draft
+                        && let Some(status) = self.status_map.get(&bookmark.name)
+                    {
+                        lines.extend(jjpr::status_line::status_lines(
+                            status,
+                            self.required_approvals,
+                        ));
                     }
-                } else {
-                    self.status_map
-                        .get(&bookmark.name)
-                        .map(format_mergeability_line)
-                        .unwrap_or_default()
-                };
-                if !detail.is_empty() {
-                    lines.push(detail);
+                } else if let Some(status) = self.status_map.get(&bookmark.name) {
+                    let detail = format_mergeability_line(status);
+                    if !detail.is_empty() {
+                        lines.push(detail);
+                    }
                 }
                 // Drafts hide review detail, so they hide the review-loss note too.
                 if !p.draft
@@ -1735,7 +1693,7 @@ fn detect_forge_for_cwd(preferred_remote: Option<&str>) -> Result<DetectedForge>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jjpr::forge::types::{PrMergeability, ReviewSummary};
+    use jjpr::forge::types::{ChecksStatus, PrMergeability, ReviewSummary};
 
     // status printed "✓ mergeable" for PRs that `jjpr merge` refuses outright,
     // so the two commands disagreed about the same PR. Verified against a live
@@ -1946,35 +1904,6 @@ mod tests {
     #[test]
     fn sync_status_empty_is_not_pushed_yet() {
         assert_eq!(sync_status_label(&[]), "not pushed yet");
-    }
-
-    #[test]
-    fn status_line_renders_mergeability_checks_and_reviews() {
-        let status = SegmentDisplayStatus {
-            mergeability: Some(PrMergeability {
-                mergeable: Some(true),
-                mergeable_state: "clean".to_string(),
-            }),
-            checks: Some(ChecksStatus::Pass),
-            reviews: Some(ReviewSummary {
-                approved_count: 1,
-                changes_requested: false,
-            }),
-        };
-        let line = format_status_line(&status);
-        assert!(line.contains("mergeable"), "got: {line}");
-        assert!(line.contains("CI passing"), "got: {line}");
-        assert!(line.contains("1 approval"), "got: {line}");
-    }
-
-    #[test]
-    fn status_line_empty_when_no_signals() {
-        let status = SegmentDisplayStatus {
-            mergeability: None,
-            checks: None,
-            reviews: None,
-        };
-        assert_eq!(format_status_line(&status), "");
     }
 
     // --- author-agnostic status rendering ---
@@ -2369,6 +2298,7 @@ mod tests {
             below_pr: HashMap::new(),
             forge_kind: None,
             divergent_change_ids: HashSet::new(),
+            required_approvals: 1,
         }
     }
 
@@ -2470,6 +2400,16 @@ mod tests {
         );
         assert!(lines.iter().any(|l| l.contains("pull/15138")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("CI passing")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.ends_with("\u{2713} 1/1 approvals")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "    next: ready to merge (jjpr merge, or jjpr watch will merge it)"),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -2508,6 +2448,7 @@ mod tests {
             below_pr: below_pr.clone(),
             forge_kind: kind,
             divergent_change_ids: HashSet::new(),
+            required_approvals: 1,
         };
         let note = |r: StatusRender, name: &str, mine: bool| r.dismiss_stale_note(name, mine);
 
@@ -2570,6 +2511,7 @@ mod tests {
             below_pr,
             forge_kind: Some(ForgeKind::GitHub),
             divergent_change_ids: HashSet::new(),
+            required_approvals: 1,
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
@@ -2706,6 +2648,7 @@ mod tests {
             below_pr,
             forge_kind: Some(ForgeKind::GitHub),
             divergent_change_ids: HashSet::new(),
+            required_approvals: 1,
         };
         let lines = r.render_segment(&seg(&["upper"]));
         assert!(
@@ -2902,6 +2845,7 @@ mod tests {
             below_pr: HashMap::new(),
             forge_kind: None,
             divergent_change_ids: HashSet::new(),
+            required_approvals: 1,
         };
         let seg = segment_of(vec![bm("feat", false)]);
         assert!(

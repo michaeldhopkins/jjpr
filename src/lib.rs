@@ -13,6 +13,7 @@ pub mod identity;
 pub mod jj;
 pub mod merge;
 pub mod parallel;
+pub mod status_line;
 pub mod submit;
 pub mod undo;
 pub mod verbose;
