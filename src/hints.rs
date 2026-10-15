@@ -85,8 +85,9 @@ pub fn concurrent_pause(restored: bool, divergent: &[String]) -> String {
         "jjpr left the stack alone"
     };
     let mut message = format!(
-        "Paused: another jj command changed the repo while jjpr was restacking. {what}, \
-         your work is intact, and it tries again on the next poll."
+        "Paused: another jj command changed the repo while jjpr was restacking. {what}. Your commits are safe in the jj operation log; \
+         if anything looks missing, run jj op log and jj op restore. jjpr tries again on the \
+         next poll."
     );
     if !divergent.is_empty() {
         message.push_str(&concurrent_divergence(divergent));
@@ -217,11 +218,18 @@ mod tests {
         assert_eq!(
             concurrent_pause(true, &[]),
             "Paused: another jj command changed the repo while jjpr was restacking. jjpr \
-             undid its restack, your work is intact, and it tries again on the next poll. \
+             undid its restack. Your commits are safe in the jj operation log; if anything \
+             looks missing, run jj op log and jj op restore. jjpr tries again on the next poll. \
              If another jj or jjpr process is running on this repo, stop it."
         );
         let left = concurrent_pause(false, &["a".to_string()]);
         assert!(left.contains("jjpr left the stack alone"), "{left}");
+        assert!(
+            left.contains(
+                "jjpr left the stack alone. Your commits are safe in the jj operation log"
+            ),
+            "{left}"
+        );
         assert!(left.contains("jj log -r 'change_id(a)'"), "{left}");
     }
 
