@@ -95,6 +95,15 @@ pub fn concurrent_pause(restored: bool, divergent: &[String]) -> String {
     message
 }
 
+/// A fetch rewrote the commits the working copy is built on, and the stack is
+/// divergent: not another jj process.
+pub fn fetch_rewrote_working_copy() -> String {
+    "Warning: fetching rewrote commits under your working copy (the remote changed a commit \
+     your working copy sits on). jj may now report it as stale. Run jj workspace update-stale, \
+     then check jj log for a divergent change before continuing."
+        .to_string()
+}
+
 /// Submit's refusal to publish a divergent change, naming each change's
 /// commits and the abandon that keeps either one.
 pub fn divergent_refusal(changes: &[crate::submit::plan::DivergentChange]) -> String {

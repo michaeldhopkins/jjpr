@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use super::divergence::{Divergence, concurrent_gate_warning, divergence, gate};
 use crate::forge::comment;
 use crate::forge::http::HttpError;
 use crate::forge::types::{MergeMethod, PullRequest};
@@ -13,25 +14,6 @@ use crate::jj::types::NarrowedSegment;
 use crate::jj::{Jj, revset};
 
 use super::plan::{BlockReason, MergePlan, PrMergeStatus, evaluate_segment};
-
-/// jj's corruption signal — divergent change ids.
-enum Divergence {
-    Clean,
-    Present(Vec<String>),
-}
-
-/// Read the divergence signal, failing SAFE. A read error here is almost always
-/// lock contention from the very concurrent writer we're guarding against (jj's
-/// op-heads lock; `run_jj` does not retry), and must NEVER be mistaken for
-/// "clean" — that would let a mangled tree through the gate. So an error is
-/// reported as `Present` (with no ids to name), gating the caller.
-fn divergence(jj: &dyn Jj) -> Divergence {
-    match jj.divergent_change_ids() {
-        Ok(d) if d.is_empty() => Divergence::Clean,
-        Ok(d) => Divergence::Present(d),
-        Err(_) => Divergence::Present(Vec::new()),
-    }
-}
 
 /// Attempt to synchronize local state after a forge merge.
 ///
@@ -68,16 +50,17 @@ fn reconcile_local_state(
     // stack is what collapses/drops files. Both versions are preserved in place;
     // gate and surface, and the next poll retries once it's resolved. We never
     // roll back past the divergence, so no real work is discarded.
-    if let Divergence::Present(ids) = divergence(jj) {
-        return vec![concurrent_gate_warning(false, &ids)];
+    if let Some(warning) = gate(jj, None) {
+        return vec![warning];
     }
 
+    let parents_before = jj.working_copy_parents().ok();
     println!("  Fetching remotes...");
     if let Err(e) = jj.git_fetch() {
         // A failed fetch can still have reconciled a concurrent fork into a
         // divergent state; surface it.
-        if let Divergence::Present(ids) = divergence(jj) {
-            return vec![concurrent_gate_warning(false, &ids)];
+        if let Some(warning) = gate(jj, parents_before.as_deref()) {
+            return vec![warning];
         }
         warnings.push(mk(format!("Failed to fetch remotes: {e}")));
         return warnings;
@@ -94,8 +77,8 @@ fn reconcile_local_state(
     // A concurrent reconcile during the fetch that left the stack divergent: our
     // work and the other process's work are both present but divergent. Do NOT
     // rebase on top of that — that is the mangle. Gate, preserving both, retry.
-    if let Divergence::Present(ids) = divergence(jj) {
-        return vec![concurrent_gate_warning(false, &ids)];
+    if let Some(warning) = gate(jj, parents_before.as_deref()) {
+        return vec![warning];
     }
 
     if moved_root.is_none() {
@@ -309,18 +292,6 @@ fn reconcile_local_state(
     }
 
     warnings
-}
-
-/// A work-preserving concurrent-modification warning. jj's reconcile keeps both
-/// sides' commits, so recovery never discards work: we either gate before the
-/// mangling rebase (`restored = false`) or roll only the rebase back to the
-/// clean post-fetch op (`restored = true`). No "run jj op restore" hand-off.
-fn concurrent_gate_warning(restored: bool, divergent_ids: &[String]) -> LocalDivergenceWarning {
-    let message = hints::concurrent_pause(restored, divergent_ids);
-    LocalDivergenceWarning {
-        kind: DivergenceKind::Concurrent,
-        message,
-    }
 }
 
 /// Refresh PR state from forge and retarget the next PR's base if needed.
@@ -3889,6 +3860,8 @@ mod tests {
     struct FakeReconcileJj {
         divergent: Vec<String>,
         divergent_after_rebase: Vec<String>,
+        divergent_after_fetch: Vec<String>,
+        parents_after_fetch: Option<Vec<String>>,
         divergent_errors: bool,
         is_rooted: bool,
         fetched: Mutex<bool>,
@@ -3904,6 +3877,8 @@ mod tests {
             Self {
                 divergent: vec![],
                 divergent_after_rebase: vec![],
+                divergent_after_fetch: vec![],
+                parents_after_fetch: None,
                 divergent_errors: false,
                 is_rooted: false,
                 fetched: Mutex::new(false),
@@ -3917,6 +3892,18 @@ mod tests {
         }
         fn divergent(mut self, v: &[&str]) -> Self {
             self.divergent = v.iter().map(|s| s.to_string()).collect();
+            self
+        }
+        /// The fetch rewrites the commits `@` sits on (parents `p0` become `p1`) and leaves
+        /// `v` divergent, as a stale checkout does.
+        fn fetch_rewrites_checkout_parents(mut self, v: &[&str]) -> Self {
+            self.divergent_after_fetch = v.iter().map(|s| s.to_string()).collect();
+            self.parents_after_fetch = Some(vec!["p1".to_string()]);
+            self
+        }
+        /// Divergence that appears with the fetch while `@`'s parents stay as they were.
+        fn divergent_after_fetch(mut self, v: &[&str]) -> Self {
+            self.divergent_after_fetch = v.iter().map(|s| s.to_string()).collect();
             self
         }
         /// The remaining stack is already based on trunk (merge-commit landing),
@@ -3958,6 +3945,9 @@ mod tests {
                 anyhow::bail!("lock contention reading divergent()");
             }
             let mut ids = self.divergent.clone();
+            if *self.fetched.lock().expect("poisoned") {
+                ids.extend(self.divergent_after_fetch.iter().cloned());
+            }
             if *self.rebased.lock().expect("poisoned") {
                 ids.extend(self.divergent_after_rebase.iter().cloned());
             }
@@ -3966,6 +3956,13 @@ mod tests {
         fn git_fetch(&self) -> Result<()> {
             *self.fetched.lock().expect("poisoned") = true;
             Ok(())
+        }
+        fn working_copy_parents(&self) -> Result<Vec<String>> {
+            let fetched = *self.fetched.lock().expect("poisoned");
+            Ok(match (&self.parents_after_fetch, fetched) {
+                (Some(after), true) => after.clone(),
+                _ => vec!["p0".to_string()],
+            })
         }
         fn rebase_onto(&self, _: &str, _: &str) -> Result<()> {
             *self.rebased.lock().expect("poisoned") = true;
@@ -4146,6 +4143,28 @@ mod tests {
         assert!(!*jj.rebased.lock().unwrap());
         assert!(jj.restored.lock().unwrap().is_empty());
         assert!(jj.pushed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_fetch_that_rewrites_the_checkout_is_not_blamed_on_another_process() {
+        let jj = FakeReconcileJj::new().fetch_rewrites_checkout_parents(&["ch_wc"]);
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].kind, DivergenceKind::Local);
+        assert_eq!(warnings[0].message, hints::fetch_rewrote_working_copy());
+        assert!(!*jj.rebased.lock().unwrap(), "gates before rebasing");
+        assert!(jj.pushed.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn divergence_with_the_checkout_parents_unchanged_is_still_concurrent() {
+        let jj = FakeReconcileJj::new().divergent_after_fetch(&["ch_x"]);
+        let warnings = reconcile_two(&jj);
+
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
+        assert!(warnings[0].message.contains("ch_x"));
     }
 
     #[test]

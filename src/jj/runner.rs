@@ -226,6 +226,10 @@ impl Jj for JjRunner {
         Ok(())
     }
 
+    fn working_copy_parents(&self) -> Result<Vec<String>> {
+        self.parents_of_working_copy()
+    }
+
     fn get_working_copy_commit_id(&self) -> Result<String> {
         let output = self.run_jj(&[
             "log",

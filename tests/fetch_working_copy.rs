@@ -108,3 +108,23 @@ fn a_fetch_without_a_snapshot_leaves_the_checkout_alone() {
     let after = std::fs::read(&checkout).expect("jj keeps a checkout file");
     assert_eq!(before, after, "watch's fetch must not touch the checkout");
 }
+
+#[test]
+fn the_checkouts_parents_change_when_a_fetch_rewrites_them() {
+    let Some((repo, _other)) = checkout_on_a_rewritten_bookmark() else {
+        return;
+    };
+    let jj = repo.runner();
+    jj.snapshot().unwrap();
+    let before = jj.working_copy_parents().unwrap();
+    assert_eq!(before.len(), 1, "{before:?}");
+    jj.git_fetch().unwrap();
+    let after = jj.working_copy_parents().unwrap();
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_ne!(before, after, "the fetch rewrote the commit @ sits on");
+    assert_eq!(
+        jj.working_copy_parents().unwrap(),
+        after,
+        "and a read is stable"
+    );
+}

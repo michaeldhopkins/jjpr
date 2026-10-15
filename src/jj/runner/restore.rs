@@ -6,6 +6,19 @@ use super::JjRunner;
 use crate::jj::Jj;
 
 impl JjRunner {
+    /// The commit ids `@` is built on, read without touching the working copy.
+    pub(super) fn parents_of_working_copy(&self) -> Result<Vec<String>> {
+        let output = self.run_jj(&[
+            "log",
+            "-r",
+            "parents(@)",
+            "--no-graph",
+            "--template",
+            r#"commit_id ++ "\n""#,
+        ])?;
+        Ok(output.lines().map(str::to_string).collect())
+    }
+
     /// `jj op restore` that leaves the working copy alone, for an `@` that is
     /// the same commit at `op_id` and now. When `@` has moved since (the
     /// rewrite snapshotted the edits into a new `@`), the restore would leave

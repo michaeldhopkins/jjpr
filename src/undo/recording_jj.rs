@@ -94,6 +94,9 @@ impl<J: Jj> Jj for RecordingJj<J> {
     fn get_working_copy_commit_id(&self) -> Result<String> {
         self.inner.get_working_copy_commit_id()
     }
+    fn working_copy_parents(&self) -> Result<Vec<String>> {
+        self.inner.working_copy_parents()
+    }
     fn rebase_onto(&self, source: &str, destination: &str) -> Result<()> {
         self.recorder
             .around(|| self.inner.rebase_onto(source, destination))

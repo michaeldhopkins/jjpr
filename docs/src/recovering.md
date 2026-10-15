@@ -92,6 +92,23 @@ To keep both as separate changes, run `jj duplicate <commit-id>`, then
 On jj 0.45 or later, `jj converge -r 'change_id(<change-id>)' --no-interactive`
 resolves it automatically, or exits without changes if it cannot decide.
 
+## Fetching rewrote commits under your working copy
+
+After a merge, jjpr fetches. If the remote had changed a commit your working
+copy sits on, jj rebases the working copy, and the stack can come out
+divergent. jjpr stops and says so:
+
+```
+Warning: fetching rewrote commits under your working copy (the remote changed
+a commit your working copy sits on). jj may now report it as stale. Run jj
+workspace update-stale, then check jj log for a divergent change before
+continuing.
+```
+
+Run `jj workspace update-stale`, then `jj log` to look for a divergent change.
+If there is one, the section above on divergent changes applies. watch tries
+again on the next poll.
+
 ## A push failed
 
 Someone may have pushed to the branch, or the forge may protect it.
