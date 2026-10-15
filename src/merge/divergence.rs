@@ -97,6 +97,26 @@ impl ReconcileState {
         reasons
     }
 
+    /// Take in the warnings of a local reconcile. Ordinary local-sync failures need a
+    /// manual rebase (`local_failed`); a concurrent op-log reconcile was handled
+    /// work-preservingly and degrades via `has_concurrent`; a fetch rewrite degrades via
+    /// `has_fetch_rewrite`. All three gate further merges. The changes a fetch rewrite left
+    /// divergent are remembered for the next poll, and forgotten otherwise.
+    pub fn absorb_local(&mut self, jj: &dyn Jj, warnings: Vec<LocalDivergenceWarning>) {
+        if warnings.iter().any(|w| w.kind == DivergenceKind::Local) {
+            self.local_failed = true;
+        }
+        let rewrite = warnings
+            .iter()
+            .any(|w| w.kind == DivergenceKind::FetchRewrite);
+        self.rewritten = if rewrite {
+            jj.divergent_change_ids().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.warnings.extend(warnings);
+    }
+
     /// Wipe failure state so a follow-up reconcile gets a fresh chance.
     /// Used by run_watch_loop between iterations so the user can fix
     /// local state and have watch resume on the next poll.

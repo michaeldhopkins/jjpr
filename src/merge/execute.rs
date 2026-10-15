@@ -461,21 +461,7 @@ pub(crate) fn reconcile_after_merge(
         fk,
         &state.rewritten,
     );
-    // Ordinary local-sync failures need a manual rebase (local_failed). A
-    // concurrent op-log reconcile was handled work-preservingly (Concurrent
-    // warning) and degrades via has_concurrent(); both gate further merges.
-    if warnings.iter().any(|w| w.kind == DivergenceKind::Local) {
-        state.local_failed = true;
-    }
-    state.rewritten = if warnings
-        .iter()
-        .any(|w| w.kind == DivergenceKind::FetchRewrite)
-    {
-        jj.divergent_change_ids().unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    state.warnings.extend(warnings);
+    state.absorb_local(jj, warnings);
 
     let nav = comment::create_stack_nav(plan.stack_nav);
     let outcome = reconcile_forge_state(
