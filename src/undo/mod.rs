@@ -366,7 +366,63 @@ pub fn record(repo_root: &Path, meta: Meta) -> std::sync::Arc<Recorder> {
 
 #[cfg(test)]
 mod tests {
-    use super::now_secs;
+    use super::*;
+    use crate::forge::ForgeKind;
+    use crate::undo::journal::SCHEMA;
+    use crate::undo::world::World;
+
+    fn entry(absorbed: &[&str], local_undone: bool, view: &str) -> Entry {
+        Entry {
+            schema: SCHEMA,
+            id: "1".into(),
+            command: "merge".into(),
+            started_at: 0,
+            remote: "origin".into(),
+            forge: ForgeKind::GitHub,
+            owner: "o".into(),
+            repo: "r".into(),
+            start_op: "0".into(),
+            end_op: Some("0".into()),
+            end_view: Some(view.into()),
+            absorbed: absorbed.iter().map(|s| s.to_string()).collect(),
+            state: State::Done,
+            local_undone,
+            undone_view: Some(view.into()),
+            last_op: None,
+            closed_by_push: Vec::new(),
+            missed: Vec::new(),
+            actions: vec![],
+        }
+    }
+
+    /// Edits jj recorded while the command ran block an undo, and only an undo of
+    /// a command not already undone locally.
+    #[test]
+    fn absorbed_work_blocks_only_a_first_undo() {
+        let repo = World::new(Default::default(), Default::default());
+        let view = repo.view_fingerprint().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let journal = Journal::at(dir.path().to_path_buf());
+        let forge_for = |_: &Entry| -> Result<Box<dyn Forge>> { anyhow::bail!("unused") };
+        let cx = Context {
+            journal: &journal,
+            repo: &repo,
+            forge_for: &forge_for,
+            watch_running: false,
+            now: 0,
+        };
+        let blocked = |direction, absorbed: &[&str], local_undone| {
+            let opts = Options::new(direction, false, true);
+            check_local(&cx, &entry(absorbed, local_undone, &view), opts)
+                .unwrap()
+                .iter()
+                .any(|b| matches!(b, Blocker::Absorbed(_)))
+        };
+        assert!(blocked(Direction::Undo, &["snapshot working copy"], false));
+        assert!(!blocked(Direction::Redo, &["snapshot working copy"], false));
+        assert!(!blocked(Direction::Undo, &["snapshot working copy"], true));
+        assert!(!blocked(Direction::Undo, &[], false));
+    }
 
     #[test]
     fn now_secs_reads_the_wall_clock() {
