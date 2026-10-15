@@ -45,6 +45,9 @@ pub struct ReconcileState {
     /// and jjpr cannot advance. Deliberately not a `*_failed` flag: nothing
     /// failed, and re-running changes nothing. It still stops the run.
     pub native_stack_block: Option<BlockReason>,
+    /// Changes a fetch rewrite left divergent, kept across `reset` so the next poll
+    /// still names the fetch while every divergent change is one of them.
+    pub rewritten: Vec<String>,
 }
 
 impl ReconcileState {
@@ -98,7 +101,11 @@ impl ReconcileState {
     /// Used by run_watch_loop between iterations so the user can fix
     /// local state and have watch resume on the next poll.
     pub fn reset(&mut self) {
-        *self = Self::default();
+        let rewritten = std::mem::take(&mut self.rewritten);
+        *self = Self {
+            rewritten,
+            ..Self::default()
+        };
     }
 }
 
@@ -193,15 +200,19 @@ fn fetch_rewrite_warning() -> LocalDivergenceWarning {
 }
 
 /// The gate when the stack is divergent, `None` when it is clean. `before` is `@` and its
-/// parents read before the fetch (`None` before there was one).
+/// parents read before the fetch (`None` before there was one). `known` are the changes an
+/// earlier poll already blamed on a fetch rewrite: while every divergent change is one of those, the
+/// verdict stands, though no fetch has run in between.
 pub(super) fn gate(
     jj: &dyn Jj,
     before: Option<&WorkingCopyView>,
+    known: &[String],
 ) -> Option<LocalDivergenceWarning> {
     let Divergence::Present(ids) = divergence(jj) else {
         return None;
     };
-    if fetch_rewrote_working_copy(jj, before, &ids) {
+    let still_the_rewrites = !ids.is_empty() && ids.iter().all(|id| known.contains(id));
+    if still_the_rewrites || fetch_rewrote_working_copy(jj, before, &ids) {
         return Some(fetch_rewrite_warning());
     }
     Some(concurrent_gate_warning(false, &ids))

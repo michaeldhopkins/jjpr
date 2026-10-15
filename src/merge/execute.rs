@@ -36,6 +36,7 @@ fn reconcile_local_state(
     remote_name: &str,
     strategy: crate::config::ReconcileStrategy,
     fk: ForgeKind,
+    known: &[String],
 ) -> Vec<LocalDivergenceWarning> {
     let mut warnings = Vec::new();
 
@@ -54,7 +55,7 @@ fn reconcile_local_state(
     // stack is what collapses/drops files. Both versions are preserved in place;
     // gate and surface, and the next poll retries once it's resolved. We never
     // roll back past the divergence, so no real work is discarded.
-    if let Some(warning) = gate(jj, None) {
+    if let Some(warning) = gate(jj, None, known) {
         return vec![warning];
     }
 
@@ -63,7 +64,7 @@ fn reconcile_local_state(
     if let Err(e) = jj.git_fetch() {
         // A failed fetch can still have reconciled a concurrent fork into a
         // divergent state; surface it.
-        if let Some(warning) = gate(jj, view_before.as_ref()) {
+        if let Some(warning) = gate(jj, view_before.as_ref(), &[]) {
             return vec![warning];
         }
         warnings.push(mk(format!("Failed to fetch remotes: {e}")));
@@ -81,7 +82,7 @@ fn reconcile_local_state(
     // A concurrent reconcile during the fetch that left the stack divergent: our
     // work and the other process's work are both present but divergent. Do NOT
     // rebase on top of that — that is the mangle. Gate, preserving both, retry.
-    if let Some(warning) = gate(jj, view_before.as_ref()) {
+    if let Some(warning) = gate(jj, view_before.as_ref(), &[]) {
         return vec![warning];
     }
 
@@ -443,6 +444,7 @@ pub(crate) fn reconcile_after_merge(
     );
     merged_nav::after_merge(forge, plan, pr_map, segments, seg_idx);
     if seg_idx + 1 >= segments.len() {
+        state.rewritten.clear();
         return None;
     }
     let warnings = reconcile_local_state(
@@ -457,6 +459,7 @@ pub(crate) fn reconcile_after_merge(
         &plan.remote_name,
         plan.options.reconcile_strategy,
         fk,
+        &state.rewritten,
     );
     // Ordinary local-sync failures need a manual rebase (local_failed). A
     // concurrent op-log reconcile was handled work-preservingly (Concurrent
@@ -464,6 +467,14 @@ pub(crate) fn reconcile_after_merge(
     if warnings.iter().any(|w| w.kind == DivergenceKind::Local) {
         state.local_failed = true;
     }
+    state.rewritten = if warnings
+        .iter()
+        .any(|w| w.kind == DivergenceKind::FetchRewrite)
+    {
+        jj.divergent_change_ids().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     state.warnings.extend(warnings);
 
     let nav = comment::create_stack_nav(plan.stack_nav);
@@ -968,6 +979,17 @@ mod tests {
         }
     }
 
+    fn nav_entry(name: &str, number: u64, current: bool) -> comment::StackEntry {
+        comment::StackEntry {
+            bookmark_name: name.to_string(),
+            pr_url: Some(format!("https://github.com/o/r/pull/{number}")),
+            pr_number: Some(number),
+            is_current: current,
+            is_merged: false,
+            closed_at: None,
+        }
+    }
+
     fn make_pr(name: &str, number: u64) -> PullRequest {
         PullRequest {
             number,
@@ -1010,6 +1032,8 @@ mod tests {
         checks: HashMap<String, ChecksStatus>,
         reviews: HashMap<u64, ReviewSummary>,
         dismiss_stale: HashMap<String, Option<bool>>,
+        /// What `list_comments` returns for every PR.
+        comments: Vec<IssueComment>,
     }
 
     impl RecordingGitHub {
@@ -1022,6 +1046,7 @@ mod tests {
                 checks: HashMap::new(),
                 reviews: HashMap::new(),
                 dismiss_stale: HashMap::new(),
+                comments: Vec::new(),
             }
         }
 
@@ -1125,7 +1150,7 @@ mod tests {
             unimplemented!()
         }
         fn list_comments(&self, _o: &str, _r: &str, _i: u64) -> Result<Vec<IssueComment>> {
-            Ok(vec![])
+            Ok(self.comments.clone())
         }
         fn create_comment(&self, _o: &str, _r: &str, _i: u64, _b: &str) -> Result<IssueComment> {
             unimplemented!()
@@ -1133,8 +1158,12 @@ mod tests {
         fn delete_comment(&self, _: &str, _: &str, _: u64) -> Result<()> {
             unimplemented!()
         }
-        fn update_comment(&self, _o: &str, _r: &str, _id: u64, _b: &str) -> Result<()> {
-            unimplemented!()
+        fn update_comment(&self, _o: &str, _r: &str, id: u64, body: &str) -> Result<()> {
+            self.calls
+                .lock()
+                .expect("poisoned")
+                .push(format!("update_comment:{id}:{body}"));
+            Ok(())
         }
         fn update_pr_body(&self, _o: &str, _r: &str, _n: u64, _b: &str) -> Result<()> {
             unimplemented!()
@@ -3677,6 +3706,7 @@ mod tests {
             local_failed: true,
             forge_failed: false,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Local,
                 message: "fetch failed".into(),
@@ -3692,6 +3722,7 @@ mod tests {
             local_failed: false,
             forge_failed: true,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Forge,
                 message: "list_open_prs failed".into(),
@@ -3707,6 +3738,7 @@ mod tests {
             local_failed: true,
             forge_failed: true,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![],
         };
         assert!(s.degraded());
@@ -3724,6 +3756,7 @@ mod tests {
             local_failed: false,
             forge_failed: false,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Concurrent,
                 message: "rolled back".into(),
@@ -3984,6 +4017,7 @@ mod tests {
             "origin",
             strategy,
             ForgeKind::GitHub,
+            &[],
         )
     }
 
@@ -4008,6 +4042,7 @@ mod tests {
                 "origin",
                 strategy,
                 ForgeKind::GitHub,
+                &[],
             );
             assert!(warnings.is_empty(), "{strategy:?}: {warnings:?}");
             assert!(!*jj.rebased.lock().unwrap(), "{strategy:?}");
@@ -4039,11 +4074,20 @@ mod tests {
     }
 
     #[test]
-    fn reconciling_after_the_last_segment_touches_no_local_state() {
+    fn reconciling_after_the_last_segment_marks_its_pr_merged_and_touches_no_local_state() {
+        let old = comment::generate_comment_body(
+            &[nav_entry("bottom", 1, false), nav_entry("top", 2, true)],
+            &[],
+        );
+        let mut gh = RecordingGitHub::new();
+        gh.comments = vec![IssueComment {
+            id: 77,
+            body: Some(old),
+        }];
         let jj = FakeReconcileJj::new();
-        let gh = RecordingGitHub::new();
         let plan = make_plan_single_mergeable("top", 2);
         let segments = vec![make_segment("bottom"), make_segment("top")];
+        let pr_map = HashMap::from([("top".to_string(), make_pr("top", 2))]);
         let mut state = ReconcileState::default();
 
         let fresh = reconcile_after_merge(
@@ -4053,13 +4097,99 @@ mod tests {
             1,
             &plan,
             ForgeKind::GitHub,
-            None,
+            Some(&pr_map),
             &mut state,
         );
 
         assert!(fresh.is_none());
         assert!(!*jj.fetched.lock().unwrap(), "nothing above to sync");
         assert!(!state.degraded());
+        let patched: Vec<String> = gh
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("update_comment:77:"))
+            .collect();
+        assert_eq!(patched.len(), 1, "{:?}", gh.calls());
+        assert!(patched[0].contains("<-- this PR, merged"), "{}", patched[0]);
+        assert!(patched[0].contains("~~[`bottom`]"), "{}", patched[0]);
+    }
+
+    #[test]
+    fn a_rewrite_stays_the_fetchs_while_the_same_changes_stay_divergent() {
+        // The first poll blamed the fetch; the user has not fixed it, so the next poll
+        // sees the same divergence before any fetch and must not call it concurrent.
+        let jj = FakeReconcileJj::new().divergent(&["ch_wc"]);
+        let gh = RecordingGitHub::new();
+        let plan = make_plan_single_mergeable("bottom", 1);
+        let segments = vec![make_segment("bottom"), make_segment("top")];
+        let mut state = ReconcileState {
+            rewritten: vec!["ch_wc".to_string()],
+            ..ReconcileState::default()
+        };
+        state.reset();
+
+        reconcile_after_merge(
+            &jj,
+            &gh,
+            &segments,
+            0,
+            &plan,
+            ForgeKind::GitHub,
+            None,
+            &mut state,
+        );
+
+        assert!(state.has_fetch_rewrite() && !state.has_concurrent());
+        assert!(!state.local_failed);
+        assert_eq!(state.rewritten, vec!["ch_wc".to_string()]);
+        assert!(!*jj.fetched.lock().unwrap());
+
+        // Another change going divergent is not that rewrite: back to concurrent.
+        let other = FakeReconcileJj::new().divergent(&["ch_other"]);
+        state.reset();
+        reconcile_after_merge(
+            &other,
+            &gh,
+            &segments,
+            0,
+            &plan,
+            ForgeKind::GitHub,
+            None,
+            &mut state,
+        );
+        assert!(state.has_concurrent() && !state.has_fetch_rewrite());
+        assert!(state.rewritten.is_empty());
+    }
+
+    #[test]
+    fn a_divergence_beyond_the_known_rewrite_is_concurrent() {
+        let gh = RecordingGitHub::new();
+        let plan = make_plan_single_mergeable("bottom", 1);
+        let segments = vec![make_segment("bottom"), make_segment("top")];
+        let run = |jj: &FakeReconcileJj| {
+            let mut state = ReconcileState {
+                rewritten: vec!["ch_wc".to_string()],
+                ..ReconcileState::default()
+            };
+            reconcile_after_merge(
+                jj,
+                &gh,
+                &segments,
+                0,
+                &plan,
+                ForgeKind::GitHub,
+                None,
+                &mut state,
+            );
+            state
+        };
+
+        // The known change plus another: not only the rewrite.
+        let both = run(&FakeReconcileJj::new().divergent(&["ch_wc", "ch_other"]));
+        assert!(both.has_concurrent() && !both.has_fetch_rewrite());
+        // The read failing names nothing, so it cannot be the known rewrite.
+        let unreadable = run(&FakeReconcileJj::new().divergent_errors());
+        assert!(unreadable.has_concurrent() && !unreadable.has_fetch_rewrite());
     }
 
     #[test]
@@ -4083,20 +4213,6 @@ mod tests {
 
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert_eq!(warnings[0].kind, DivergenceKind::Concurrent);
-    }
-
-    #[test]
-    fn the_fetch_rewrite_gates_the_run_without_blaming_a_local_sync_failure() {
-        let jj = FakeReconcileJj::new().fetch_rewrites_checkout_parents(&["ch_parent"]);
-        let mut state = ReconcileState::default();
-        state.warnings.extend(reconcile_two(&jj));
-
-        assert!(state.has_fetch_rewrite());
-        assert!(state.degraded());
-        assert_eq!(
-            state.block_reasons(),
-            vec![BlockReason::WorkingCopyRewritten]
-        );
     }
 
     #[test]
@@ -4223,6 +4339,7 @@ mod tests {
             "origin",
             crate::config::ReconcileStrategy::Merge,
             ForgeKind::GitHub,
+            &[],
         );
         assert!(
             !jj.order
@@ -4384,6 +4501,7 @@ mod tests {
             local_failed: true,
             forge_failed: true,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![],
         };
         let reasons = s.block_reasons();
@@ -4404,6 +4522,7 @@ mod tests {
             forge_failed: false,
             warnings: vec![],
             native_stack_block: None,
+            rewritten: Vec::new(),
         };
         assert_eq!(s.block_reasons(), vec![BlockReason::LocalSyncFailed]);
     }
@@ -4415,6 +4534,7 @@ mod tests {
             forge_failed: true,
             warnings: vec![],
             native_stack_block: None,
+            rewritten: Vec::new(),
         };
         assert_eq!(s.block_reasons(), vec![BlockReason::ForgeReconcileFailed]);
     }
@@ -4425,6 +4545,7 @@ mod tests {
             local_failed: true,
             forge_failed: true,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Local,
                 message: "x".into(),
@@ -4498,6 +4619,7 @@ mod tests {
             local_failed: true, // simulate caller re-entering
             forge_failed: false,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![],
         };
         // Should panic in debug builds.

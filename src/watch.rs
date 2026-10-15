@@ -2405,6 +2405,7 @@ mod tests {
             local_failed: true,
             forge_failed: false,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Local,
                 message: "fetch failed".into(),
@@ -2417,6 +2418,7 @@ mod tests {
             local_failed: false,
             forge_failed: true,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![LocalDivergenceWarning {
                 kind: DivergenceKind::Forge,
                 message: "list_open_prs failed".into(),
@@ -2484,6 +2486,7 @@ mod tests {
             local_failed: true,
             forge_failed: true,
             native_stack_block: None,
+            rewritten: Vec::new(),
             warnings: vec![],
         };
         let action = classify_post_merge(&mixed, &prev, Duration::ZERO, HEARTBEAT);
