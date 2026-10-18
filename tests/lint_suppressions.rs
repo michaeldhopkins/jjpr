@@ -1,4 +1,4 @@
-// @template-sha256: 3292292b195189842844b3b69a394a6fd38a0e165039c16498b93b2fcc8b816a
+// @template-sha256: 558f4df0296f9f9deb308ce4a43221acdf0194ff28bfaab95169e6a609a54641
 //! Lint-suppression and baseline quality ratchet.
 //! Per-repo configuration lives in `tests/ratchets.toml`.
 
@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[rustfmt::skip]
 struct Config {
     lint_roots: Vec<String>,
     suppressions: usize,
@@ -16,6 +17,7 @@ struct Config {
     shell_suppressions: usize,
 }
 
+#[rustfmt::skip]
 fn strip_toml_comment(line: &str) -> &str {
     let mut in_quotes = false;
     for (idx, ch) in line.char_indices() {
@@ -28,6 +30,7 @@ fn strip_toml_comment(line: &str) -> &str {
     line
 }
 
+#[rustfmt::skip]
 fn parse_string_list(raw: &str) -> Vec<String> {
     let (mut out, mut cur, mut in_q) = (Vec::new(), String::new(), false);
     for ch in raw.chars() {
@@ -43,6 +46,7 @@ fn parse_string_list(raw: &str) -> Vec<String> {
     out
 }
 
+#[rustfmt::skip]
 fn apply_list_key(cfg: &mut Config, key: &str, items: Vec<String>) {
     match key {
         "lint_roots" => cfg.lint_roots = items,
@@ -52,6 +56,7 @@ fn apply_list_key(cfg: &mut Config, key: &str, items: Vec<String>) {
     }
 }
 
+#[rustfmt::skip]
 fn load_config(root: &Path) -> Config {
     let mut cfg = Config {
         lint_roots: vec!["src".to_string(), "tests".to_string()],
@@ -65,7 +70,8 @@ fn load_config(root: &Path) -> Config {
     let Ok(raw) = fs::read_to_string(root.join("tests/ratchets.toml")) else {
         return cfg;
     };
-    let (mut section, mut pending_key, mut pending_arr) = (String::new(), None::<String>, String::new());
+    let (mut section, mut pending_key, mut pending_arr) =
+        (String::new(), None::<String>, String::new());
     for raw_line in raw.lines() {
         let line = strip_toml_comment(raw_line).trim();
         if line.is_empty() {
@@ -85,7 +91,9 @@ fn load_config(root: &Path) -> Config {
             section = line[1..line.len() - 1].trim().to_string();
             continue;
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let (key, val) = (k.trim().trim_matches('"'), v.trim());
         if section.is_empty() {
             if val.starts_with('[') && !val.contains(']') {
@@ -97,7 +105,9 @@ fn load_config(root: &Path) -> Config {
                         apply_list_key(&mut cfg, key, parse_string_list(val));
                     }
                     "suppressions" => cfg.suppressions = val.parse().expect("valid suppressions"),
-                    "shell_suppressions" => cfg.shell_suppressions = val.parse().expect("valid shell_suppressions"),
+                    "shell_suppressions" => {
+                        cfg.shell_suppressions = val.parse().expect("valid shell_suppressions")
+                    }
                     "check_baseline_lints" => cfg.check_baseline_lints = val == "true",
                     _ => {}
                 }
@@ -110,6 +120,53 @@ fn load_config(root: &Path) -> Config {
     cfg
 }
 
+#[rustfmt::skip]
+fn scrub_block_comment(b: &[u8], mut i: usize, out: &mut String) -> usize {
+    i += 2;
+    let mut depth = 1usize;
+    while i < b.len() && depth > 0 {
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            depth += 1;
+            i += 2;
+        } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+            depth -= 1;
+            i += 2;
+        } else {
+            if b[i] == b'\n' {
+                out.push('\n');
+            }
+            i += 1;
+        }
+    }
+    i
+}
+
+#[rustfmt::skip]
+fn scrub_raw_string(b: &[u8], i: usize, out: &mut String) -> Option<usize> {
+    let mut hashes = 0usize;
+    let mut j = i + 1;
+    while j < b.len() && b[j] == b'#' {
+        hashes += 1;
+        j += 1;
+    }
+    if j >= b.len() || b[j] != b'"' {
+        return None;
+    }
+    let mut k = j + 1;
+    while k < b.len() {
+        if b[k] == b'"' && k + hashes < b.len() && b[k + 1..=k + hashes].iter().all(|&x| x == b'#')
+        {
+            return Some(k + hashes + 1);
+        }
+        if b[k] == b'\n' {
+            out.push('\n');
+        }
+        k += 1;
+    }
+    Some(k)
+}
+
+#[rustfmt::skip]
 fn scrub_rust_literals_and_comments(source: &str) -> String {
     let b = source.as_bytes();
     let mut out = String::with_capacity(source.len());
@@ -120,22 +177,7 @@ fn scrub_rust_literals_and_comments(source: &str) -> String {
                 i += 1;
             }
         } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-            i += 2;
-            let mut depth = 1usize;
-            while i < b.len() && depth > 0 {
-                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-                    depth += 1;
-                    i += 2;
-                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
-                    depth -= 1;
-                    i += 2;
-                } else {
-                    if b[i] == b'\n' {
-                        out.push('\n');
-                    }
-                    i += 1;
-                }
-            }
+            i = scrub_block_comment(b, i, &mut out);
         } else if b[i] == b'\'' && i + 2 < b.len() && b[i + 1] != b'\\' && b[i + 2] == b'\'' {
             i += 3;
         } else if b[i] == b'\'' && i + 3 < b.len() && b[i + 1] == b'\\' {
@@ -147,29 +189,12 @@ fn scrub_rust_literals_and_comments(source: &str) -> String {
                 }
                 i += 1;
             }
-        } else if b[i] == b'r' && i + 1 < b.len() && (b[i + 1] == b'#' || b[i + 1] == b'"') {
-            let mut hashes = 0usize;
-            let mut j = i + 1;
-            while j < b.len() && b[j] == b'#' {
-                hashes += 1;
-                j += 1;
-            }
-            if j < b.len() && b[j] == b'"' {
-                i = j + 1;
-                while i < b.len() {
-                    if b[i] == b'"' && i + hashes < b.len() && b[i + 1..=i + hashes].iter().all(|&x| x == b'#') {
-                        i += hashes + 1;
-                        break;
-                    }
-                    if b[i] == b'\n' {
-                        out.push('\n');
-                    }
-                    i += 1;
-                }
-            } else {
-                out.push('r');
-                i += 1;
-            }
+        } else if b[i] == b'r'
+            && i + 1 < b.len()
+            && (b[i + 1] == b'#' || b[i + 1] == b'"')
+            && let Some(next) = scrub_raw_string(b, i, &mut out)
+        {
+            i = next;
         } else if b[i] == b'"' {
             i += 1;
             while i < b.len() {
@@ -196,6 +221,7 @@ fn scrub_rust_literals_and_comments(source: &str) -> String {
     out
 }
 
+#[rustfmt::skip]
 fn suppressions_in(source: &str) -> usize {
     let scrubbed = scrub_rust_literals_and_comments(source);
     let compact: String = scrubbed.chars().filter(|c| !c.is_whitespace()).collect();
@@ -223,7 +249,8 @@ fn suppressions_in(source: &str) -> usize {
                 let attr = &compact[start..j.saturating_sub(1)];
                 if attr.starts_with("allow(")
                     || attr.starts_with("expect(")
-                    || (attr.starts_with("cfg_attr(") && (attr.contains(",allow(") || attr.contains(",expect(")))
+                    || (attr.starts_with("cfg_attr(")
+                        && (attr.contains(",allow(") || attr.contains(",expect(")))
                 {
                     count += 1;
                 }
@@ -236,16 +263,20 @@ fn suppressions_in(source: &str) -> usize {
     count
 }
 
+#[rustfmt::skip]
 fn suppression_verdict(count: usize, pinned: usize) -> Option<String> {
     if count > pinned {
         Some(format!("Rust lint suppressions grew from {pinned} to {count}"))
     } else if count < pinned {
-        Some(format!("Rust lint suppressions dropped from {pinned} to {count}; lower `suppressions = {count}` in tests/ratchets.toml"))
+        Some(format!(
+            "Rust lint suppressions dropped from {pinned} to {count}; lower `suppressions = {count}` in tests/ratchets.toml"
+        ))
     } else {
         None
     }
 }
 
+#[rustfmt::skip]
 fn parse_cargo_lints(cargo_toml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut in_lints = false;
@@ -256,20 +287,22 @@ fn parse_cargo_lints(cargo_toml: &str) -> BTreeMap<String, String> {
         }
         if line.starts_with('[') && line.ends_with(']') {
             let sec = line[1..line.len() - 1].trim();
-            in_lints = matches!(sec, "lints.clippy" | "lints.rust" | "workspace.lints.clippy" | "workspace.lints.rust");
+            in_lints = matches!(
+                sec,
+                "lints.clippy" | "lints.rust" | "workspace.lints.clippy" | "workspace.lints.rust"
+            );
             continue;
         }
         if !in_lints {
             continue;
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
         let key = k.trim().replace('-', "_");
         let val = v.trim();
         let level = if val.starts_with('{') {
-            val.split("level")
-                .nth(1)
-                .and_then(|s| s.split('"').nth(1))
-                .unwrap_or("")
+            val.split("level").nth(1).and_then(|s| s.split('"').nth(1)).unwrap_or("")
         } else {
             val.trim_matches('"')
         };
@@ -280,6 +313,7 @@ fn parse_cargo_lints(cargo_toml: &str) -> BTreeMap<String, String> {
     out
 }
 
+#[rustfmt::skip]
 fn baseline_verdicts(levels: &BTreeMap<String, String>) -> Vec<String> {
     let strength = |l: &str| ["allow", "warn", "deny", "forbid"].iter().position(|&x| x == l);
     let required = [
@@ -308,13 +342,27 @@ fn baseline_verdicts(levels: &BTreeMap<String, String>) -> Vec<String> {
     failures
 }
 
+#[rustfmt::skip]
 fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
     for path in paths {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if matches!(name, "target" | ".git" | ".jj" | "node_modules" | "corpus" | "artifacts" | "coverage" | "new" | "workflows") {
+        if matches!(
+            name,
+            "target"
+                | ".git"
+                | ".jj"
+                | "node_modules"
+                | "corpus"
+                | "artifacts"
+                | "coverage"
+                | "new"
+                | "workflows"
+        ) {
             continue;
         }
         if path.is_dir() {
@@ -325,6 +373,7 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+#[rustfmt::skip]
 #[test]
 fn lint_suppression_count_matches_pinned_ratchet() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -336,10 +385,8 @@ fn lint_suppression_count_matches_pinned_ratchet() {
         files.retain(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"));
         assert!(files.len() > before, "found no .rs files under {rel}");
     }
-    let total: usize = files
-        .iter()
-        .map(|f| suppressions_in(&fs::read_to_string(f).expect("read rs file")))
-        .sum();
+    let total: usize =
+        files.iter().map(|f| suppressions_in(&fs::read_to_string(f).expect("read rs file"))).sum();
     if let Some(msg) = suppression_verdict(total, cfg.suppressions) {
         panic!("{msg}");
     }
@@ -368,6 +415,7 @@ fn lint_suppression_count_matches_pinned_ratchet() {
     }
 }
 
+#[rustfmt::skip]
 #[test]
 fn clippy_thresholds_and_baseline_lints_hold() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -395,26 +443,38 @@ fn clippy_thresholds_and_baseline_lints_hold() {
             if line.is_empty() {
                 continue;
             }
-            let Some((k, v)) = line.split_once('=') else { continue };
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
             let (key, val) = (k.trim(), v.trim());
             if switches.contains(&key) {
                 continue;
             }
-            let parsed: i64 = val.parse().unwrap_or_else(|_| panic!("non-integer clippy.toml key {key} = {val}"));
+            let parsed: i64 =
+                val.parse().unwrap_or_else(|_| panic!("non-integer clippy.toml key {key} = {val}"));
             seen.insert(key.to_string(), parsed);
             let Some(&(_, default_val)) = defaults.iter().find(|&&(dk, _)| dk == key) else {
                 panic!("unknown clippy.toml threshold `{key}`");
             };
             if let Some(&pinned) = cfg.pinned_thresholds.get(key) {
                 assert!(parsed <= pinned, "{key}: {parsed} exceeds pinned {pinned}");
-                assert!(parsed > default_val, "{key}: {parsed} <= default {default_val}; remove from [pinned_thresholds]");
-                assert_eq!(parsed, pinned, "{key}: down to {parsed} from {pinned}; lower pin in tests/ratchets.toml");
+                assert!(
+                    parsed > default_val,
+                    "{key}: {parsed} <= default {default_val}; remove from [pinned_thresholds]"
+                );
+                assert_eq!(
+                    parsed, pinned,
+                    "{key}: down to {parsed} from {pinned}; lower pin in tests/ratchets.toml"
+                );
             } else {
                 assert!(parsed <= default_val, "{key}: {parsed} exceeds default {default_val}");
             }
         }
         for key in cfg.pinned_thresholds.keys() {
-            assert!(seen.contains_key(key), "`{key}` is pinned in tests/ratchets.toml but not set in clippy.toml");
+            assert!(
+                seen.contains_key(key),
+                "`{key}` is pinned in tests/ratchets.toml but not set in clippy.toml"
+            );
         }
     }
     if cfg.check_baseline_lints {
@@ -425,17 +485,25 @@ fn clippy_thresholds_and_baseline_lints_hold() {
     }
 }
 
+#[rustfmt::skip]
 #[test]
 fn suppressions_and_baseline_verdicts_ratchet_correctly() {
     assert_eq!(suppressions_in("#[allow(dead_code)]\nfn a() {}"), 1);
     assert_eq!(suppressions_in("#![expect(clippy::too_many_lines)]"), 1);
     assert_eq!(suppressions_in("#[cfg_attr(test, allow(unused))]\nfn a() {}"), 1);
-    assert_eq!(suppressions_in("mod m { fn a() { let q = '\\''; #[allow(unused)] let x = 1; } }"), 1);
+    assert_eq!(
+        suppressions_in("mod m { fn a() { let q = '\\''; #[allow(unused)] let x = 1; } }"),
+        1
+    );
     assert_eq!(suppressions_in("proptest! { #[allow(unused)] fn p() {} }"), 1);
     assert_eq!(suppressions_in(r##"const S: &str = "#[allow(x)]"; // #[allow(y)]"##), 0);
     assert!(suppression_verdict(2, 2).is_none());
     assert!(suppression_verdict(3, 2).is_some_and(|m| m.contains("grew from 2 to 3")));
     assert!(suppression_verdict(1, 2).is_some_and(|m| m.contains("lower `suppressions = 1`")));
     let weak = parse_cargo_lints("[lints.clippy]\nunwrap_used = \"warn\"\n");
-    assert!(baseline_verdicts(&weak).iter().any(|m| m.contains("`unwrap_used` must be at least \"deny\"")));
+    assert!(
+        baseline_verdicts(&weak)
+            .iter()
+            .any(|m| m.contains("`unwrap_used` must be at least \"deny\""))
+    );
 }
