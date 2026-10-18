@@ -1,295 +1,422 @@
-//! The file-length gate for `src/`.
-//!
-//! Its `production_lines` rule is the subtle part; see the comment on it. Function-level lints
-//! (`too_many_lines`) never see a file growing one function at a time, which is how nine files
-//! here were over the limit when it went in, `main.rs` at 1,893 production lines.
-//!
-//! Two decisions make it useful rather than annoying:
-//!
-//! 1. **Inline tests don't count.** Every module here keeps `#[cfg(test)] mod tests` in the same
-//!    file, so counting whole files would mean adding tests can break the build. Only lines
-//!    outside test-only items are measured.
-//!
-//! 2. **It ratchets.** A file already over the limit is pinned at the size it was when the gate
-//!    went in (2026-09-26): allowed to shrink, never to grow, and a shrink must lower its pin in
-//!    the same change (the test says to), so the file cannot grow back. New code goes in a new
-//!    module, never into a pinned file, and the limit is never raised to fit a file.
+// @template-sha256: aac937524282ee54c6bb0e8e465e530c93b751d92542003df33c0476b9ac6ddb
+//! File-length quality ratchet.
+//! Per-repo configuration lives in `tests/ratchets.toml`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use syn::spanned::Spanned;
-use syn::visit::Visit;
-
-/// The ceiling for a file under `src/`, in production lines.
-const LIMIT: usize = 400;
-
-/// Files over the limit, each pinned at its production size when the gate went in: it may
-/// shrink, never grow. A file that outgrows the limit later is split, never pinned.
-fn pinned() -> HashMap<&'static str, usize> {
-    HashMap::from([
-        ("src/forge/github.rs", 674),
-        ("src/forge/gitlab.rs", 439),
-        ("src/forge/http.rs", 446),
-        ("src/forge/types.rs", 409),
-        ("src/main.rs", 1690),
-        ("src/merge/execute.rs", 925),
-        ("src/submit/execute.rs", 708),
-        ("src/submit/plan.rs", 733),
-        ("src/watch.rs", 1197),
-    ])
+struct Config {
+    rust_roots: Vec<String>,
+    rust_limit: usize,
+    rust_pinned: BTreeMap<String, usize>,
+    shell_limit: usize,
+    shell_scripts: Vec<String>,
+    shell_dirs: Vec<String>,
+    shell_pinned: BTreeMap<String, usize>,
 }
 
-/// Is this item compiled only for tests (`#[test]`, `#[cfg(test)]`)?
-fn test_only(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        a.path().is_ident("test")
-            || (a.path().is_ident("cfg")
-                && a.parse_args::<syn::Meta>()
-                    .is_ok_and(|m| m.path().is_ident("test")))
-    })
-}
-/// The 1-based line ranges of every test-only item, its attributes and doc comments included.
-struct TestItems(Vec<(usize, usize)>);
-
-impl TestItems {
-    fn add(&mut self, attrs: &[syn::Attribute], item: &impl Spanned) -> bool {
-        if !test_only(attrs) {
-            return false;
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    for (idx, ch) in line.char_indices() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == '#' && !in_quotes {
+            return &line[..idx];
         }
-        let span = item.span();
-        self.0.push((span.start().line, span.end().line));
-        true
+    }
+    line
+}
+
+fn parse_string_list(raw: &str) -> Vec<String> {
+    let (mut out, mut cur, mut in_q) = (Vec::new(), String::new(), false);
+    for ch in raw.chars() {
+        if ch == '"' {
+            if in_q {
+                out.push(std::mem::take(&mut cur));
+            }
+            in_q = !in_q;
+        } else if in_q {
+            cur.push(ch);
+        }
+    }
+    out
+}
+
+fn apply_list_key(cfg: &mut Config, key: &str, items: Vec<String>) {
+    match key {
+        "rust_roots" => cfg.rust_roots = items,
+        "shell_scripts" => cfg.shell_scripts = items,
+        "shell_dirs" => cfg.shell_dirs = items,
+        _ => {}
     }
 }
 
-impl<'a> Visit<'a> for TestItems {
-    fn visit_item(&mut self, i: &'a syn::Item) {
-        let attrs = match i {
-            syn::Item::Const(x) => &x.attrs,
-            syn::Item::Enum(x) => &x.attrs,
-            syn::Item::Fn(x) => &x.attrs,
-            syn::Item::Impl(x) => &x.attrs,
-            syn::Item::Macro(x) => &x.attrs,
-            syn::Item::Mod(x) => &x.attrs,
-            syn::Item::Static(x) => &x.attrs,
-            syn::Item::Struct(x) => &x.attrs,
-            syn::Item::Trait(x) => &x.attrs,
-            syn::Item::Type(x) => &x.attrs,
-            syn::Item::Use(x) => &x.attrs,
-            _ => return syn::visit::visit_item(self, i),
-        };
-        if !self.add(attrs, i) {
-            syn::visit::visit_item(self, i);
-        }
-    }
-    fn visit_impl_item_fn(&mut self, f: &'a syn::ImplItemFn) {
-        if !self.add(&f.attrs, f) {
-            syn::visit::visit_impl_item_fn(self, f);
-        }
-    }
-}
-
-/// The file's lines outside its test-only items (`#[cfg(test)]` modules, helpers and impls,
-/// `#[test]` functions), wherever they sit: a module may keep test modules between its functions.
-///
-/// Read from the parsed file, never the text. Every text rule tried for this gate was fooled by a
-/// shape of ordinary code: taking any `#[cfg(test)]` as the start of the tests waved through
-/// arbitrarily large files, stopping at the first test module measured a 7,993-line file at 74,
-/// and ending a module at the first `}` in column 0 was fooled by fixture strings, which hold one
-/// as often as the module's end does.
-fn production_lines(source: &str) -> usize {
-    let file = syn::parse_file(source).unwrap_or_else(|e| panic!("does not parse: {e}"));
-    let mut tests = TestItems(Vec::new());
-    tests.visit_file(&file);
-    let total = source.lines().count();
-    (1..=total)
-        .filter(|line| !tests.0.iter().any(|(a, b)| (a..=b).contains(&line)))
-        .count()
-}
-
-fn crate_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
-}
-
-fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+fn load_config(root: &Path) -> Config {
+    let mut cfg = Config {
+        rust_roots: vec!["src".to_string()],
+        rust_limit: 400,
+        rust_pinned: BTreeMap::new(),
+        shell_limit: 200,
+        shell_scripts: Vec::new(),
+        shell_dirs: Vec::new(),
+        shell_pinned: BTreeMap::new(),
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let Ok(raw) = fs::read_to_string(root.join("tests/ratchets.toml")) else {
+        return cfg;
+    };
+    let (mut section, mut pending_key, mut pending_arr) = (String::new(), None::<String>, String::new());
+    for raw_line in raw.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(key) = &pending_key {
+            pending_arr.push(' ');
+            pending_arr.push_str(line);
+            if line.contains(']') {
+                apply_list_key(&mut cfg, key, parse_string_list(&pending_arr));
+                pending_key = None;
+                pending_arr.clear();
+            }
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_string();
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (key, val) = (k.trim().trim_matches('"'), v.trim());
+        if section.is_empty() {
+            if val.starts_with('[') && !val.contains(']') {
+                pending_key = Some(key.to_string());
+                pending_arr = val.to_string();
+            } else {
+                match key {
+                    "rust_roots" | "shell_scripts" | "shell_dirs" => {
+                        apply_list_key(&mut cfg, key, parse_string_list(val));
+                    }
+                    "rust_limit" => cfg.rust_limit = val.parse().expect("valid rust_limit"),
+                    "shell_limit" => cfg.shell_limit = val.parse().expect("valid shell_limit"),
+                    _ => {}
+                }
+            }
+        } else {
+            let ceiling: usize = val.parse().expect("valid pinned ceiling");
+            match section.as_str() {
+                "rust_pinned" => { cfg.rust_pinned.insert(key.to_string(), ceiling); }
+                "shell_pinned" => { cfg.shell_pinned.insert(key.to_string(), ceiling); }
+                _ => {}
+            }
+        }
+    }
+    cfg
+}
+
+fn scrub_rust_literals_and_comments(source: &str) -> Vec<String> {
+    let b = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                out.push(' ');
+                i += 1;
+            }
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            out.push_str("  ");
+            i += 2;
+            let mut depth = 1usize;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                    depth += 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                    depth -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else {
+                    out.push(if b[i] == b'\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            }
+        } else if b[i] == b'\'' && i + 2 < b.len() && b[i + 1] != b'\\' && b[i + 2] == b'\'' {
+            out.push_str("   ");
+            i += 3;
+        } else if b[i] == b'\'' && i + 3 < b.len() && b[i + 1] == b'\\' {
+            out.push_str("   ");
+            i += 3;
+            while i < b.len() && b[i] != b'\n' {
+                out.push(' ');
+                if b[i] == b'\'' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else if b[i] == b'r' && i + 1 < b.len() && (b[i + 1] == b'#' || b[i + 1] == b'"') {
+            let mut hashes = 0usize;
+            let mut j = i + 1;
+            while j < b.len() && b[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'"' {
+                for _ in i..=j { out.push(' '); }
+                i = j + 1;
+                while i < b.len() {
+                    if b[i] == b'"' && i + hashes < b.len() && b[i + 1..=i + hashes].iter().all(|&x| x == b'#') {
+                        for _ in 0..=hashes { out.push(' '); }
+                        i += hashes + 1;
+                        break;
+                    }
+                    out.push(if b[i] == b'\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            } else {
+                out.push('r');
+                i += 1;
+            }
+        } else if b[i] == b'"' {
+            out.push(' ');
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' && i + 1 < b.len() {
+                    out.push(' ');
+                    out.push(if b[i + 1] == b'\n' { '\n' } else { ' ' });
+                    i += 2;
+                } else if b[i] == b'"' {
+                    out.push(' ');
+                    i += 1;
+                    break;
+                } else {
+                    out.push(if b[i] == b'\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out.split('\n').map(str::to_string).collect()
+}
+
+fn is_test_attr_line(scrubbed: &str) -> bool {
+    let compact: String = scrubbed.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("#[cfg(test)]") || compact.contains("#[test]") || compact.contains("::test]")
+}
+
+fn analyze_source(source: &str) -> (usize, Vec<(String, Option<String>)>) {
+    if source.is_empty() {
+        return (0, Vec::new());
+    }
+    let raw_lines: Vec<&str> = source.lines().collect();
+    let scrubbed = scrub_rust_literals_and_comments(source);
+    let n = raw_lines.len();
+    let mut excluded = vec![false; n];
+    let mut out_mods = Vec::new();
+    let mut idx = 0;
+    while idx < n {
+        if !is_test_attr_line(&scrubbed[idx]) {
+            idx += 1;
+            continue;
+        }
+        let mut start = idx;
+        while start > 0 {
+            let (prev_raw, prev_scrub) = (raw_lines[start - 1].trim(), scrubbed[start - 1].trim());
+            if prev_raw.starts_with("///") || (prev_scrub.starts_with("#[") && prev_scrub.ends_with(']')) {
+                start -= 1;
+            } else {
+                break;
+            }
+        }
+        let (mut depth, mut saw_brace, mut in_attr, mut end) = (0i32, false, false, idx);
+        'scan: for (k, line) in scrubbed.iter().enumerate().skip(idx).take(n - idx) {
+            end = k;
+            for ch in line.chars() {
+                if ch == '[' && depth == 0 && !saw_brace {
+                    in_attr = true;
+                } else if ch == ']' && in_attr {
+                    in_attr = false;
+                } else if !in_attr {
+                    if ch == '{' {
+                        depth += 1;
+                        saw_brace = true;
+                    } else if ch == '}' && saw_brace {
+                        depth -= 1;
+                        if depth <= 0 {
+                            break 'scan;
+                        }
+                    } else if ch == ';' && !saw_brace && depth == 0 {
+                        break 'scan;
+                    }
+                }
+            }
+        }
+        if !saw_brace {
+            let mut path_attr = None;
+            for raw in &raw_lines[start..=end] {
+                let t = raw.trim();
+                if t.starts_with("#[path") && let Some((_, q)) = t.split_once('"') && let Some((p, _)) = q.split_once('"') {
+                    path_attr = Some(p.to_string());
+                }
+            }
+            for sc in &scrubbed[idx..=end] {
+                for tok in sc.split_whitespace().collect::<Vec<_>>().windows(2) {
+                    if tok[0] == "mod" && let Some(name) = tok[1].strip_suffix(';') {
+                        out_mods.push((name.to_string(), path_attr.clone()));
+                    }
+                }
+            }
+        }
+        for flag in &mut excluded[start..=end] {
+            *flag = true;
+        }
+        idx = end + 1;
+    }
+    (excluded.into_iter().filter(|&ex| !ex).count(), out_mods)
+}
+
+fn production_lines(source: &str) -> usize {
+    analyze_source(source).0
+}
+
+fn module_files(file: &Path, name: &str, path_attr: Option<&str>) -> Vec<PathBuf> {
+    let dir = file.parent().unwrap_or(Path::new(""));
+    if let Some(p) = path_attr {
+        return vec![dir.join(p)];
+    }
+    let owns_dir = matches!(file.file_name().and_then(|n| n.to_str()), Some("mod.rs" | "lib.rs" | "main.rs"));
+    let base = if owns_dir { dir.to_path_buf() } else { dir.join(file.file_stem().unwrap_or_default()) };
+    vec![base.join(format!("{name}.rs")), base.join(name).join("mod.rs")]
+}
+
+fn children_dir(module_file: &Path) -> PathBuf {
+    if module_file.file_name().is_some_and(|n| n == "mod.rs") {
+        module_file.parent().unwrap_or(Path::new("")).to_path_buf()
+    } else {
+        module_file.with_extension("")
+    }
+}
+
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(name, "target" | ".git" | ".jj" | "node_modules" | "corpus" | "artifacts" | "coverage" | "new" | "workflows") {
+            continue;
+        }
         if path.is_dir() {
-            sources(&path, found);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            found.push(path);
+            walk_files(&path, out);
+        } else {
+            out.push(path);
         }
     }
 }
 
-/// The verdict for one file, or `None` when it is within its allowance. Split out from the
-/// walk so the ratchet stays testable: with a tree that satisfies every pin, these branches
-/// would go unexercised and rot.
-fn verdict(
-    relative: &str,
-    lines: usize,
-    limit: usize,
-    pinned: &HashMap<&'static str, usize>,
-) -> Option<String> {
-    match pinned.get(relative) {
-        Some(&ceiling) if lines > ceiling => Some(format!(
-            "{relative}: {lines} lines, up from its pinned {ceiling}. It is already over the {limit}-line limit; split it rather than growing it further."
-        )),
-        Some(_) if lines <= limit => Some(format!(
-            "{relative}: down to {lines} lines — under the {limit} limit, so remove its entry from `pinned()` and let the real limit hold it there."
-        )),
-        // The ratchet clicks: a pin left above the file's size would let it grow back.
-        Some(&ceiling) if lines < ceiling => Some(format!(
-            "{relative}: down to {lines} lines from its pinned {ceiling}. Lower its pin to {lines} so it cannot grow back."
-        )),
-        Some(_) => None,
-        None if lines > limit => Some(format!(
-            "{relative}: {lines} lines, over the {limit} limit. Split it into pieces that each do one thing (inline tests are not counted, so they are not the cause)."
-        )),
-        None => None,
+fn check_ratchet(rel: &str, lines: usize, limit: usize, pinned: &BTreeMap<String, usize>, violations: &mut Vec<String>) {
+    if let Some(&ceiling) = pinned.get(rel) {
+        if lines > ceiling {
+            violations.push(format!("{rel}: {lines} lines, up from its pinned {ceiling} (limit {limit})"));
+        } else if lines <= limit {
+            violations.push(format!("{rel}: down to {lines} lines (<= {limit}); remove from tests/ratchets.toml"));
+        } else if lines < ceiling {
+            violations.push(format!("{rel}: down to {lines} lines from its pinned {ceiling}; lower its pin to {lines}"));
+        }
+    } else if lines > limit {
+        violations.push(format!("{rel}: {lines} lines, over the {limit}-line limit"));
     }
 }
 
 #[test]
-fn no_file_outgrows_its_limit() {
-    let root = crate_root();
-    let pinned = pinned();
+fn rust_files_stay_within_line_limit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cfg = load_config(root);
     let mut files = Vec::new();
-    sources(&root.join("src"), &mut files);
-    assert!(
-        !files.is_empty(),
-        "no `.rs` files under `src` — the walk is broken, not the tree"
-    );
-    let mut failures = Vec::new();
-    for path in files {
-        let relative = path
-            .strip_prefix(&root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        let source = std::fs::read_to_string(&path).unwrap_or_default();
-        if let Some(f) = verdict(&relative, production_lines(&source), LIMIT, &pinned) {
-            failures.push(f);
+    for rel in &cfg.rust_roots {
+        let before = files.len();
+        walk_files(&root.join(rel), &mut files);
+        files.retain(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"));
+        assert!(files.len() > before, "found no .rs files under {rel}");
+    }
+    let mut test_roots = Vec::new();
+    for file in &files {
+        let source = fs::read_to_string(file).expect("read source file");
+        for (name, path_attr) in analyze_source(&source).1 {
+            test_roots.extend(module_files(file, &name, path_attr.as_deref()));
         }
     }
-    failures.sort();
-    assert!(failures.is_empty(), "\n{}\n", failures.join("\n"));
+    files.retain(|f| !test_roots.iter().any(|r| f == r || f.starts_with(children_dir(r))));
+
+    let mut violations = Vec::new();
+    for (pinned_path, &ceiling) in &cfg.rust_pinned {
+        if !root.join(pinned_path).exists() {
+            violations.push(format!("{pinned_path}: pinned at {ceiling} in tests/ratchets.toml, but file does not exist"));
+        }
+    }
+    for file in &files {
+        let rel = file.strip_prefix(root).unwrap_or(file).to_string_lossy().replace('\\', "/");
+        let source = fs::read_to_string(file).expect("read source file");
+        check_ratchet(&rel, production_lines(&source), cfg.rust_limit, &cfg.rust_pinned, &mut violations);
+    }
+    assert!(violations.is_empty(), "Rust file-length ratchet failed:\n  {}", violations.join("\n  "));
 }
 
 #[test]
-fn the_ratchet_holds_a_pinned_file_to_its_size() {
-    let pinned = HashMap::from([("a.rs", 500)]);
-    assert!(
-        verdict("a.rs", 500, 400, &pinned).is_none(),
-        "at its ceiling is fine"
-    );
-    assert!(
-        verdict("a.rs", 450, 400, &pinned).is_some_and(|m| m.contains("Lower its pin to 450")),
-        "a shrink must lower the pin, or the file could grow back"
-    );
-    assert!(
-        verdict("a.rs", 501, 400, &pinned).is_some_and(|m| m.contains("up from its pinned")),
-        "a pinned file may not grow"
-    );
-    assert!(
-        verdict("a.rs", 400, 400, &pinned).is_some_and(|m| m.contains("remove its entry")),
-        "once under the limit the pin must go"
-    );
-    assert!(
-        verdict("b.rs", 400, 400, &pinned).is_none(),
-        "unpinned, at the limit"
-    );
-    assert!(
-        verdict("b.rs", 401, 400, &pinned).is_some_and(|m| m.contains("over the")),
-        "unpinned, over the limit"
-    );
-}
-
-#[test]
-fn every_pinned_file_still_exists() {
-    // A rename leaving a stale entry would exempt nothing, and the gate would quietly stop
-    // protecting the file it names.
-    let root = crate_root();
-    let missing: Vec<&str> = pinned()
-        .keys()
-        .copied()
-        .filter(|r| !root.join(r).exists())
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "pinned files no longer at these paths: {missing:?}"
-    );
+fn shell_scripts_stay_within_line_limit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cfg = load_config(root);
+    let mut violations = Vec::new();
+    for (pinned_path, &ceiling) in &cfg.shell_pinned {
+        if !root.join(pinned_path).exists() {
+            violations.push(format!("{pinned_path}: pinned at {ceiling} in tests/ratchets.toml, but file does not exist"));
+        }
+    }
+    for rel in &cfg.shell_scripts {
+        match fs::read_to_string(root.join(rel)) {
+            Ok(text) => check_ratchet(rel, text.lines().count(), cfg.shell_limit, &cfg.shell_pinned, &mut violations),
+            Err(err) => violations.push(format!("{rel}: cannot read ({err})")),
+        }
+    }
+    for d in &cfg.shell_dirs {
+        let mut found = Vec::new();
+        walk_files(&root.join(d), &mut found);
+        found.retain(|p| p.extension().is_none_or(|e| e == "sh"));
+        assert!(!found.is_empty(), "found no shell scripts under {d}");
+        for path in found {
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            let lines = fs::read_to_string(&path).expect("read script").lines().count();
+            check_ratchet(&rel, lines, cfg.shell_limit, &cfg.shell_pinned, &mut violations);
+        }
+    }
+    assert!(violations.is_empty(), "Shell file-length ratchet failed:\n  {}", violations.join("\n  "));
 }
 
 #[test]
 fn only_test_items_are_left_out_of_the_count() {
-    assert_eq!(
-        production_lines("fn a() {}\nfn b() {}\n#[cfg(test)]\nmod tests {\n // lots\n}\n"),
-        2
-    );
-    assert_eq!(
-        production_lines("fn a() {}\n"),
-        1,
-        "a file with no tests counts whole"
-    );
-    assert_eq!(production_lines(""), 0);
-    let cases: &[(&str, &str, usize)] = &[
-        (
-            "a test-only mod declaration is its own line, not the rest of the file",
-            "mod real;\n#[cfg(test)]\nmod test_support;\n\nfn a() {}\nfn b() {}\n",
-            4,
-        ),
-        (
-            "a test-only helper is the helper, not the rest of the file",
-            "fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\nfn c() {}\n",
-            3,
-        ),
-        (
-            "an attribute between the guard and the item goes with the item",
-            "#[cfg(test)]\n#[path = \"t.rs\"]\nmod tests;\n\nfn a() {}\nfn b() {}\n",
-            3,
-        ),
-        (
-            "a same-line test module body is still skipped",
-            "fn a() {}\n#[cfg(test)] mod tests {\n    fn t() {}\n}\n",
-            1,
-        ),
-        (
-            "a one-line test module",
-            "fn a() {}\n#[cfg(test)] mod tests { fn t() {} }\nfn b() {}\n",
-            2,
-        ),
-        (
-            "production code after a test module still counts (a module may keep them between functions)",
-            "fn a() {}\n#[cfg(test)]\nmod a_tests {\n    #[test]\n    fn t() {\n    }\n}\n\nfn b() {}\nfn c() {}\n",
-            4,
-        ),
-        (
-            "a `}` in column 0 inside a test's string does not end the module",
-            "#[cfg(test)]\nmod tests {\n    const FIX: &str = \"\n}\n\";\n    fn t() {}\n}\nfn b() {}\n",
-            1,
-        ),
-        (
-            "`#[cfg(test)]` in a string or comment is not an attribute",
-            "// #[cfg(test)]\nconst A: &str = \"\n#[cfg(test)]\nmod x {\";\nfn b() {}\n",
-            5,
-        ),
-        (
-            "a test-only method in a production impl",
-            "impl A {\n    fn a() {}\n    #[cfg(test)]\n    fn t() {}\n}\n",
-            3,
-        ),
-        (
-            "doc comments go with their item",
-            "/// tests\n#[cfg(test)]\nmod t {}\nfn b() {}\n",
-            1,
-        ),
-    ];
-    for (why, source, expected) in cases {
-        assert_eq!(production_lines(source), *expected, "{why}");
-    }
+    assert_eq!(production_lines("fn a() {}\nfn b() {}\n#[cfg(test)]\nmod tests {\n // lots\n}\n"), 2);
+    assert_eq!(production_lines("fn a() {}\n#[cfg(test)]\nfn helper() {}\nfn b() {}\nfn c() {}\n"), 3);
+    assert_eq!(production_lines("#[cfg(test)]\nmod tests {\n    const FIX: &str = \"\n}\n\";\n    let q = '\\'';\n}\nfn b() {}\n"), 1);
+    assert_eq!(production_lines("// #[cfg(test)]\nconst A: &str = \"\n#[cfg(test)]\nmod x {\";\nfn b() {}\n"), 5);
+    assert_eq!(analyze_source("#[cfg(test)]\n#[path = \"x_tests.rs\"]\npub(crate) mod tests;\nfn a() {}\n").1, vec![("tests".to_string(), Some("x_tests.rs".to_string()))]);
+}
+
+#[test]
+fn the_ratchet_holds_a_pinned_file_to_its_size() {
+    let pins = BTreeMap::from([("a.rs".to_string(), 500usize)]);
+    let check = |f: &str, n: usize| {
+        let mut v = Vec::new();
+        check_ratchet(f, n, 400, &pins, &mut v);
+        v
+    };
+    assert!(check("a.rs", 500).is_empty());
+    assert!(check("a.rs", 501)[0].contains("up from its pinned 500"));
+    assert!(check("a.rs", 450)[0].contains("lower its pin to 450"));
+    assert!(check("a.rs", 400)[0].contains("remove from tests/ratchets.toml"));
+    assert!(check("b.rs", 400).is_empty());
+    assert!(check("b.rs", 401)[0].contains("over the 400-line limit"));
 }

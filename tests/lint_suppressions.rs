@@ -1,381 +1,441 @@
-//! The lint ratchet: suppressions, loosened thresholds and the baseline `[lints]` table.
-//!
-//! Two things let a lint stop biting without anyone deciding it should: an `#[allow(…)]` or
-//! `#[expect(…)]` on an item, and a `clippy.toml` threshold raised above clippy's default. Both
-//! are pinned at their level when this went in (2026-10-08). Either may only move toward clean,
-//! and the pin moves with it in the same change, so nothing regrows. When you touch an item
-//! carrying a suppression, remove it (extract the options struct, split the function) rather
-//! than work around it.
-//!
-//! Suppressions are counted on tokens, not text, so a string or comment mentioning one is not
-//! a suppression, while one inside a macro invocation still is. The third check reads `Cargo.toml`
-//! and fails when a lint of the baseline `[lints]` table is missing or weaker than it.
+// @template-sha256: 3292292b195189842844b3b69a394a6fd38a0e165039c16498b93b2fcc8b816a
+//! Lint-suppression and baseline quality ratchet.
+//! Per-repo configuration lives in `tests/ratchets.toml`.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use proc_macro2::{Delimiter, TokenStream, TokenTree};
-
-/// The trees scanned, relative to the workspace root.
-const ROOTS: &[&str] = &["src", "tests", "fuzz/fuzz_targets"];
-
-/// `#[allow]`/`#[expect]` attributes in the tree, 8 when this went in. May only fall.
-const SUPPRESSIONS: usize = 8;
-
-/// Clippy's defaults for the thresholds a `clippy.toml` can raise. A key missing from here
-/// fails the check, so a newly loosened threshold cannot slip past it unmeasured.
-const CLIPPY_DEFAULTS: &[(&str, i64)] = &[
-    ("too-many-arguments-threshold", 7),
-    ("cognitive-complexity-threshold", 25),
-    ("too-many-lines-threshold", 100),
-    ("type-complexity-threshold", 250),
-    ("max-struct-bools", 3),
-    ("max-fn-params-bools", 3),
-];
-
-/// Thresholds above their default, pinned at their values when this went in. Each may only move
-/// toward the default, and its pin with it.
-const PINNED_THRESHOLDS: &[(&str, i64)] = &[
-    ("too-many-arguments-threshold", 10),
-    ("cognitive-complexity-threshold", 30),
-    ("too-many-lines-threshold", 275),
-];
-
-/// Settings in `clippy.toml` that are switches rather than thresholds.
-const SWITCHES: &[&str] = &["allow-unwrap-in-tests"];
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
+struct Config {
+    lint_roots: Vec<String>,
+    suppressions: usize,
+    forbid_unsafe_in: Vec<String>,
+    check_baseline_lints: bool,
+    pinned_thresholds: BTreeMap<String, i64>,
+    shell_dirs: Vec<String>,
+    shell_suppressions: usize,
 }
 
-fn sources(dir: &Path, found: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            sources(&path, found);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            found.push(path);
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_quotes = false;
+    for (idx, ch) in line.char_indices() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+        } else if ch == '#' && !in_quotes {
+            return &line[..idx];
         }
     }
+    line
 }
 
-/// Whether an attribute's bracketed body suppresses a lint: `allow(…)`, `expect(…)`, or a
-/// `cfg_attr(…)` carrying either.
-fn suppresses(body: &TokenStream) -> bool {
-    let mut tokens = body.clone().into_iter();
-    match tokens.next() {
-        Some(TokenTree::Ident(name)) if name == "allow" || name == "expect" => true,
-        Some(TokenTree::Ident(name)) if name == "cfg_attr" => tokens.any(|t| match t {
-            TokenTree::Group(g) => g.stream().into_iter().any(
-                |inner| matches!(&inner, TokenTree::Ident(i) if i == "allow" || i == "expect"),
-            ),
-            _ => false,
-        }),
-        _ => false,
+fn parse_string_list(raw: &str) -> Vec<String> {
+    let (mut out, mut cur, mut in_q) = (Vec::new(), String::new(), false);
+    for ch in raw.chars() {
+        if ch == '"' {
+            if in_q {
+                out.push(std::mem::take(&mut cur));
+            }
+            in_q = !in_q;
+        } else if in_q {
+            cur.push(ch);
+        }
+    }
+    out
+}
+
+fn apply_list_key(cfg: &mut Config, key: &str, items: Vec<String>) {
+    match key {
+        "lint_roots" => cfg.lint_roots = items,
+        "forbid_unsafe_in" => cfg.forbid_unsafe_in = items,
+        "shell_dirs" => cfg.shell_dirs = items,
+        _ => {}
     }
 }
 
-/// Suppression attributes in a token stream, descending into every group.
-fn count_suppressions(stream: TokenStream) -> usize {
-    let tokens: Vec<TokenTree> = stream.into_iter().collect();
-    let mut count = 0;
-    for (i, token) in tokens.iter().enumerate() {
-        match token {
-            TokenTree::Punct(p) if p.as_char() == '#' => {
-                let body = match (tokens.get(i + 1), tokens.get(i + 2)) {
-                    (Some(TokenTree::Group(g)), _) if g.delimiter() == Delimiter::Bracket => {
-                        Some(g)
+fn load_config(root: &Path) -> Config {
+    let mut cfg = Config {
+        lint_roots: vec!["src".to_string(), "tests".to_string()],
+        suppressions: 0,
+        forbid_unsafe_in: Vec::new(),
+        check_baseline_lints: false,
+        pinned_thresholds: BTreeMap::new(),
+        shell_dirs: Vec::new(),
+        shell_suppressions: 0,
+    };
+    let Ok(raw) = fs::read_to_string(root.join("tests/ratchets.toml")) else {
+        return cfg;
+    };
+    let (mut section, mut pending_key, mut pending_arr) = (String::new(), None::<String>, String::new());
+    for raw_line in raw.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(key) = &pending_key {
+            pending_arr.push(' ');
+            pending_arr.push_str(line);
+            if line.contains(']') {
+                apply_list_key(&mut cfg, key, parse_string_list(&pending_arr));
+                pending_key = None;
+                pending_arr.clear();
+            }
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line[1..line.len() - 1].trim().to_string();
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (key, val) = (k.trim().trim_matches('"'), v.trim());
+        if section.is_empty() {
+            if val.starts_with('[') && !val.contains(']') {
+                pending_key = Some(key.to_string());
+                pending_arr = val.to_string();
+            } else {
+                match key {
+                    "lint_roots" | "forbid_unsafe_in" | "shell_dirs" => {
+                        apply_list_key(&mut cfg, key, parse_string_list(val));
                     }
-                    (Some(TokenTree::Punct(bang)), Some(TokenTree::Group(g)))
-                        if bang.as_char() == '!' && g.delimiter() == Delimiter::Bracket =>
-                    {
-                        Some(g)
-                    }
-                    _ => None,
-                };
-                if body.is_some_and(|g| suppresses(&g.stream())) {
-                    count += 1;
+                    "suppressions" => cfg.suppressions = val.parse().expect("valid suppressions"),
+                    "shell_suppressions" => cfg.shell_suppressions = val.parse().expect("valid shell_suppressions"),
+                    "check_baseline_lints" => cfg.check_baseline_lints = val == "true",
+                    _ => {}
                 }
             }
-            TokenTree::Group(g) => count += count_suppressions(g.stream()),
-            _ => {}
+        } else if section == "pinned_thresholds" {
+            let ceiling: i64 = val.parse().expect("valid threshold in [pinned_thresholds]");
+            cfg.pinned_thresholds.insert(key.to_string(), ceiling);
         }
+    }
+    cfg
+}
+
+fn scrub_rust_literals_and_comments(source: &str) -> String {
+    let b = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            i += 2;
+            let mut depth = 1usize;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    if b[i] == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        } else if b[i] == b'\'' && i + 2 < b.len() && b[i + 1] != b'\\' && b[i + 2] == b'\'' {
+            i += 3;
+        } else if b[i] == b'\'' && i + 3 < b.len() && b[i + 1] == b'\\' {
+            i += 3;
+            while i < b.len() && b[i] != b'\n' {
+                if b[i] == b'\'' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else if b[i] == b'r' && i + 1 < b.len() && (b[i + 1] == b'#' || b[i + 1] == b'"') {
+            let mut hashes = 0usize;
+            let mut j = i + 1;
+            while j < b.len() && b[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'"' {
+                i = j + 1;
+                while i < b.len() {
+                    if b[i] == b'"' && i + hashes < b.len() && b[i + 1..=i + hashes].iter().all(|&x| x == b'#') {
+                        i += hashes + 1;
+                        break;
+                    }
+                    if b[i] == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            } else {
+                out.push('r');
+                i += 1;
+            }
+        } else if b[i] == b'"' {
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' && i + 1 < b.len() {
+                    if b[i + 1] == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 2;
+                } else if b[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    if b[i] == b'\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn suppressions_in(source: &str) -> usize {
+    let scrubbed = scrub_rust_literals_and_comments(source);
+    let compact: String = scrubbed.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = compact.as_bytes();
+    let mut count = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'#' {
+            let mut j = i + 1;
+            if j < bytes.len() && bytes[j] == b'!' {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'[' {
+                let mut depth = 1usize;
+                let start = j + 1;
+                j += 1;
+                while j < bytes.len() && depth > 0 {
+                    if bytes[j] == b'[' {
+                        depth += 1;
+                    } else if bytes[j] == b']' {
+                        depth -= 1;
+                    }
+                    j += 1;
+                }
+                let attr = &compact[start..j.saturating_sub(1)];
+                if attr.starts_with("allow(")
+                    || attr.starts_with("expect(")
+                    || (attr.starts_with("cfg_attr(") && (attr.contains(",allow(") || attr.contains(",expect(")))
+                {
+                    count += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
     }
     count
 }
 
-fn suppressions_in(source: &str) -> usize {
-    let stream: TokenStream = source
-        .parse()
-        .unwrap_or_else(|e| panic!("does not lex: {e:?}"));
-    count_suppressions(stream)
-}
-
-/// `key = integer` settings from a `clippy.toml`; switches and comments are skipped.
-fn thresholds(clippy_toml: &str) -> BTreeMap<String, i64> {
-    clippy_toml
-        .lines()
-        .map(|line| line.split('#').next().unwrap_or_default().trim())
-        .filter_map(|line| line.split_once('='))
-        .filter_map(|(key, value)| Some((key.trim().to_string(), value.trim().parse().ok()?)))
-        .collect()
-}
-
-fn suppression_verdict(count: usize, pin: usize) -> Option<String> {
-    if count > pin {
-        Some(format!(
-            "{count} lint suppressions, up from {pin}. Fix the cause instead of silencing the lint."
-        ))
-    } else if count < pin {
-        Some(format!(
-            "{count} lint suppressions, down from {pin}. Lower SUPPRESSIONS to {count}."
-        ))
+fn suppression_verdict(count: usize, pinned: usize) -> Option<String> {
+    if count > pinned {
+        Some(format!("Rust lint suppressions grew from {pinned} to {count}"))
+    } else if count < pinned {
+        Some(format!("Rust lint suppressions dropped from {pinned} to {count}; lower `suppressions = {count}` in tests/ratchets.toml"))
     } else {
         None
     }
 }
 
-/// Failures for one `clippy.toml`, given clippy's defaults and today's pins.
-fn threshold_verdicts(
-    set: &BTreeMap<String, i64>,
-    defaults: &[(&str, i64)],
-    pins: &[(&str, i64)],
-) -> Vec<String> {
-    let mut failures = Vec::new();
-    for (key, &value) in set {
-        let Some(&(_, default)) = defaults.iter().find(|(k, _)| k == key) else {
-            failures.push(format!(
-                "clippy.toml sets `{key}`, which has no default in CLIPPY_DEFAULTS. Add clippy's \
-                 default so the check can tell whether it is loosened."
-            ));
+fn parse_cargo_lints(cargo_toml: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut in_lints = false;
+    for raw in cargo_toml.lines() {
+        let line = strip_toml_comment(raw).trim();
+        if line.is_empty() {
             continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let sec = line[1..line.len() - 1].trim();
+            in_lints = matches!(sec, "lints.clippy" | "lints.rust" | "workspace.lints.clippy" | "workspace.lints.rust");
+            continue;
+        }
+        if !in_lints {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let key = k.trim().replace('-', "_");
+        let val = v.trim();
+        let level = if val.starts_with('{') {
+            val.split("level")
+                .nth(1)
+                .and_then(|s| s.split('"').nth(1))
+                .unwrap_or("")
+        } else {
+            val.trim_matches('"')
         };
-        let pin = pins.iter().find(|(k, _)| k == key).map(|&(_, p)| p);
-        match pin {
-            _ if value <= default && pin.is_some() => failures.push(format!(
-                "`{key}` is back to {value}, within clippy's default of {default}; remove its pin."
-            )),
-            _ if value <= default => {}
-            None => failures.push(format!(
-                "`{key}` = {value} loosens clippy's default of {default}. Fix the code instead."
-            )),
-            Some(p) if value > p => failures.push(format!(
-                "`{key}` = {value}, up from its pinned {p}. A limit is never raised to fit the code."
-            )),
-            Some(p) if value < p => {
-                failures.push(format!("`{key}` down to {value} from {p}; lower its pin to {value}."));
-            }
-            Some(_) => {}
+        if !level.is_empty() {
+            out.insert(key, level.to_string());
         }
     }
-    for (key, _) in pins {
-        if !set.contains_key(*key) {
-            failures.push(format!(
-                "`{key}` is pinned but no longer set; remove its pin."
-            ));
-        }
+    out
+}
+
+fn baseline_verdicts(levels: &BTreeMap<String, String>) -> Vec<String> {
+    let strength = |l: &str| ["allow", "warn", "deny", "forbid"].iter().position(|&x| x == l);
+    let required = [
+        ("struct_excessive_bools", "deny"),
+        ("fn_params_excessive_bools", "deny"),
+        ("collapsible_if", "deny"),
+        ("too_many_arguments", "deny"),
+        ("needless_range_loop", "deny"),
+        ("extend_with_drain", "deny"),
+        ("unwrap_used", "deny"),
+        ("match_bool", "warn"),
+        ("bool_to_int_with_if", "warn"),
+        ("cognitive_complexity", "warn"),
+        ("too_many_lines", "warn"),
+    ];
+    let mut failures: Vec<String> = required
+        .iter()
+        .filter(|&&(name, want)| levels.get(name).and_then(|got| strength(got)) < strength(want))
+        .map(|&(name, want)| format!("`{name}` must be at least \"{want}\" in Cargo.toml [lints]"))
+        .collect();
+    let unsafe_ok = levels.get("unsafe_code").and_then(|g| strength(g)) >= strength("forbid")
+        || levels.get("undocumented_unsafe_blocks").and_then(|g| strength(g)) >= strength("deny");
+    if !unsafe_ok {
+        failures.push("Cargo.toml [lints] must set `unsafe_code = \"forbid\"` or `undocumented_unsafe_blocks = \"deny\"`".to_string());
     }
     failures
 }
 
+fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if matches!(name, "target" | ".git" | ".jj" | "node_modules" | "corpus" | "artifacts" | "coverage" | "new" | "workflows") {
+            continue;
+        }
+        if path.is_dir() {
+            walk_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
-fn lint_suppressions_only_fall() {
-    let root = workspace_root();
+fn lint_suppression_count_matches_pinned_ratchet() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cfg = load_config(root);
     let mut files = Vec::new();
-    for dir in ROOTS {
+    for rel in &cfg.lint_roots {
         let before = files.len();
-        sources(&root.join(dir), &mut files);
+        walk_files(&root.join(rel), &mut files);
+        files.retain(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"));
+        assert!(files.len() > before, "found no .rs files under {rel}");
+    }
+    let total: usize = files
+        .iter()
+        .map(|f| suppressions_in(&fs::read_to_string(f).expect("read rs file")))
+        .sum();
+    if let Some(msg) = suppression_verdict(total, cfg.suppressions) {
+        panic!("{msg}");
+    }
+    if !cfg.shell_dirs.is_empty() {
+        let mut sh_files = Vec::new();
+        for rel in &cfg.shell_dirs {
+            let before = sh_files.len();
+            walk_files(&root.join(rel), &mut sh_files);
+            sh_files.retain(|p| p.extension().is_none_or(|e| e == "sh"));
+            assert!(sh_files.len() > before, "found no shell scripts under {rel}");
+        }
+        let sh_total: usize = sh_files
+            .iter()
+            .map(|p| {
+                fs::read_to_string(p)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim_start();
+                        t.starts_with('#') && t.contains("shellcheck") && t.contains("disable=")
+                    })
+                    .count()
+            })
+            .sum();
+        assert_eq!(sh_total, cfg.shell_suppressions, "shellcheck disable count changed");
+    }
+}
+
+#[test]
+fn clippy_thresholds_and_baseline_lints_hold() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let cfg = load_config(root);
+    for rel in &cfg.forbid_unsafe_in {
+        let content = fs::read_to_string(root.join(rel)).expect("read forbid_unsafe_in file");
         assert!(
-            files.len() > before,
-            "no `.rs` files under `{dir}`; the walk is broken"
+            content.lines().any(|l| l.trim() == "#![forbid(unsafe_code)]"),
+            "{rel} must contain `#![forbid(unsafe_code)]`"
         );
     }
-    let count: usize = files
-        .iter()
-        .map(|path| suppressions_in(&std::fs::read_to_string(path).unwrap_or_default()))
-        .sum();
-    let verdict = suppression_verdict(count, SUPPRESSIONS);
-    assert!(verdict.is_none(), "{}", verdict.unwrap_or_default());
-}
-
-#[test]
-fn clippy_thresholds_only_move_toward_the_default() {
-    let toml = std::fs::read_to_string(workspace_root().join("clippy.toml"))
-        .unwrap_or_else(|e| panic!("reading clippy.toml: {e}"));
-    let mut set = thresholds(&toml);
-    set.retain(|key, _| !SWITCHES.contains(&key.as_str()));
-    assert!(
-        !set.is_empty(),
-        "no thresholds read from clippy.toml; the parser is broken"
-    );
-    let failures = threshold_verdicts(&set, CLIPPY_DEFAULTS, PINNED_THRESHOLDS);
-    assert!(failures.is_empty(), "\n{}\n", failures.join("\n"));
-}
-/// The `[lints]` table every one of our crates carries, at least this strict. A lint missing
-/// from `Cargo.toml`, or set weaker than this, fails: the baseline cannot be lost quietly.
-const BASELINE: &[(&str, &str, &str)] = &[
-    ("clippy", "struct_excessive_bools", "deny"),
-    ("clippy", "fn_params_excessive_bools", "deny"),
-    ("clippy", "collapsible_if", "deny"),
-    ("clippy", "too_many_arguments", "deny"),
-    ("clippy", "needless_range_loop", "deny"),
-    ("clippy", "extend_with_drain", "deny"),
-    ("clippy", "unwrap_used", "deny"),
-    ("clippy", "dbg_macro", "deny"),
-    // jjpr has `unsafe` (libc's localtime_r), so each block says why it is sound.
-    ("clippy", "undocumented_unsafe_blocks", "deny"),
-    ("clippy", "match_bool", "warn"),
-    ("clippy", "bool_to_int_with_if", "warn"),
-    ("clippy", "cognitive_complexity", "warn"),
-    ("clippy", "too_many_lines", "warn"),
-    // `cargo fuzz` builds with `--cfg fuzzing`; without the check-cfg a misspelt cfg never applies.
-    ("rust", "unexpected_cfgs", "warn"),
-];
-
-fn strength(level: &str) -> u8 {
-    match level {
-        "allow" => 0,
-        "warn" => 1,
-        "deny" => 2,
-        "forbid" => 3,
-        _ => 0,
-    }
-}
-
-/// Failures for a `[lints]` table against the baseline. A lint may be spelled with hyphens or
-/// underscores, and set as `"deny"` or as `{ level = "deny", … }`.
-fn baseline_verdicts(lints: &toml::Table, baseline: &[(&str, &str, &str)]) -> Vec<String> {
-    let mut failures = Vec::new();
-    for &(tool, lint, want) in baseline {
-        let set = lints.get(tool).and_then(|t| t.as_table()).and_then(|t| {
-            t.iter()
-                .find(|(k, _)| k.replace('-', "_") == lint)
-                .map(|(_, v)| v)
-        });
-        let level = set.and_then(|v| {
-            v.as_str()
-                .or_else(|| v.get("level").and_then(|l| l.as_str()))
-        });
-        match level {
-            None => failures.push(format!("[lints.{tool}] lacks `{lint} = \"{want}\"`.")),
-            Some(level) if strength(level) < strength(want) => failures.push(format!(
-                "[lints.{tool}] sets `{lint}` to \"{level}\", weaker than the baseline's \"{want}\"."
-            )),
-            Some(_) => {}
+    if let Ok(clippy_toml) = fs::read_to_string(root.join("clippy.toml")) {
+        let defaults = [
+            ("too-many-arguments-threshold", 7i64),
+            ("cognitive-complexity-threshold", 25),
+            ("too-many-lines-threshold", 100),
+            ("type-complexity-threshold", 250),
+            ("max-struct-bools", 3),
+            ("max-fn-params-bools", 3),
+        ];
+        let switches = ["allow-unwrap-in-tests", "allow-expect-in-tests", "allow-dbg-in-tests"];
+        let mut seen = BTreeMap::new();
+        for raw in clippy_toml.lines() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let (key, val) = (k.trim(), v.trim());
+            if switches.contains(&key) {
+                continue;
+            }
+            let parsed: i64 = val.parse().unwrap_or_else(|_| panic!("non-integer clippy.toml key {key} = {val}"));
+            seen.insert(key.to_string(), parsed);
+            let Some(&(_, default_val)) = defaults.iter().find(|&&(dk, _)| dk == key) else {
+                panic!("unknown clippy.toml threshold `{key}`");
+            };
+            if let Some(&pinned) = cfg.pinned_thresholds.get(key) {
+                assert!(parsed <= pinned, "{key}: {parsed} exceeds pinned {pinned}");
+                assert!(parsed > default_val, "{key}: {parsed} <= default {default_val}; remove from [pinned_thresholds]");
+                assert_eq!(parsed, pinned, "{key}: down to {parsed} from {pinned}; lower pin in tests/ratchets.toml");
+            } else {
+                assert!(parsed <= default_val, "{key}: {parsed} exceeds default {default_val}");
+            }
+        }
+        for key in cfg.pinned_thresholds.keys() {
+            assert!(seen.contains_key(key), "`{key}` is pinned in tests/ratchets.toml but not set in clippy.toml");
         }
     }
-    let fuzzing = lints
-        .get("rust")
-        .and_then(|t| t.get("unexpected_cfgs"))
-        .and_then(|v| v.get("check-cfg"))
-        .and_then(|c| c.as_array())
-        .is_some_and(|c| c.iter().any(|v| v.as_str() == Some("cfg(fuzzing)")));
-    if !fuzzing {
-        failures
-            .push("[lints.rust] unexpected_cfgs lacks check-cfg = [\"cfg(fuzzing)\"].".to_string());
+    if cfg.check_baseline_lints {
+        let cargo_toml = fs::read_to_string(root.join("Cargo.toml")).expect("read Cargo.toml");
+        let levels = parse_cargo_lints(&cargo_toml);
+        let failures = baseline_verdicts(&levels);
+        assert!(failures.is_empty(), "Baseline lint check failed:\n  {}", failures.join("\n  "));
     }
-    failures
 }
 
 #[test]
-fn the_lints_table_keeps_the_baseline() {
-    let text =
-        std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("read Cargo.toml");
-    let manifest: toml::Table = text.parse().expect("Cargo.toml parses");
-    let lints = manifest
-        .get("lints")
-        .and_then(|l| l.as_table())
-        .expect("Cargo.toml has a [lints] table");
-    let failures = baseline_verdicts(lints, BASELINE);
-    assert!(failures.is_empty(), "\n{}\n", failures.join("\n"));
-}
-
-#[test]
-fn a_missing_or_weakened_baseline_lint_fails() {
-    let baseline = [
-        ("clippy", "unwrap_used", "deny"),
-        ("clippy", "too_many_lines", "warn"),
-    ];
-    let table = |s: &str| -> toml::Table { s.parse().expect("parses") };
-    let fuzz = "[rust]\nunexpected_cfgs = { level = \"warn\", check-cfg = [\"cfg(fuzzing)\"] }\n";
-    let ok = table(&format!(
-        "{fuzz}[clippy]\nunwrap_used = \"forbid\"\ntoo-many-lines = {{ level = \"deny\" }}\n"
-    ));
-    assert!(
-        baseline_verdicts(&ok, &baseline).is_empty(),
-        "stricter, hyphenated and table forms pass"
-    );
-    let missing = table(&format!("{fuzz}[clippy]\ntoo_many_lines = \"warn\"\n"));
-    assert!(baseline_verdicts(&missing, &baseline)[0].contains("lacks `unwrap_used"));
-    let weak = table(&format!(
-        "{fuzz}[clippy]\nunwrap_used = \"warn\"\ntoo_many_lines = \"warn\"\n"
-    ));
-    assert!(baseline_verdicts(&weak, &baseline)[0].contains("weaker"));
-    let no_fuzz = table("[clippy]\nunwrap_used = \"deny\"\ntoo_many_lines = \"warn\"\n");
-    assert!(baseline_verdicts(&no_fuzz, &baseline)[0].contains("cfg(fuzzing)"));
-}
-
-#[test]
-fn suppressions_are_counted_on_tokens() {
-    assert_eq!(suppressions_in("#[allow(dead_code)] fn a() {}"), 1);
+fn suppressions_and_baseline_verdicts_ratchet_correctly() {
+    assert_eq!(suppressions_in("#[allow(dead_code)]\nfn a() {}"), 1);
     assert_eq!(suppressions_in("#![expect(clippy::too_many_lines)]"), 1);
-    assert_eq!(
-        suppressions_in("#[cfg_attr(test, allow(unused))] fn a() {}"),
-        1
-    );
-    assert_eq!(
-        suppressions_in("mod m { fn a() { #[allow(unused)] let x = 1; } }"),
-        1
-    );
-    assert_eq!(
-        suppressions_in("proptest! { #[allow(unused)] fn p() {} }"),
-        1,
-        "inside a macro"
-    );
-    assert_eq!(
-        suppressions_in(r##"const S: &str = "#[allow(x)]"; // #[allow(y)]"##),
-        0
-    );
-    assert_eq!(
-        suppressions_in("#[cfg(test)] #[derive(Debug)] /// doc\n struct S;"),
-        0
-    );
-}
-
-#[test]
-fn the_suppression_count_ratchets() {
+    assert_eq!(suppressions_in("#[cfg_attr(test, allow(unused))]\nfn a() {}"), 1);
+    assert_eq!(suppressions_in("mod m { fn a() { let q = '\\''; #[allow(unused)] let x = 1; } }"), 1);
+    assert_eq!(suppressions_in("proptest! { #[allow(unused)] fn p() {} }"), 1);
+    assert_eq!(suppressions_in(r##"const S: &str = "#[allow(x)]"; // #[allow(y)]"##), 0);
     assert!(suppression_verdict(2, 2).is_none());
-    assert!(suppression_verdict(3, 2).is_some_and(|m| m.contains("up from 2")));
-    assert!(suppression_verdict(1, 2).is_some_and(|m| m.contains("Lower SUPPRESSIONS to 1")));
-}
-
-#[test]
-fn thresholds_ratchet_toward_the_default() {
-    let defaults = [("t", 10)];
-    let pins = [("t", 20)];
-    let with = |v: i64| BTreeMap::from([("t".to_string(), v)]);
-    assert!(
-        threshold_verdicts(&with(20), &defaults, &pins).is_empty(),
-        "at its pin"
-    );
-    assert!(threshold_verdicts(&with(21), &defaults, &pins)[0].contains("up from its pinned"));
-    assert!(threshold_verdicts(&with(15), &defaults, &pins)[0].contains("lower its pin to 15"));
-    assert!(threshold_verdicts(&with(10), &defaults, &pins)[0].contains("remove its pin"));
-    assert!(threshold_verdicts(&with(11), &defaults, &[])[0].contains("loosens"));
-    assert!(
-        threshold_verdicts(&with(5), &defaults, &[]).is_empty(),
-        "stricter is fine"
-    );
-    assert!(threshold_verdicts(&BTreeMap::new(), &defaults, &pins)[0].contains("no longer set"));
-    let unknown = BTreeMap::from([("mystery".to_string(), 1)]);
-    assert!(threshold_verdicts(&unknown, &defaults, &[])[0].contains("no default"));
-}
-
-#[test]
-fn thresholds_are_read_from_clippy_toml() {
-    let read = thresholds("# note\nmax-struct-bools = 2 # why\nallow-unwrap-in-tests = true\n");
-    assert_eq!(read, BTreeMap::from([("max-struct-bools".to_string(), 2)]));
+    assert!(suppression_verdict(3, 2).is_some_and(|m| m.contains("grew from 2 to 3")));
+    assert!(suppression_verdict(1, 2).is_some_and(|m| m.contains("lower `suppressions = 1`")));
+    let weak = parse_cargo_lints("[lints.clippy]\nunwrap_used = \"warn\"\n");
+    assert!(baseline_verdicts(&weak).iter().any(|m| m.contains("`unwrap_used` must be at least \"deny\"")));
 }

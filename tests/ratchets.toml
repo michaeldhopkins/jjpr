@@ -1,0 +1,20 @@
+# Declarative quality ratchet manifest.
+lint_roots = ["src", "tests", "fuzz/fuzz_targets"]
+suppressions = 8
+check_baseline_lints = true
+
+[rust_pinned]
+"src/forge/github.rs" = 674
+"src/forge/gitlab.rs" = 439
+"src/forge/http.rs" = 446
+"src/forge/types.rs" = 409
+"src/main.rs" = 1690
+"src/merge/execute.rs" = 925
+"src/submit/execute.rs" = 708
+"src/submit/plan.rs" = 733
+"src/watch.rs" = 1197
+
+[pinned_thresholds]
+"too-many-arguments-threshold" = 10
+"cognitive-complexity-threshold" = 30
+"too-many-lines-threshold" = 275
