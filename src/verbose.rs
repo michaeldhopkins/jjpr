@@ -97,7 +97,10 @@ fn request_line(method: &str, url: &str, outcome: Result<u16, String>) -> String
 /// A line with no timing, for a decision rather than a call.
 pub fn note(message: impl FnOnce() -> String) {
     if enabled() {
-        eprintln!("{}", note_line(&message()));
+        let line = note_line(&message());
+        #[cfg(test)]
+        tests::record(&line);
+        eprintln!("{line}");
     }
 }
 
@@ -295,6 +298,20 @@ mod tests {
         assert_eq!(with_outcome("jj status", true), "jj status (failed)");
     }
 
+    use std::cell::RefCell;
+
+    thread_local! {
+        static NOTES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(line: &str) {
+        NOTES.with(|notes| notes.borrow_mut().push(line.to_string()));
+    }
+
+    fn take_notes() -> Vec<String> {
+        NOTES.with(|notes| std::mem::take(&mut *notes.borrow_mut()))
+    }
+
     // One test owns the global flag, so parallel tests never see it flip under them.
     #[test]
     fn timed_passes_the_result_through_and_describes_only_when_enabled() {
@@ -309,6 +326,16 @@ mod tests {
         assert_eq!(r, Ok(7));
         assert!(!described, "off: describe must not run");
 
+        let mut noted = false;
+        note(|| {
+            noted = true;
+            "unused".to_string()
+        });
+        graphql_fallback(&anyhow::anyhow!("offline"));
+        graphql_refill(2);
+        assert!(!noted, "off: note must not evaluate its message");
+        assert!(take_notes().is_empty(), "off: no notes emitted");
+
         set_enabled(true);
         assert!(enabled());
         let mut seen = None;
@@ -319,9 +346,21 @@ mod tests {
                 String::new()
             },
         );
+        note(|| "custom decision".to_string());
+        graphql_fallback(&anyhow::anyhow!("SAML").context("POST graphql"));
+        graphql_refill(0);
+        graphql_refill(1);
         set_enabled(false);
         assert_eq!(r, Err("boom"));
         assert_eq!(seen, Some(Err("boom")), "on: describe sees the result");
         assert!(!enabled());
+        assert_eq!(
+            take_notes(),
+            vec![
+                "[  note  ] custom decision",
+                "[  note  ] GitHub GraphQL status query failed, so each PR's status comes from REST: POST graphql: SAML",
+                "[  note  ] 1 PR has over 100 reviews or checks, past one GraphQL page, so REST reads the rest",
+            ]
+        );
     }
 }
