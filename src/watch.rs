@@ -2036,6 +2036,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_merge_phase_finishes_when_every_segment_merges() {
+        // The loop must stop at segments.len(): one segment more and it would
+        // index past the end. Also pins all_done for a stack that merged whole.
+        let forge = GateForge::new(vec![gate_test_pr("auth", 1)]);
+        let segments = vec![gate_test_segment("auth")];
+        let plan = gate_test_plan();
+        let mut state = ReconcileState::default();
+        let mut prev_reasons: Option<Vec<BlockReason>> = None;
+        let mut consecutive_errors = 0u32;
+        let mut last_heartbeat = Instant::now();
+
+        let outcome = run_merge_phase(
+            &HealthyJj,
+            &forge,
+            &segments,
+            &forge.prs,
+            &plan.options,
+            &plan,
+            ForgeKind::GitHub,
+            &mut prev_reasons,
+            &mut consecutive_errors,
+            &mut last_heartbeat,
+            &mut state,
+            false,
+        )
+        .expect("run_merge_phase should not error");
+
+        assert_eq!(forge.merge_calls(), vec![1]);
+        assert_eq!(outcome.merged.len(), 1);
+        assert!(outcome.all_done, "a fully merged stack is done");
+        assert!(!outcome.waiting_on_block);
+    }
+
     /// Forge whose list_open_prs fails. Inside run_merge_phase, the only
     /// list_open_prs call is from reconcile_forge_state, so this triggers
     /// a forge-side reconcile failure. evaluate_segment uses the pr_map
