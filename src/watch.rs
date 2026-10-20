@@ -1198,7 +1198,7 @@ fn run_submit_phase(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::forge::types::{
@@ -1763,6 +1763,72 @@ mod tests {
         .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn wait_for_bookmark_waits_out_the_timeout_before_returning_none() {
+        // The deadline must be honored: an early return means it was
+        // computed in the past, a hang means the loop never noticed it.
+        // Bounded on a channel so a broken mutant fails the suite instead
+        // of stalling it; on timeout, flag shutdown so the thread unwinds.
+        let jj = WaitJj::new("auth", u32::MAX); // bookmark never appears
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let worker_shutdown = Arc::clone(&shutdown);
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            let result = wait_for_bookmark(
+                &jj,
+                Some(Duration::from_millis(300)),
+                Duration::from_millis(20),
+                &worker_shutdown,
+                false,
+                None,
+            )
+            .unwrap();
+            let _ = tx.send((result, start.elapsed()));
+        });
+
+        let Ok((result, elapsed)) = rx.recv_timeout(Duration::from_secs(2)) else {
+            shutdown.store(true, Ordering::Relaxed);
+            panic!("wait_for_bookmark never returned; the 300ms deadline was ignored");
+        };
+
+        assert!(result.is_none(), "an expired timeout returns None");
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "returned after only {elapsed:?}; the 300ms deadline fired early"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "returned after {elapsed:?}; should have given up at the 300ms deadline"
+        );
+    }
+
+    #[test]
+    fn wait_for_bookmark_finds_a_bookmark_before_the_deadline() {
+        // A bookmark present on the first poll must beat a generous timeout:
+        // an inverted deadline comparison returns None before the loop ever
+        // looks for the bookmark.
+        let jj = WaitJj::new("auth", 0); // bookmark is there on poll one
+        let shutdown = AtomicBool::new(false);
+
+        let result = wait_for_bookmark(
+            &jj,
+            Some(Duration::from_secs(30)),
+            Duration::from_millis(10),
+            &shutdown,
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.as_deref(),
+            Some("auth"),
+            "a first-poll bookmark wins over the 30s deadline"
+        );
     }
 
     // --- run_merge_phase gate tests ---
