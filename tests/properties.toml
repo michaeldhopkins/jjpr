@@ -1,0 +1,117 @@
+# Every source file is classified as `pure` (must name its property tests) or `effectful` (with a
+# reason). A new file that is missing from both fails `tests/properties.rs`. `owed` is the pure
+# backlog; it may only shrink.
+
+owed = [
+    "src/docs.rs",
+    "src/forge/comment.rs",
+    "src/forge/remote.rs",
+    "src/forge/types.rs",
+    "src/hints.rs",
+    "src/identity.rs",
+    "src/jj/templates.rs",
+    "src/jj/types.rs",
+    "src/jj/version.rs",
+    "src/submit/analyze.rs",
+    "src/submit/restack_messages.rs",
+    "src/undo/explain.rs",
+    "src/undo/failed.rs",
+    "src/undo/model.rs",
+    "src/undo/plan.rs",
+    "src/undo/planner.rs",
+    "src/undo/report.rs",
+    "src/watch/report.rs",
+]
+
+[pure]
+"src/docs.rs" = []
+"src/forge/comment.rs" = []
+"src/forge/remote.rs" = []
+"src/forge/types.rs" = []
+"src/hints.rs" = []
+"src/identity.rs" = []
+"src/jj/revset.rs" = [
+    "a_literal_reads_back_as_the_name",
+    "a_literal_ends_where_the_builder_put_its_close",
+    "a_literal_holds_no_raw_control_character",
+]
+"src/jj/templates.rs" = []
+"src/jj/types.rs" = []
+"src/jj/version.rs" = []
+"src/merge/merged_nav.rs" = ["merged_view_keeps_every_item_in_order"]
+"src/status_line.rs" = [
+    "next_step_counts_what_is_missing",
+    "count_word_is_a_word_below_ten_and_the_digits_above",
+]
+"src/submit/analyze.rs" = []
+"src/submit/restack_messages.rs" = []
+"src/undo/explain.rs" = []
+"src/undo/failed.rs" = []
+"src/undo/model.rs" = []
+"src/undo/plan.rs" = []
+"src/undo/planner.rs" = []
+"src/undo/report.rs" = []
+"src/undo/rollback.rs" = [
+    "a_step_then_its_inverse_changes_nothing",
+    "the_inverse_of_an_inverse_is_the_step",
+]
+"src/watch/report.rs" = []
+
+[effectful]
+"src/auth.rs" = "queries the forge for the authenticated user and prints auth setup help to stdout"
+"src/cli.rs" = "clap CLI argument and subcommand definitions only"
+"src/cli_parse.rs" = "parses process argv and exits the process on invalid subcommands"
+"src/clock.rs" = "converts Unix timestamps to local wall-clock time via libc localtime_r"
+"src/config.rs" = "reads and writes global and repo-local TOML configuration files and environment variables"
+"src/connect.rs" = "walks the filesystem for the jj repo root and builds the authenticated forge HTTP client"
+"src/forge/backoff.rs" = "sleeps and retries HTTP requests on forge rate-limit responses"
+"src/forge/forgejo.rs" = "Forgejo/Codeberg HTTP API client"
+"src/forge/github.rs" = "GitHub REST and GraphQL HTTP API client"
+"src/forge/gitlab.rs" = "GitLab REST HTTP API client"
+"src/forge/http.rs" = "ureq HTTP client wrapper with auth headers, pagination and cross-origin checks"
+"src/forge/merged.rs" = "queries the forge for recently merged pull requests"
+"src/forge/mod.rs" = "Forge trait definition and helpers that query branch-protection and review endpoints"
+"src/forge/pr_ops.rs" = "per-forge HTTP calls for reading, closing, reopening and retitling pull requests"
+"src/forge/status.rs" = "fetches PR mergeability, CI checks and reviews across the forge and worker threads"
+"src/forge/test_server.rs" = "test-only loopback TCP HTTP server for exercising forge backends"
+"src/forge/token.rs" = "reads forge tokens from environment variables and the gh/glab CLIs"
+"src/graph/change_graph.rs" = "queries jj bookmarks and commit logs to build the change graph"
+"src/graph/mod.rs" = "module declarations and re-exports only"
+"src/graph/traversal.rs" = "queries jj commit history to walk from bookmarks toward trunk"
+"src/heartbeat.rs" = "reads and writes .jj/jjpr-watch.json, checks process liveness via kill(0), and reads the system clock"
+"src/jj/fetch.rs" = "runs jj git fetch subprocesses against remotes"
+"src/jj/mod.rs" = "Jj trait definition and module re-exports"
+"src/jj/runner.rs" = "shells out to the jj binary to read and mutate the repository"
+"src/jj/runner/restore.rs" = "runs jj log and jj op restore subprocesses"
+"src/jj/runner/trunk.rs" = "runs jj config and jj log subprocesses to resolve the trunk branch"
+"src/jj/stale.rs" = "tracks warned stale bookmarks behind a mutex and prints warnings to stderr"
+"src/lib.rs" = "module declarations only"
+"src/main.rs" = "CLI entry point: parses arguments, connects to jj and the forge, and dispatches commands"
+"src/merge/divergence.rs" = "queries jj for divergent changes and working-copy rewrites during post-merge reconcile"
+"src/merge/execute.rs" = "merges PRs on the forge and reconciles local and remote branches"
+"src/merge/mod.rs" = "module declarations only"
+"src/merge/plan.rs" = "queries the forge for open PRs, CI checks, reviews and mergeability to build a merge plan"
+"src/merge/restore_point.rs" = "snapshots the working copy and restores jj operations around reconcile"
+"src/merge/watch.rs" = "sleeps between watch polls, prints status deltas to stdout/stderr, and refreshes forge PR state"
+"src/parallel.rs" = "spawns scoped worker threads for bounded concurrent execution"
+"src/submit/execute.rs" = "pushes bookmarks via jj and creates or updates PRs, bases, reviewers and comments on the forge"
+"src/submit/mod.rs" = "module declarations only"
+"src/submit/plan.rs" = "queries the forge and jj to build a submission plan"
+"src/submit/resolve.rs" = "prompts the user on the terminal via dialoguer when a segment has multiple bookmarks"
+"src/submit/restack.rs" = "queries jj and the forge for out-of-band merges and rebases surviving stack segments"
+"src/submit/stale.rs" = "queries the forge for merged PRs and forgets stale local bookmarks via jj"
+"src/undo/execute.rs" = "executes undo and redo plans against the repo, forge and on-disk journal"
+"src/undo/journal.rs" = "reads and writes undo journal JSON files in .jj/repo/jjpr/undo"
+"src/undo/journal/lock.rs" = "acquires and releases the filesystem lock file for undo and redo"
+"src/undo/mod.rs" = "coordinates undo and redo runs across the journal, repo, forge and output stream"
+"src/undo/observe.rs" = "queries the forge for current branch heads, PR state, comments and reviews"
+"src/undo/recorder.rs" = "records pushes and forge writes into the on-disk undo journal as a command runs"
+"src/undo/recorder/around.rs" = "queries the jj operation log around each command to detect foreign operations"
+"src/undo/recording_forge.rs" = "Forge wrapper that records every forge mutation to the undo journal"
+"src/undo/recording_jj.rs" = "Jj wrapper that records every bookmark push and repo mutation to the undo journal"
+"src/undo/repo.rs" = "UndoRepo trait and JjRepo implementation that shells out to jj"
+"src/undo/show.rs" = "writes dry-run plans and post-run notes to an output stream"
+"src/undo/step_back.rs" = "queries workspace working copies and steps back over post-command jj operations"
+"src/undo/world.rs" = "test-only in-memory UndoRepo and Forge stub with fault injection"
+"src/verbose.rs" = "stores the process-wide --verbose flag, times operations with Instant, and logs to stderr"
+"src/watch.rs" = "runs the watch polling loop across jj, the forge and terminal signals"
