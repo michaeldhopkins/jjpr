@@ -13,6 +13,7 @@ use crate::hints;
 use crate::jj::types::NarrowedSegment;
 use crate::jj::{Jj, revset};
 
+pub(crate) use super::block_reason::format_block_reason;
 pub use super::divergence::{
     DivergenceKind, LocalDivergenceWarning, ReconcileState, print_fetch_rewrites,
 };
@@ -23,7 +24,7 @@ use super::plan::{BlockReason, MergePlan, PrMergeStatus, evaluate_segment};
 ///
 /// Returns warnings for any local failures (fetch, divergence, rebase, push)
 /// instead of propagating errors. An empty vec means full success.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn reconcile_local_state(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -593,6 +594,7 @@ pub struct MergeResult {
 ///
 /// After each successful merge, re-evaluates remaining segments against
 /// live GitHub state rather than trusting the upfront plan.
+#[allow(clippy::too_many_lines)]
 pub fn execute_merge_plan(
     jj: &dyn Jj,
     github: &dyn Forge,
@@ -876,51 +878,6 @@ fn execute_dry_run(plan: &MergePlan) -> Result<MergeResult> {
         skipped_merged,
         local_warnings: vec![],
     })
-}
-
-pub(crate) fn format_block_reason(reason: &BlockReason, fk: ForgeKind) -> String {
-    let abbr = fk.request_abbreviation();
-    match reason {
-        BlockReason::NoPr => format!("No {abbr} exists for this bookmark"),
-        BlockReason::Draft => format!("{abbr} is still a draft"),
-        BlockReason::ChecksFailing => "CI checks are failing".to_string(),
-        BlockReason::ChecksPending => "CI checks are pending".to_string(),
-        BlockReason::InsufficientApprovals { have, need } => {
-            format!("Insufficient approvals ({have}/{need})")
-        }
-        BlockReason::ChangesRequested => "Changes have been requested".to_string(),
-        BlockReason::Conflicted => "Has merge conflicts".to_string(),
-        BlockReason::MergeabilityUnknown => {
-            "Mergeability is still being computed (try again in a moment)".to_string()
-        }
-        BlockReason::LocalSyncFailed => "Local sync failed".to_string(),
-        BlockReason::ForgeReconcileFailed => "Forge reconcile failed".to_string(),
-        BlockReason::ConcurrentModification => {
-            "Concurrent modification (another jj process)".to_string()
-        }
-        BlockReason::WorkingCopyRewritten => {
-            "A fetch rewrote commits under your working copy".to_string()
-        }
-        BlockReason::NativeStack {
-            pr_number,
-            stack_number,
-            position,
-            size,
-        } => {
-            // At the bottom of the stack there is nothing below, so promising to
-            // land "everything below it" would overstate what the command does.
-            let lands = if *position <= 1 {
-                format!("which lands #{pr_number}")
-            } else {
-                format!("which lands #{pr_number} and the {} below it", position - 1)
-            };
-            format!(
-                "In native stack #{stack_number} ({position} of {size}); \
-                 GitHub refuses API merges of stacked {abbr}s. \
-                 Run `gh stack merge {pr_number}`, {lands}"
-            )
-        }
-    }
 }
 
 #[cfg(test)]
@@ -2100,6 +2057,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_merge_failure_skips_push_for_failed_bookmark() {
         struct FailingMergeJj {
             calls: Mutex<Vec<String>>,
@@ -2234,6 +2192,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_merge_conflict_detected_skips_push() {
         struct ConflictingMergeJj {
             calls: Mutex<Vec<String>>,
@@ -2989,6 +2948,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_merge_retry_on_502_then_verified_merged() {
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -4695,6 +4655,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn reconcile_after_merge_sets_forge_failed_when_list_prs_fails() {
         struct ListFailGitHub;
         impl Forge for ListFailGitHub {

@@ -479,6 +479,7 @@ pub fn divergent_changes_in_stack(segments: &[NarrowedSegment]) -> Vec<Divergent
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn create_submission_plan(
     github: &dyn Forge,
     segments: &[NarrowedSegment],
@@ -564,15 +565,7 @@ pub fn create_submission_plan(
         // auto-closes PRs when head is no longer ahead of base.
         if segment.changes.iter().all(|c| c.empty) {
             if existing_pr.is_some() {
-                eprintln!(
-                    "  Warning: '{}' has no file changes (all commits are empty)",
-                    bookmark.name
-                );
-                eprintln!("    Skipping push to avoid closing the existing PR.");
-                eprintln!(
-                    "    hint: jj bookmark delete {0} && jj git push --bookmark {0}",
-                    bookmark.name
-                );
+                super::warnings::print_empty_segment_warning(&bookmark.name);
             }
             continue;
         }
@@ -1480,6 +1473,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn scope_skips_already_merged_segments_when_picking_bottom() {
         // bottom (auth) is externally merged. The "live bottom" should be
         // profile, not auth, since auth's branch is gone.
@@ -2209,6 +2203,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_plan_skips_merged_prs() {
         struct GitHubWithMergedPr;
 
@@ -2351,6 +2346,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_base_skips_consecutive_merged_segments() {
         // auth and profile are both merged; settings should base on "main"
         struct GitHubTwoMerged;
@@ -2497,6 +2493,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_base_uses_live_segment_after_merged() {
         // auth is merged, profile has a PR (live), settings needs a new PR
         // settings should base on "profile" (the nearest live segment), not "main"
@@ -2666,6 +2663,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_plan_does_not_skip_closed_but_unmerged_prs() {
         struct GitHubWithClosedPr;
 
@@ -2777,6 +2775,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_plan_merged_bookmark_not_pushed() {
         struct GitHubWithMergedPr;
 

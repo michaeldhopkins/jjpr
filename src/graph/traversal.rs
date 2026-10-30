@@ -32,6 +32,7 @@ pub struct TraversalResult {
 /// by change id merges two genuinely distinct commits into one segment. Commit id
 /// distinguishes them while still giving one segment when two bookmarks sit on the
 /// same commit, which is the case change-id matching was really serving.
+#[allow(clippy::too_many_lines)]
 pub fn traverse_and_discover_segments(
     jj: &dyn Jj,
     start_commit_id: &str,

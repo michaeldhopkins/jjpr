@@ -3,12 +3,16 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
+use crate::forge::Forge;
 use crate::forge::comment::{self, StackEntry};
 use crate::forge::types::PullRequest;
-use crate::forge::{Forge, ForgeKind};
 use crate::jj::Jj;
 
 use super::plan::SubmissionPlan;
+use super::warnings::{
+    native_stack_conflict_message, print_body_conflict_warnings, print_title_drift_warnings,
+    report_partial_failure,
+};
 
 /// Execute the submission plan: push, create PRs, update bases, manage comments.
 ///
@@ -16,6 +20,7 @@ use super::plan::SubmissionPlan;
 /// `SubmitOptions` at plan-build time). This keeps submit and the watch
 /// inner submit phase from drifting on options like `reviewers` or
 /// `dry_run` — there's only one way to construct an executable plan.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
 pub fn execute_submission_plan(
     jj: &dyn Jj,
     github: &dyn Forge,
@@ -341,110 +346,6 @@ pub fn execute_submission_plan(
     Ok(())
 }
 
-fn print_title_drift_warnings(
-    drifts: &[super::plan::TitleDrift],
-    repo_info: &crate::forge::types::RepoInfo,
-    forge_kind: crate::forge::ForgeKind,
-) {
-    for drift in drifts {
-        let escaped_title = drift.expected_title.replace('\'', "'\\''");
-        let fix_hint = match forge_kind {
-            crate::forge::ForgeKind::GitHub | crate::forge::ForgeKind::Forgejo => format!(
-                "gh pr edit {} --repo {}/{} --title '{}'",
-                drift.pr_number, repo_info.owner, repo_info.repo, escaped_title,
-            ),
-            crate::forge::ForgeKind::GitLab => format!(
-                "glab mr update {} --title '{}'",
-                drift.pr_number, escaped_title,
-            ),
-        };
-        println!(
-            "  Note: {} title differs from commit description\n\
-             \x20        current: \"{}\"\n\
-             \x20        expected: \"{}\"\n\
-             \x20        fix with: {fix_hint}",
-            forge_kind.format_ref(drift.pr_number),
-            drift.current_title,
-            drift.expected_title,
-        );
-    }
-}
-
-fn print_body_conflict_warnings(
-    conflicts: &[super::plan::BodyConflict],
-    forge_kind: crate::forge::ForgeKind,
-) {
-    for conflict in conflicts {
-        let reason = if conflict.unfingerprinted {
-            "its description was edited on the forge (or predates jjpr tracking)"
-        } else {
-            "its description and commit message both changed since the last submit"
-        };
-        println!(
-            "  Note: left {} body unchanged — {reason}.\n\
-             \x20        Edit the commit message if you want jjpr to update the description.",
-            forge_kind.format_ref(conflict.pr_number),
-        );
-    }
-}
-
-/// Explain a refusal caused by native-stack membership.
-///
-/// Deliberately says what jjpr wanted to do, why it cannot, and what the user
-/// can do instead. The bare `422` ("Validation Failed") that GitHub would
-/// otherwise surface names none of those.
-fn native_stack_conflict_message(plan: &SubmissionPlan, fk: ForgeKind) -> String {
-    let abbr = fk.request_abbreviation();
-    let mut out =
-        String::from("the stack's shape changed, but its PRs are in a GitHub native stack.\n\n");
-    for c in &plan.native_stack_base_conflicts {
-        out.push_str(&format!(
-            "  {} ('{}') needs its base moved from '{}' to '{}'\n",
-            fk.format_ref(c.pr_number),
-            c.bookmark.name,
-            c.current_base,
-            c.expected_base,
-        ));
-    }
-    // One jjpr stack can span more than one native stack: a native stack may be
-    // rooted on any branch, so a user can register (a,b) as one and (c,d) as
-    // another within the same chain. Naming only the first would leave the user
-    // blocked again on the next run, so unstack every stack involved.
-    let mut stacks: Vec<u64> = plan
-        .native_stack_base_conflicts
-        .iter()
-        .map(|c| c.stack_number)
-        .collect();
-    stacks.sort_unstable();
-    stacks.dedup();
-    let unstack = stacks
-        .iter()
-        .map(|n| format!("gh stack unstack {n}"))
-        .collect::<Vec<_>>()
-        .join(" && ");
-
-    out.push_str(&format!(
-        "\nGitHub does not allow retargeting a {abbr} that belongs to a stack, so \
-         jjpr cannot\napply that. Nothing has been pushed.\n\n\
-         To continue, dissolve the native stack and let jjpr manage the bases:\n\
-         \x20 {unstack}\n\
-         \x20 jjpr submit\n\n\
-         Or keep the native stack and restructure it with gh instead:\n\
-         \x20 {unstack} && gh stack init <branches in the new order>",
-    ));
-    out
-}
-
-fn report_partial_failure(completed: &[String]) {
-    if !completed.is_empty() {
-        eprintln!("\nThe following actions completed before the error:");
-        for action in completed {
-            eprintln!("  - {action}");
-        }
-        eprintln!();
-    }
-}
-
 /// Visible for testing only — not part of the public API.
 /// A stack entry with its merged status, used as intermediate representation.
 #[derive(Clone)]
@@ -582,6 +483,7 @@ fn retain_settled_previous(
         .collect()
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn update_stack_comments(
     forge: &dyn Forge,
     nav: &dyn comment::StackNav,
@@ -1315,6 +1217,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_updates_existing_stack_comment() {
         let jj = RecordingJj::new();
 
@@ -2846,6 +2749,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_stack_comment_excludes_default_branch() {
         let jj = RecordingJj::new();
 
@@ -3052,6 +2956,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_merged_pr_links_preserved_in_stack_comments() {
         let jj = RecordingJj::new();
 
@@ -3241,6 +3146,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn test_comment_failure_does_not_abort() {
         let jj = RecordingJj::new();
 

@@ -21,6 +21,7 @@ use crate::merge::watch::{
 use crate::submit::{analyze, execute, plan, resolve};
 
 mod report;
+mod startup;
 
 /// Submit-phase options for the watch loop. Mirrors the relevant
 /// surface of `submit::plan::SubmitOptions` so watch and submit can't
@@ -289,7 +290,7 @@ fn classify_post_merge(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_merge_phase(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -631,15 +632,18 @@ fn handle_phase_error(
     PhaseError::Retry
 }
 
-// `too_many_lines` used to be allowed here at 284/275. Extracting
-// `handle_phase_error` — three byte-identical copies of the retry arm — brought
-// it back under the limit, so the allow is gone rather than suppressed.
-//
-// The two remaining allows are honest: 13 parameters is a genuine seam problem,
-// and the loop really does carry high branching. Both are worth another pass,
-// but only with tests underneath them first — see TODO.md for why that order is
-// not negotiable here.
-#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+// At 284/275, extracting `handle_phase_error` (three byte-identical copies of
+// the retry arm) brought this back under the old limit. Since clippy.toml went
+// back to clippy's default of 100 lines, `too_many_lines` is pinned here again
+// rather than split, for the reason below. The other two allows are honest:
+// 13 parameters is a genuine seam problem, and the loop really does carry high
+// branching. All three are worth another pass, but only with tests underneath
+// them first — see TODO.md for why that order is not negotiable here.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cognitive_complexity,
+    clippy::too_many_lines
+)]
 pub fn run_watch_loop(
     jj: &dyn Jj,
     forge: &dyn Forge,
@@ -699,7 +703,7 @@ pub fn run_watch_loop(
         stack_nav,
     );
 
-    print_initial_watch_status(jj, forge, owner, repo, target_bookmark);
+    startup::print_initial_watch_status(jj, forge, owner, repo, target_bookmark);
 
     if merge_options.required_approvals == 0 {
         anyhow::bail!(
@@ -1033,56 +1037,6 @@ pub fn run_watch_loop(
             local_warnings: state.warnings,
         },
     })
-}
-
-/// One-time pre-loop summary so the user knows what watch is working
-/// with. Best-effort: silently skip if the forge or jj queries fail.
-fn print_initial_watch_status(
-    jj: &dyn Jj,
-    forge: &dyn Forge,
-    owner: &str,
-    repo: &str,
-    target_bookmark: &str,
-) {
-    let Ok(initial_prs) = forge.list_open_prs(owner, repo) else {
-        return;
-    };
-    let pr_map = crate::forge::build_pr_map(initial_prs, owner);
-    let segments = rediscover_segments(jj, target_bookmark).unwrap_or_default();
-    let with_pr: Vec<_> = segments
-        .iter()
-        .filter(|s| pr_map.contains_key(&s.bookmark.name))
-        .collect();
-    let without_pr: Vec<_> = segments
-        .iter()
-        .filter(|s| !pr_map.contains_key(&s.bookmark.name))
-        .collect();
-    if with_pr.is_empty() && without_pr.is_empty() {
-        return;
-    }
-    let plural = if segments.len() == 1 { "" } else { "s" };
-    let with_pr_suffix = if !with_pr.is_empty() {
-        format!(
-            ", {} with existing PR{}",
-            with_pr.len(),
-            if with_pr.len() == 1 { "" } else { "s" }
-        )
-    } else {
-        String::new()
-    };
-    println!(
-        "  {} bookmark{plural} in stack{with_pr_suffix}",
-        segments.len()
-    );
-    if !without_pr.is_empty() {
-        let names: Vec<_> = without_pr
-            .iter()
-            .map(|s| s.bookmark.name.as_str())
-            .collect();
-        println!("  Will create draft PRs for: {}\n", names.join(", "));
-    } else {
-        println!();
-    }
 }
 
 /// When the change graph has no segments but we have local bookmarks

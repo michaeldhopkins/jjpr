@@ -128,6 +128,7 @@ impl Capture {
 
 #[test]
 #[ignore = "captures fixtures from the jj named by JJPR_CAPTURE_JJ"]
+#[allow(clippy::too_many_lines)]
 fn capture_fixtures() {
     let jj = PathBuf::from(std::env::var("JJPR_CAPTURE_JJ").expect("set JJPR_CAPTURE_JJ"));
     let raw_version = String::from_utf8(

@@ -745,6 +745,7 @@ fn top_pr_commits(repo: &common::JjTestRepo) -> Vec<String> {
 /// abandon and a push, each its own operation) after the bottom PR was
 /// squash-merged and its branch deleted. One `jjpr undo` puts the stack back.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_restack_is_undone_whole() {
     if !common::jj_available() {
         return;

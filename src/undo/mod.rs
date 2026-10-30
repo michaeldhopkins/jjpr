@@ -74,6 +74,7 @@ pub struct Context<'a> {
     pub now: u64,
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn run(cx: &Context, opts: Options, out: &mut dyn Write) -> Result<()> {
     let _lock = if opts.dry_run {
         None

@@ -326,6 +326,7 @@ fn feature1_scenario(
 /// Safe to run against the shared sandbox: everything is prefixed, and if the
 /// refusal ever regresses the pushed refs are exactly what `Drop` cleans up.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn divergent_change_refuses_before_pushing_all_forges() {
     let drivers = configured_drivers();
     if drivers.is_empty() {

@@ -560,6 +560,7 @@ fn test_submit_preserves_hand_edited_description() {
 /// strikethrough rendering and no icon. Exercises the full data flow:
 /// previous JJPR_DATA → classify_stack_entries → generate_comment_body.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_merged_bottom_renders_in_fossil_details_block() {
     if std::env::var("JJPR_E2E").is_err() {
         println!("Skipping E2E test (set JJPR_E2E=1 to run)");

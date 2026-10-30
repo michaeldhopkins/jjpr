@@ -313,6 +313,7 @@ fn a_divergent_rebase_root_is_only_screenable_via_change_id() {
 /// bookmark/log templates carry it through, and that the graph keyed by commit id
 /// keeps the copies apart where change-id keying merged them.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn real_divergent_change_in_one_chain_stays_two_segments() {
     if !common::jj_available() {
         return;

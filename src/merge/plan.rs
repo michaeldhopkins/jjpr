@@ -147,6 +147,7 @@ fn fetch_for_merge(
 /// only ever an optimization: absent, every field is fetched here instead, and
 /// the outcome is the same either way. Errors and prefetch gaps both read as
 /// "unknown", which blocks rather than waves the merge through.
+#[allow(clippy::too_many_lines)]
 pub fn evaluate_segment(
     github: &dyn Forge,
     bookmark_name: &str,
