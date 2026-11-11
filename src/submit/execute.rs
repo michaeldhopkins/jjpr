@@ -87,7 +87,7 @@ pub fn execute_submission_plan(
 
         println!("  Pushing '{}'...", bookmark.name);
         if let Err(e) = jj.push_bookmark(&bookmark.name, &plan.remote_name) {
-            report_partial_failure(&completed_actions);
+            report_partial_failure(&mut std::io::stderr(), &completed_actions);
             return Err(e.context(crate::hints::push_failed(&bookmark.name)));
         }
         completed_actions.push(format!("Pushed '{}'", bookmark.name));
@@ -153,7 +153,7 @@ pub fn execute_submission_plan(
         ) {
             Ok(pr) => pr,
             Err(e) => {
-                report_partial_failure(&completed_actions);
+                report_partial_failure(&mut std::io::stderr(), &completed_actions);
                 return Err(e);
             }
         };
@@ -170,7 +170,7 @@ pub fn execute_submission_plan(
             && !reviewers.is_empty()
             && let Err(e) = github.request_reviewers(owner, repo, pr.number, reviewers)
         {
-            report_partial_failure(&completed_actions);
+            report_partial_failure(&mut std::io::stderr(), &completed_actions);
             return Err(e);
         }
 
@@ -194,7 +194,7 @@ pub fn execute_submission_plan(
             item.expected_base
         );
         if let Err(e) = github.update_pr_base(owner, repo, item.pr.number, &item.expected_base) {
-            report_partial_failure(&completed_actions);
+            report_partial_failure(&mut std::io::stderr(), &completed_actions);
             return Err(e);
         }
         completed_actions.push(format!(
@@ -228,7 +228,7 @@ pub fn execute_submission_plan(
             );
         }
         if let Err(e) = github.update_pr_body(owner, repo, item.pr_number, &item.new_body) {
-            report_partial_failure(&completed_actions);
+            report_partial_failure(&mut std::io::stderr(), &completed_actions);
             return Err(e);
         }
         // Keep the in-memory PR in sync so Phase 7's stack-nav splice (which
@@ -258,7 +258,7 @@ pub fn execute_submission_plan(
             item.bookmark.name
         );
         if let Err(e) = github.mark_pr_ready(owner, repo, item.pr_number) {
-            report_partial_failure(&completed_actions);
+            report_partial_failure(&mut std::io::stderr(), &completed_actions);
             return Err(e);
         }
         completed_actions.push(format!("Marked {} as ready", fk.format_ref(item.pr_number)));
@@ -296,7 +296,7 @@ pub fn execute_submission_plan(
             }
         }
         if let Err(e) = github.request_reviewers(owner, repo, *pr_number, &all_reviewers) {
-            report_partial_failure(&completed_actions);
+            report_partial_failure(&mut std::io::stderr(), &completed_actions);
             return Err(e);
         }
         completed_actions.push(format!(
@@ -329,11 +329,9 @@ pub fn execute_submission_plan(
         }
     };
 
-    // Report title drift
-    print_title_drift_warnings(&plan.bookmarks_with_title_drift, &plan.repo_info, fk);
-
-    // Report descriptions jjpr declined to overwrite
-    print_body_conflict_warnings(&plan.bookmarks_with_body_conflict, fk);
+    let out = &mut std::io::stdout();
+    print_title_drift_warnings(out, &plan.bookmarks_with_title_drift, &plan.repo_info, fk);
+    print_body_conflict_warnings(out, &plan.bookmarks_with_body_conflict, fk);
 
     if !plan.has_actions()
         && plan.bookmarks_already_merged.is_empty()

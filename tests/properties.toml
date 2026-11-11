@@ -13,6 +13,7 @@ owed = [
     "src/jj/types.rs",
     "src/jj/version.rs",
     "src/submit/analyze.rs",
+    "src/submit/warnings.rs",
     "src/submit/restack_messages.rs",
     "src/undo/explain.rs",
     "src/undo/failed.rs",
@@ -24,6 +25,14 @@ owed = [
 ]
 
 [pure]
+"src/merge/block_reason.rs" = [
+    "every_reason_is_explained_on_one_line",
+    "a_native_stack_reason_names_the_merge_command_and_what_it_lands",
+]
+"src/merge_report.rs" = [
+    "native_stack_advice_is_the_same_from_merge_and_from_watch",
+    "a_follow_up_names_one_command_on_a_new_line",
+]
 "src/docs.rs" = []
 "src/forge/comment.rs" = []
 "src/forge/remote.rs" = []
@@ -44,6 +53,7 @@ owed = [
     "count_word_is_a_word_below_ten_and_the_digits_above",
 ]
 "src/submit/analyze.rs" = []
+"src/submit/warnings.rs" = []
 "src/submit/restack_messages.rs" = []
 "src/undo/explain.rs" = []
 "src/undo/failed.rs" = []
@@ -115,3 +125,4 @@ owed = [
 "src/undo/world.rs" = "test-only in-memory UndoRepo and Forge stub with fault injection"
 "src/verbose.rs" = "stores the process-wide --verbose flag, times operations with Instant, and logs to stderr"
 "src/watch.rs" = "runs the watch polling loop across jj, the forge and terminal signals"
+"src/watch/startup.rs" = "queries the forge and jj for the pre-loop status line"

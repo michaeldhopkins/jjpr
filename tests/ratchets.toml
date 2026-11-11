@@ -8,9 +8,9 @@ check_baseline_lints = true
 "src/forge/gitlab.rs" = 439
 "src/forge/http.rs" = 446
 "src/forge/types.rs" = 409
-"src/main.rs" = 1545
+"src/main.rs" = 1523
 "src/merge/execute.rs" = 882
-"src/submit/execute.rs" = 610
+"src/submit/execute.rs" = 608
 "src/submit/plan.rs" = 726
 "src/watch.rs" = 1151
 

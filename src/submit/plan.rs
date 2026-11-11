@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io};
 
 use anyhow::{Context, Result};
 
@@ -565,7 +565,7 @@ pub fn create_submission_plan(
         // auto-closes PRs when head is no longer ahead of base.
         if segment.changes.iter().all(|c| c.empty) {
             if existing_pr.is_some() {
-                super::warnings::print_empty_segment_warning(&bookmark.name);
+                super::warnings::print_empty_segment_warning(&mut io::stderr(), &bookmark.name);
             }
             continue;
         }

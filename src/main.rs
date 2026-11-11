@@ -28,7 +28,7 @@ use jjpr::parallel;
 use jjpr::submit::{analyze, execute, plan, resolve, restack};
 use jjpr::undo::{Direction, Options, RecordingForge, RecordingJj};
 
-use merge_report::{blocked_follow_up, print_local_warnings, print_merge_summary};
+use merge_report::{print_local_warnings, print_merge_summary, print_watch_summary};
 
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<()> {
@@ -1249,8 +1249,14 @@ fn cmd_merge(args: MergeArgs<'_>, dry_run: bool, no_fetch: bool) -> Result<()> {
         dry_run,
     )?;
 
-    print_merge_summary(&result);
-    print_local_warnings(&result, &stack.segments, stack_base, &stack.default_branch)
+    print_merge_summary(&mut std::io::stdout(), &result);
+    print_local_warnings(
+        &mut std::io::stdout(),
+        &result,
+        &stack.segments,
+        stack_base,
+        &stack.default_branch,
+    )
 }
 
 struct WatchArgs<'a> {
@@ -1407,42 +1413,14 @@ fn cmd_watch(args: WatchArgs<'_>) -> Result<()> {
         Some(&heartbeat),
     )?;
 
-    print_watch_summary(&result);
+    print_watch_summary(&mut std::io::stdout(), &result);
     print_local_warnings(
+        &mut std::io::stdout(),
         &result.merge_result,
         &stack.segments,
         stack_base_str.as_deref(),
         &stack.default_branch,
     )
-}
-
-fn print_watch_summary(result: &jjpr::watch::WatchResult) {
-    let mr = &result.merge_result;
-    if !result.prs_created.is_empty() {
-        let n = result.prs_created.len();
-        println!("\n  Created {n} draft PR{}.", if n == 1 { "" } else { "s" });
-    }
-    if !result.prs_promoted.is_empty() {
-        let n = result.prs_promoted.len();
-        println!(
-            "  Promoted {n} PR{} to ready.",
-            if n == 1 { "" } else { "s" }
-        );
-    }
-
-    if mr.merged.is_empty() && mr.skipped_merged.is_empty() && mr.blocked_at.is_none() {
-        println!("\nWatch ended without merging anything in this stack.");
-    } else if let Some(ref blocked) = mr.blocked_at {
-        println!("{}", blocked_follow_up(&blocked.reasons, true));
-    } else if mr.merged.is_empty() && !mr.skipped_merged.is_empty() {
-        println!("\nAll PRs in this stack are already merged.");
-    } else {
-        println!(
-            "\nDone. {} PR{} merged.",
-            mr.merged.len(),
-            if mr.merged.len() == 1 { "" } else { "s" }
-        );
-    }
 }
 
 /// Watch's poll cadence. Defaults to 30s. `JJPR_WATCH_POLL_SECS` overrides it;
@@ -1545,7 +1523,7 @@ fn detect_forge_for_cwd(preferred_remote: Option<&str>) -> Result<DetectedForge>
 
 #[cfg(test)]
 mod tests {
-    use super::merge_report::native_stack_advice;
+    use super::merge_report::{blocked_follow_up, native_stack_advice};
     use super::*;
     use jjpr::forge::types::{ChecksStatus, PrMergeability, ReviewSummary};
 
